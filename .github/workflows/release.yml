@@ -129,7 +129,7 @@ jobs:
           (cd "$DIST_DIR" && zip -r "../../$ZIP_NAME" ./*)
 
       - name: Upload firmware artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-${{ matrix.target.env }}
           path: pwnagotchi-zd-${{ matrix.target.env }}.zip
@@ -179,7 +179,7 @@ jobs:
           tar -czvf "$TAR_NAME" -C dist/linux-x86_64 .
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-x86_64
           path: pwnagotchi-zd-linux-x86_64.tar.gz
@@ -208,7 +208,7 @@ jobs:
           zip -j "$ZIP_NAME" LICENSE THIRD_PARTY_NOTICES.md
 
       - name: Upload Web artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-cyberdeck
           path: pwnagotchi-zd-web.zip
