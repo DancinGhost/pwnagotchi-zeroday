@@ -3,7 +3,8 @@
 // Shared Arduino-ESP32 Hardware Adapters for `zd::hal` contracts.
 //
 // Used across all ESP32 / ESP32-S3 targets (M5StickC, M5StickC Plus/Plus2, M5Stack Core2,
-// LILYGO T-Deck / T-Deck Plus) so radio scanning and NVS flash persistence live in one place.
+// LILYGO T-Deck / T-Deck Plus, CYD ESP32-2432S028) so radio scanning and NVS flash
+// persistence live in one place.
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -27,7 +28,9 @@ public:
     }
 
     bool startAsyncScan() override {
-        const int16_t rc = WiFi.scanNetworks(/*async=*/true, /*show_hidden=*/true);
+        // Strictly passive listen-only scan (no 802.11 probe requests transmitted).
+        const int16_t rc = WiFi.scanNetworks(
+            /*async=*/true, /*show_hidden=*/true, /*passive=*/true, /*max_ms_per_chan=*/360);
         return (rc == WIFI_SCAN_RUNNING || rc >= 0);
     }
 

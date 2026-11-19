@@ -57,6 +57,7 @@
   // --- DOM Elements ---
   const elScreen = document.getElementById('pwn-screen');
   const elViewport = document.getElementById('screen-viewport');
+  const elSrStatus = document.getElementById('sr-status');
   const elFloatingFx = document.getElementById('floating-fx');
   const elHeaderFace = document.getElementById('header-ascii-face');
   const elStatusLed = document.getElementById('status-led');
@@ -67,9 +68,23 @@
   const elSelectRes = document.getElementById('select-resolution');
   const elSelectShell = document.getElementById('select-shell');
   const elSelectFx = document.getElementById('select-fx');
+  const elBtnHotkeys = document.getElementById('btn-hotkeys');
   const elBtnSfx = document.getElementById('btn-sfx');
   const elBtnSnapPng = document.getElementById('btn-snap-png');
   const elBtnCopyAscii = document.getElementById('btn-copy-ascii');
+
+  let hotkeysEnabled = loadPref('hotkeys', 'on') !== 'off';
+  const cachedPageBtns = Array.from(document.querySelectorAll('[data-page]'));
+  const cachedEnvCards = Array.from(document.querySelectorAll('[data-env]'));
+  let cachedSwatches = [];
+  let lastCanvasSig = '';
+  let lastDashboardSig = '';
+
+  function announceSr(text) {
+    if (elSrStatus && text) {
+      elSrStatus.textContent = text;
+    }
+  }
 
   const elHwBtnA = document.getElementById('hw-btn-a');
   const elHwBtnB = document.getElementById('hw-btn-b');
@@ -206,6 +221,19 @@
 
   // --- Sync Companion Dashboard DOM ---
   function syncDashboardUi() {
+    const t = nowMs();
+    const pwnActive = !gState.isScanning && t < pwnLedUntilMs;
+    const roamSub = activeEnv === 'roam' ? sim.resolveRoamSubPreset(t) : '';
+    const dashSig =
+      gState.mood + '|' + gState.petName + '|' + gState.xp + '|' + gState.toyHandshakes + '|' +
+      gState.snacksFed + '|' + gState.peersMet + '|' + gState.peakApCount + '|' +
+      gState.isScanning + '|' + pwnActive + '|' + gState.isCharging + '|' +
+      activeEnv + '|' + roamSub + '|' + gState.page + '|' + gState.theme + '|' + gState.phrase;
+    if (dashSig === lastDashboardSig) {
+      return;
+    }
+    lastDashboardSig = dashSig;
+
     const face = logic.faceForMood(gState.mood);
     elHeaderFace.textContent = face.asciiFace;
     elTermPrompt.textContent = gState.petName + '@ttyACM0:~$';
@@ -228,29 +256,27 @@
     elStatPeak.textContent = String(gState.peakApCount);
 
     // Status LED
-    const t = nowMs();
     elStatusLed.classList.toggle('scanning', gState.isScanning);
-    elStatusLed.classList.toggle('pwn', !gState.isScanning && t < pwnLedUntilMs);
+    elStatusLed.classList.toggle('pwn', pwnActive);
     if (gState.isScanning) {
       elLedLabel.textContent = 'SWEEPING CH 1-13...';
-    } else if (t < pwnLedUntilMs) {
+    } else if (pwnActive) {
       elLedLabel.textContent = 'EAPOL TOY EVENT!';
     } else {
       const preset = sim.PRESETS[activeEnv] || sim.PRESETS.cafe;
       elLedLabel.textContent = gState.isCharging ? 'CHG \u2022 2.4GHZ SIM' : 'BAT \u2022 2.4GHZ SIM';
       const subLabel =
         activeEnv === 'roam'
-          ? 'ROAM (' + sim.resolveRoamSubPreset(t).toUpperCase() + ')'
+          ? 'ROAM (' + roamSub.toUpperCase() + ')'
           : preset.label.toUpperCase();
       elEnvIndicator.textContent = 'ENV: ' + subLabel;
     }
 
     // Active View Segment Buttons
-    const pageBtns = document.querySelectorAll('[data-page]');
-    pageBtns.forEach(function (btn) {
+    cachedPageBtns.forEach(function (btn) {
       const isSelected = btn.getAttribute('data-page') === gState.page;
       btn.classList.toggle('active', isSelected);
-      btn.setAttribute('aria-selected', String(isSelected));
+      btn.setAttribute('aria-pressed', String(isSelected));
     });
 
     // Active Theme Swatches & Theme Cycler Label
@@ -261,24 +287,28 @@
         activeSpec.name + ' \u2022 ' + (activeIdx + 1) + '/' + themes.THEME_COUNT;
       elActiveThemeLabel.title = activeSpec.blurb;
     }
-    const swatches = document.querySelectorAll('[data-theme]');
-    swatches.forEach(function (sw) {
+    cachedSwatches.forEach(function (sw) {
       const isPressed = sw.getAttribute('data-theme') === gState.theme;
       sw.classList.toggle('active', isPressed);
       sw.setAttribute('aria-pressed', String(isPressed));
     });
 
     // Active Environment Cards
-    const envCards = document.querySelectorAll('[data-env]');
-    envCards.forEach(function (card) {
+    cachedEnvCards.forEach(function (card) {
       const isPressed = card.getAttribute('data-env') === activeEnv;
       card.classList.toggle('active', isPressed);
       card.setAttribute('aria-pressed', String(isPressed));
     });
+
+    elScreen.setAttribute(
+      'aria-label',
+      gState.petName + ' display: ' + face.moodLabel + ', ' + gState.phrase +
+      ', ' + gState.latestScan.totalAps + ' nearby APs, theme ' + activeSpec.name
+    );
   }
 
   // --- Render Pixel Frame onto Canvas ---
-  function renderCurrentState() {
+  function renderCurrentState(force) {
     syncCanvasBuffers();
     const d = currentDims();
     const t = nowMs();
@@ -288,13 +318,24 @@
     const isBlinking = !gState.isScanning && blinkCycle > 4450;
 
     const frame = ui.buildUiFrame(gState, { width: d.width, height: d.height });
-    gfxMod.paintUiFrame(pixelBuf, frame, { blink: isBlinking });
+    const animKey = frame.themeEffect && frame.themeEffect !== 'None' ? frame.animTick : 0;
+    const canvasSig =
+      d.width + 'x' + d.height + '|' + frame.page + '|' + frame.theme + '|' + animKey + '|' +
+      isBlinking + '|' + frame.headerLine + '|' + frame.footerLine + '|' +
+      frame.face.moodLabel + '|' + (frame.toast && frame.toast.visible ? frame.toast.text : '') +
+      '|' + frame.phraseLines.join('/') + '|' + frame.spotlightLabel + '|' +
+      frame.radarRows.length + '|' + frame.spectrumSummary;
 
-    offImageData.data.set(pixelBuf.data);
-    offCtx.putImageData(offImageData, 0, 0);
+    if (force || canvasSig !== lastCanvasSig) {
+      lastCanvasSig = canvasSig;
+      gfxMod.paintUiFrame(pixelBuf, frame, { blink: isBlinking });
 
-    displayCtx.imageSmoothingEnabled = false;
-    displayCtx.drawImage(offCanvas, 0, 0, elScreen.width, elScreen.height);
+      offImageData.data.set(pixelBuf.data);
+      offCtx.putImageData(offImageData, 0, 0);
+
+      displayCtx.imageSmoothingEnabled = false;
+      displayCtx.drawImage(offCanvas, 0, 0, elScreen.width, elScreen.height);
+    }
 
     syncDashboardUi();
   }
@@ -304,7 +345,8 @@
     gState = logic.reduce(gState, { type: 'ButtonAPressed', nowMs: nowMs() });
     buzzer.clickA();
     logSerialStatus('BTN_A');
-    renderCurrentState();
+    announceSr('View switched to ' + gState.page);
+    renderCurrentState(true);
   }
 
   function triggerButtonBShort() {
@@ -312,7 +354,8 @@
     buzzer.clickB();
     logSerialStatus('BTN_B');
     checkAndRunScanCycle();
-    renderCurrentState();
+    announceSr('WiFi scan triggered');
+    renderCurrentState(true);
   }
 
   function persistCurrentTheme() {
@@ -325,7 +368,8 @@
     persistCurrentTheme();
     buzzer.themeSwap();
     logSerialStatus('THEME');
-    renderCurrentState();
+    announceSr('Theme switched to ' + themes.themeSpec(gState.theme).name);
+    renderCurrentState(true);
   }
 
   function triggerPetBoop() {
@@ -333,7 +377,8 @@
     buzzer.boop();
     spawnFloatingGlyphs(['\u2665', '*', '~'], '#ff5ca8');
     logSerialStatus('BOOP');
-    renderCurrentState();
+    announceSr(gState.petName + ' says: ' + gState.phrase);
+    renderCurrentState(true);
   }
 
   function triggerFeedSnack() {
@@ -404,6 +449,7 @@
       rmBtn.type = 'button';
       rmBtn.textContent = '\u00d7';
       rmBtn.title = 'Stop broadcasting ' + ap.ssid;
+      rmBtn.setAttribute('aria-label', 'Stop broadcasting ' + ap.ssid);
       rmBtn.addEventListener('click', function () {
         customAps.splice(idx, 1);
         renderCustomApTags();
@@ -522,7 +568,26 @@
   });
   window.addEventListener('pointercancel', clearBtnBHold);
 
+  // Full keyboard operability for Hardware Button B (Enter / Space).
+  elHwBtnB.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      if (ev.shiftKey) {
+        triggerThemeCycle(+1);
+      } else {
+        triggerButtonBShort();
+      }
+    }
+  });
+
   // --- Direct LCD Screen Touch / Boop ---
+  elViewport.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      triggerPetBoop();
+    }
+  });
+
   elViewport.addEventListener('click', function (ev) {
     const rect = elScreen.getBoundingClientRect();
     const d = currentDims();
@@ -573,6 +638,20 @@
     savePref('fx', elSelectFx.value);
   });
 
+  if (elBtnHotkeys) {
+    elBtnHotkeys.textContent = hotkeysEnabled ? 'KEYS: ON' : 'KEYS: OFF';
+    elBtnHotkeys.classList.toggle('active', hotkeysEnabled);
+    elBtnHotkeys.setAttribute('aria-pressed', String(hotkeysEnabled));
+    elBtnHotkeys.addEventListener('click', function () {
+      hotkeysEnabled = !hotkeysEnabled;
+      savePref('hotkeys', hotkeysEnabled ? 'on' : 'off');
+      elBtnHotkeys.textContent = hotkeysEnabled ? 'KEYS: ON' : 'KEYS: OFF';
+      elBtnHotkeys.classList.toggle('active', hotkeysEnabled);
+      elBtnHotkeys.setAttribute('aria-pressed', String(hotkeysEnabled));
+      announceSr('Single-key shortcuts ' + (hotkeysEnabled ? 'enabled' : 'disabled'));
+    });
+  }
+
   elBtnSfx.addEventListener('click', function () {
     const on = buzzer.toggle();
     elBtnSfx.textContent = on ? 'SFX: ON' : 'SFX: OFF';
@@ -581,7 +660,7 @@
   });
 
   elBtnSnapPng.addEventListener('click', function () {
-    renderCurrentState();
+    renderCurrentState(true);
     const link = document.createElement('a');
     link.download = 'pwnagotchi-' + gState.petName + '.png';
     link.href = elScreen.toDataURL('image/png');
@@ -594,13 +673,19 @@
     const frame = ui.buildUiFrame(gState, { width: d.width, height: d.height });
     const ascii = ui.renderAsciiPreview(frame);
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(ascii).then(function () {
-        const prev = elBtnCopyAscii.textContent;
-        elBtnCopyAscii.textContent = 'Copied!';
-        setTimeout(function () {
-          elBtnCopyAscii.textContent = prev;
-        }, 1200);
-      });
+      navigator.clipboard
+        .writeText(ascii)
+        .then(function () {
+          const prev = elBtnCopyAscii.textContent;
+          elBtnCopyAscii.textContent = 'Copied!';
+          announceSr('ASCII frame copied to clipboard');
+          setTimeout(function () {
+            elBtnCopyAscii.textContent = prev;
+          }, 1200);
+        })
+        .catch(function () {
+          appendLog('CLIPBOARD', 'Clipboard unavailable; ASCII frame printed below.', 'log-warn');
+        });
     }
     appendLog('ASCII_FRAME', '\n' + ascii.trimEnd());
   }
@@ -656,6 +741,7 @@
         renderCurrentState();
       });
       elSwatchRow.appendChild(sw);
+      cachedSwatches.push(sw);
     });
   }
 
@@ -994,8 +1080,9 @@
     }
   });
 
-  // --- Global Hardware Keyboard Shortcuts ---
+  // --- Global Hardware Keyboard Shortcuts (toggleable for WCAG 2.1.4) ---
   window.addEventListener('keydown', function (ev) {
+    if (!hotkeysEnabled) return;
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const tag = ev.target && ev.target.tagName ? ev.target.tagName.toLowerCase() : '';
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
@@ -1026,24 +1113,30 @@
     }
   });
 
-  // --- Main 20 FPS Firmware Loop (matching src/main.cpp 50ms pacing) ---
+  // --- Visibility-Gated Animation Loop (~16.7 FPS active, paused when tab hidden) ---
   logSerialStatus('BOOT');
   appendLog(
     'WEB_TOY',
     'Welcome to pwnagotchi-zeroday Web! Click [A], press [B] to scan, or type "help" below.',
     'log-cmd'
   );
-  renderCurrentState();
+  renderCurrentState(true);
 
-  setInterval(function () {
-    const t = nowMs();
-    checkAndRunScanCycle();
-    gState = logic.reduce(gState, {
-      type: 'Tick',
-      nowMs: t,
-      batteryPercent: batteryLevel,
-      isCharging: batteryCharging
-    });
-    renderCurrentState();
-  }, 60);
+  let lastFrameAt = 0;
+  function stepLoop(ts) {
+    if (!document.hidden && ts - lastFrameAt >= 60) {
+      lastFrameAt = ts;
+      const t = nowMs();
+      checkAndRunScanCycle();
+      gState = logic.reduce(gState, {
+        type: 'Tick',
+        nowMs: t,
+        batteryPercent: batteryLevel,
+        isCharging: batteryCharging
+      });
+      renderCurrentState(false);
+    }
+    window.requestAnimationFrame(stepLoop);
+  }
+  window.requestAnimationFrame(stepLoop);
 })();

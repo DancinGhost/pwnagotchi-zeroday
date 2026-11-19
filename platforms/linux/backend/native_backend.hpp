@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "zd/dot11.hpp"
 #include "zd/secops_hal.hpp"
 #include "dot11.hpp"
 #include "../app/clock.hpp"
@@ -74,7 +75,10 @@ public:
         // Drain up to a bounded number of frames per poll to keep the UI responsive.
         const int n = pcap_dispatch(handle_, 64, &NativeCaptureSource::trampoline,
                                     reinterpret_cast<u_char*>(this));
-        (void)n;
+        if (n < 0) {
+            lastError_ = pcap_geterr(handle_);
+            stop();
+        }
         return pending_;
     }
 
@@ -130,22 +134,23 @@ public:
             return res;
         }
         uint8_t ap[6], sta[6];
-        if (!parseMac(bssid, ap)) {
+        if (!zd::dot11::parseMac(bssid.c_str(), ap) || sec::isMulticastMac(bssid)) {
             res.transmitted = false;
             res.detail = "bad BSSID";
             return res;
         }
-        const bool broadcast = client.empty() || sec::isBroadcastMac(client);
+        const bool broadcast = client.empty() || sec::isBroadcastMac(sec::normalizeMac(client));
         if (broadcast) {
             std::memset(sta, 0xFF, 6);
-        } else if (!parseMac(client, sta)) {
+        } else if (!zd::dot11::parseMac(client.c_str(), sta)) {
             res.transmitted = false;
             res.detail = "bad client MAC";
             return res;
         }
 
+        const uint32_t safeCount = (count < 1u) ? 1u : ((count > kMaxBurst) ? kMaxBurst : count);
         int sent = 0;
-        for (uint32_t i = 0; i < count; ++i) {
+        for (uint32_t i = 0; i < safeCount; ++i) {
             // AP -> client (or broadcast)
             if (sendDeauth(sta, ap, ap)) {
                 ++sent;
@@ -155,26 +160,38 @@ public:
                 sendDeauth(ap, sta, ap);
             }
         }
+        if (sent == 0) {
+            // Drop potentially stale handle so a subsequent call reopens cleanly.
+            closeHandle();
+        }
         res.transmitted = sent > 0;
         res.detail = "pcap_sendpacket deauth x" + std::to_string(sent);
         return res;
     }
 
 private:
+    static constexpr uint32_t kMaxBurst = 1000u;
+
     bool ensureHandle() {
-        if (handle_ != nullptr) {
-            return true;
-        }
         if (monitor_ == nullptr || !monitor_->isMonitor()) {
+            closeHandle();
             lastError_ = "no monitor interface";
             return false;
         }
+        const std::string curIface = monitor_->monitorIface();
+        if (handle_ != nullptr) {
+            if (openedIface_ == curIface) {
+                return true;
+            }
+            closeHandle();
+        }
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
-        handle_ = pcap_open_live(monitor_->monitorIface().c_str(), 800, 0, 100, errbuf);
+        handle_ = pcap_open_live(curIface.c_str(), 800, 0, 100, errbuf);
         if (handle_ == nullptr) {
             lastError_ = errbuf;
             return false;
         }
+        openedIface_ = curIface;
         return true;
     }
 
@@ -183,49 +200,22 @@ private:
             pcap_close(handle_);
             handle_ = nullptr;
         }
+        openedIface_.clear();
     }
 
-    static bool parseMac(const std::string& s, uint8_t out[6]) {
-        const std::string n = sec::normalizeMac(s);
-        if (!sec::isValidMac(n)) {
-            return false;
-        }
-        unsigned v[6];
-        if (std::sscanf(n.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4],
-                        &v[5]) != 6) {
-            return false;
-        }
-        for (int i = 0; i < 6; ++i) {
-            out[i] = static_cast<uint8_t>(v[i] & 0xFF);
-        }
-        return true;
-    }
-
-    // Build + send one 802.11 deauth (reason 7: class-3 frame from nonassociated STA).
+    // Build + send one 802.11 deauth reusing the portable core frame builder.
     bool sendDeauth(const uint8_t* dst, const uint8_t* src, const uint8_t* bssid) {
-        uint8_t frame[8 + 24 + 2];
-        std::size_t n = 0;
+        uint8_t frame[8u + zd::dot11::kMgmtDeauthFrameLen];
         // Minimal radiotap header (version 0, length 8, no fields).
         const uint8_t rt[8] = {0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00};
         std::memcpy(frame, rt, sizeof(rt));
-        n += sizeof(rt);
-        // 802.11 deauth MAC header.
-        frame[n++] = 0xC0;  // frame control: type=mgmt, subtype=deauth
-        frame[n++] = 0x00;
-        frame[n++] = 0x00;  // duration
-        frame[n++] = 0x00;
-        std::memcpy(frame + n, dst, 6);   n += 6;
-        std::memcpy(frame + n, src, 6);   n += 6;
-        std::memcpy(frame + n, bssid, 6); n += 6;
-        frame[n++] = 0x00;  // sequence control
-        frame[n++] = 0x00;
-        frame[n++] = 0x07;  // reason code (7)
-        frame[n++] = 0x00;
-        return pcap_sendpacket(handle_, frame, static_cast<int>(n)) == 0;
+        const std::size_t bodyLen = zd::dot11::buildDeauthFrame(frame + sizeof(rt), dst, src, bssid);
+        return pcap_sendpacket(handle_, frame, static_cast<int>(sizeof(rt) + bodyLen)) == 0;
     }
 
     sec::IMonitorControl* monitor_;
     pcap_t* handle_ = nullptr;
+    std::string openedIface_;
     std::string lastError_;
 };
 

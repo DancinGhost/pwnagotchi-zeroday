@@ -52,12 +52,34 @@ inline std::string readFileToString(const std::string& path) {
     return ss.str();
 }
 
-inline std::string homeDir() {
-    const char* h = std::getenv("HOME");
-    if (h != nullptr && *h != '\0') {
-        return std::string(h);
+inline bool writeAllFd(int fd, const char* data, std::size_t len) {
+    std::size_t off = 0u;
+    while (off < len) {
+        const ssize_t n = ::write(fd, data + off, len - off);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (n == 0) {
+            return false;
+        }
+        off += static_cast<std::size_t>(n);
     }
-    if (struct passwd* pw = ::getpwuid(::getuid())) {
+    return true;
+}
+
+inline std::string homeDir() {
+    // When running privileged (e.g. under sudo), do not trust an inherited $HOME pointing
+    // into a non-root user's writable directory tree; resolve the effective UID's passwd entry.
+    if (::geteuid() != 0) {
+        const char* h = std::getenv("HOME");
+        if (h != nullptr && *h != '\0') {
+            return std::string(h);
+        }
+    }
+    if (struct passwd* pw = ::getpwuid(::geteuid())) {
         if (pw->pw_dir != nullptr && *pw->pw_dir != '\0') {
             return std::string(pw->pw_dir);
         }
@@ -80,6 +102,11 @@ inline void makeDirRecursive(const std::string& dir, mode_t mode = 0700) {
     }
 }
 
+struct MonitorBringUpResult {
+    std::string monitorIface;
+    bool killedNetworkManager = false;
+};
+
 // --- Monitor mode / channel control --------------------------------------------------
 
 class CliMonitorControl final : public sec::IMonitorControl {
@@ -87,12 +114,10 @@ public:
     // Slow (airmon-ng commonly takes seconds): brings an interface into monitor mode and
     // resolves the resulting interface name via `iw dev`. Touches no object state, so it
     // is safe to run on a worker thread; the caller commits the result via applyUp().
-    //
-    // NOTE: `airmon-ng check kill` stops NetworkManager/wpa_supplicant and will drop your
-    // managed WiFi connection — standard for monitor mode, but expect to go offline.
-    static std::string bringUpMonitor(const std::string& iface) {
+    static MonitorBringUpResult bringUpMonitorDetailed(const std::string& iface) {
+        MonitorBringUpResult res;
         if (!sec::isValidIfaceName(iface)) {
-            return {};
+            return res;
         }
         // Try non-destructive `iw` monitor mode switch first before falling back to airmon-ng.
         runCapture({"ip", "link", "set", iface, "down"});
@@ -100,17 +125,26 @@ public:
             runCapture({"ip", "link", "set", iface, "up"}).exitCode == 0) {
             const std::string mon = findMonitorInterface(iface);
             if (!mon.empty()) {
-                return mon;
+                res.monitorIface = mon;
+                res.killedNetworkManager = false;
+                return res;
             }
         }
         runCapture({"airmon-ng", "check", "kill"});
+        res.killedNetworkManager = true;
         runCapture({"airmon-ng", "start", "--", iface});
-        return findMonitorInterface(iface);  // "" if no monitor interface resulted
+        res.monitorIface = findMonitorInterface(iface);  // "" if no monitor interface resulted
+        return res;
     }
 
-    // Slow: tears down monitor mode on `monitorIface`. Touches no object state; the
-    // caller commits the result via applyDown().
-    static void takeDownMonitor(const std::string& monitorIface) {
+    static std::string bringUpMonitor(const std::string& iface) {
+        return bringUpMonitorDetailed(iface).monitorIface;
+    }
+
+    // Slow: tears down monitor mode on `monitorIface`. Only restarts NetworkManager if
+    // `restartNetworkManager` is true (i.e. `airmon-ng check kill` actually ran).
+    static void takeDownMonitor(const std::string& monitorIface,
+                                bool restartNetworkManager = false) {
         if (!sec::isValidIfaceName(monitorIface)) {
             return;
         }
@@ -118,49 +152,61 @@ public:
         runCapture({"ip", "link", "set", monitorIface, "down"});
         runCapture({"iw", "dev", monitorIface, "set", "type", "managed"});
         runCapture({"ip", "link", "set", monitorIface, "up"});
-        runCapture({"systemctl", "start", "NetworkManager"});
+        if (restartNetworkManager) {
+            runCapture({"systemctl", "start", "NetworkManager"});
+        }
+    }
+
+    // Static channel switcher safe to call from a worker thread.
+    static bool setChannelOnIface(const std::string& monitorIface, int channel) {
+        if (channel <= 0 || !sec::isValidIfaceName(monitorIface)) {
+            return false;
+        }
+        const CommandResult r =
+            runCapture({"iw", "dev", monitorIface, "set", "channel", std::to_string(channel)});
+        return r.exitCode == 0;
     }
 
     // Fast, UI-thread-only state commit from a bringUpMonitor()/takeDownMonitor() result.
-    void applyUp(const std::string& mon) {
+    void applyUp(const std::string& mon, bool killedNm = false) {
         if (mon.empty()) {
             isMonitor_ = false;
             monitorIface_.clear();
+            killedNetworkManager_ = false;
         } else {
             monitorIface_ = mon;
             isMonitor_ = true;
+            killedNetworkManager_ = killedNm;
         }
     }
     void applyDown() {
         isMonitor_ = false;
         monitorIface_.clear();
+        killedNetworkManager_ = false;
     }
 
-    // Synchronous convenience wrappers (bringUpMonitor/takeDownMonitor + the matching
-    // apply*()). Fine for one-shot, non-interactive CLI use; an interactive front-end
-    // driving a responsive UI loop should call the static halves directly from a worker
-    // thread instead (see AppController::startMonitor/stopMonitor).
+    bool killedNetworkManager() const { return killedNetworkManager_; }
+
+    // Synchronous convenience wrappers (fine for one-shot CLI use).
     std::string enableMonitor(const std::string& iface) override {
-        const std::string mon = bringUpMonitor(iface);
-        applyUp(mon);
-        return mon;
+        const MonitorBringUpResult r = bringUpMonitorDetailed(iface);
+        applyUp(r.monitorIface, r.killedNetworkManager);
+        return r.monitorIface;
     }
 
     void disableMonitor() override {
         if (!isMonitor_) {
             return;
         }
-        takeDownMonitor(monitorIface_);
+        takeDownMonitor(monitorIface_, killedNetworkManager_);
         applyDown();
     }
 
     bool setChannel(int channel) override {
-        if (!isMonitor_ || channel <= 0 || !sec::isValidIfaceName(monitorIface_)) {
+        if (!isMonitor_) {
             return false;
         }
-        const CommandResult r =
-            runCapture({"iw", "dev", monitorIface_, "set", "channel", std::to_string(channel)});
-        return r.exitCode == 0;
+        return setChannelOnIface(monitorIface_, channel);
     }
 
     bool isMonitor() const override { return isMonitor_; }
@@ -205,6 +251,7 @@ private:
     }
 
     bool isMonitor_ = false;
+    bool killedNetworkManager_ = false;
     std::string monitorIface_;
 };
 
@@ -261,6 +308,16 @@ public:
         const std::string csv = readFileToString(csvPath_);
         if (csv.empty()) {
             return frames;
+        }
+        // Bound in-memory deduplication tables so long-running captures cannot leak RAM.
+        if (seenApBeacons_.size() > kMaxSeenEntries) {
+            seenApBeacons_.clear();
+        }
+        if (seenStations_.size() > kMaxSeenEntries) {
+            seenStations_.clear();
+        }
+        if (seenProbes_.size() > kMaxSeenEntries) {
+            seenProbes_.clear();
         }
         const AirodumpDump dump = parseAirodumpCsv(csv);
         for (const AirodumpAp& ap : dump.aps) {
@@ -331,6 +388,7 @@ private:
         prefix_.clear();
     }
 
+    static constexpr std::size_t kMaxSeenEntries = 2048u;
     DetachedProcess proc_;
     std::string tempDir_;
     std::string prefix_;
@@ -513,8 +571,7 @@ public:
         if (fd >= 0) {
             ::fchmod(fd, 0600);
             const std::string entry = std::string(key.data(), key.size()) + "\n";
-            const ssize_t written = ::write(fd, entry.data(), entry.size());
-            (void)written;
+            (void)writeAllFd(fd, entry.data(), entry.size());
             ::close(fd);
         }
     }
@@ -528,16 +585,25 @@ private:
 class FileAuditLog final : public sec::IAuditLog {
 public:
     FileAuditLog() {
-        const std::string dir = homeDir() + "/.local/share/pwnagotchi-zeroday";
-        makeDirRecursive(dir);
+        const std::string dir = (::geteuid() == 0)
+                                    ? std::string("/var/log/pwnagotchi-zeroday")
+                                    : (homeDir() + "/.local/share/pwnagotchi-zeroday");
+        makeDirRecursive(dir, 0700);
         path_ = dir + "/audit.log";
     }
 
-    void record(const std::string& line) override {
-        // Enforce 0600 permissions and block symlink following so audit trail is private
+    explicit FileAuditLog(std::string customPath) : path_(std::move(customPath)) {}
+
+    bool record(const std::string& line) override {
+        // Enforce 0600 permissions, block symlink following, and fsync so audit is fail-closed.
         const int fd = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd < 0) {
-            return;
+            return false;
+        }
+        struct stat st {};
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            ::close(fd);
+            return false;
         }
         ::fchmod(fd, 0600);
         const std::time_t t = std::time(nullptr);
@@ -546,9 +612,9 @@ public:
         char ts[32] = {0};
         std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmBuf);
         const std::string entry = std::string(ts) + " " + line + "\n";
-        const ssize_t written = ::write(fd, entry.data(), entry.size());
-        (void)written;
+        const bool ok = writeAllFd(fd, entry.data(), entry.size()) && (::fsync(fd) == 0);
         ::close(fd);
+        return ok;
     }
 
     const std::string& path() const { return path_; }
@@ -587,8 +653,7 @@ public:
             return;
         }
         const std::string line = encodedLine + "\n";
-        const ssize_t written = ::write(fd_, line.data(), line.size());
-        (void)written;
+        (void)writeAllFd(fd_, line.data(), line.size());
     }
 
     bool active() const { return fd_ >= 0; }
@@ -607,8 +672,7 @@ inline bool saveEventsToFile(const std::string& path, const std::vector<sec::Sec
     ::fchmod(fd, 0600);
     for (const std::string& line : sec::encodeSecEvents(events)) {
         const std::string entry = line + "\n";
-        const ssize_t written = ::write(fd, entry.data(), entry.size());
-        if (written < 0) {
+        if (!writeAllFd(fd, entry.data(), entry.size())) {
             ::close(fd);
             return false;
         }
@@ -617,18 +681,56 @@ inline bool saveEventsToFile(const std::string& path, const std::vector<sec::Sec
     return true;
 }
 
-inline std::optional<std::vector<sec::SecEvent>> loadEventsFromFile(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
+inline std::optional<std::vector<sec::SecEvent>> loadEventsFromFile(
+    const std::string& path,
+    std::size_t maxBytes = 16u * 1024u * 1024u,
+    std::size_t maxLines = 200000u) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
         return std::nullopt;
     }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        return std::nullopt;
+    }
+    if (st.st_size > 0 && static_cast<std::size_t>(st.st_size) > maxBytes) {
+        ::close(fd);
+        return std::nullopt;
+    }
+    std::string content;
+    if (st.st_size > 0) {
+        content.reserve(static_cast<std::size_t>(st.st_size));
+    }
+    char buf[8192];
+    for (;;) {
+        const ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ::close(fd);
+            return std::nullopt;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (content.size() + static_cast<std::size_t>(n) > maxBytes) {
+            ::close(fd);
+            return std::nullopt;
+        }
+        content.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+
+    std::istringstream in(content);
     std::vector<std::string> lines;
     std::string line;
-    while (std::getline(in, line)) {
+    while (lines.size() < maxLines && std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
-        lines.push_back(line);
+        lines.push_back(std::move(line));
     }
     return sec::decodeSecEvents(lines);
 }

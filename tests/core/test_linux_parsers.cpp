@@ -196,6 +196,64 @@ void testMalformedAndTruncatedFrames() {
     const auto parsedNm = parseNmcliScanDetailed(dirtyNmcli);
     assert(parsedNm.size() == 1u);
     assert(parsedNm[0].ssid == "Evil[31mNet");
+
+    // Malformed BSSID lines in nmcli / airodump are dropped
+    assert(parseNmcliScanDetailed("not-a-mac:Fake:6:WPA2:80\n").empty());
+    const std::string commaCsv =
+        "BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, "
+        "Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key\r\n"
+        "00:11:22:33:44:55, 2026-01-01, 2026-01-01, 6, 130, WPA2, CCMP, PSK, -42, -5, 0, "
+        "0.0.0.0, 12, Coffee, Tea, \r\n";
+    const AirodumpDump cd = parseAirodumpCsv(commaCsv);
+    assert(cd.aps.size() == 1u);
+    assert(cd.aps[0].ssid == "Coffee,Tea");
+    assert(cd.aps[0].beacons == 0u);
+}
+
+void testEapolPmkidAndRsnOui() {
+    // 1. Non-IEEE AKM OUI with suite type 8 must NOT be misclassified as WPA3.
+    const uint8_t vendorRsn[] = {
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,  // version + group
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,  // 1 pairwise
+        0x01, 0x00, 0xAA, 0xBB, 0xCC, 0x08   // 1 AKM with non-IEEE OUI, type 8
+    };
+    assert(encryptionFromRsn(vendorRsn, sizeof(vendorRsn)) == zd::sec::Encryption::Wpa2);
+
+    const uint8_t ieeeSaeRsn[] = {
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x08   // IEEE 00:0F:AC + SAE(8)
+    };
+    assert(encryptionFromRsn(ieeeSaeRsn, sizeof(ieeeSaeRsn)) == zd::sec::Encryption::Wpa3);
+
+    // 2. EAPOL-Key frame whose MAC address happens to contain 00:0F:AC:04 must NOT trigger PMKID.
+    std::vector<uint8_t> eapolNoPmkid = minimalRadiotap();
+    append(eapolNoPmkid, {0x08, 0x02, 0x00, 0x00});                 // Data, FromDS
+    append(eapolNoPmkid, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66});     // addr1 DA
+    append(eapolNoPmkid, {0x00, 0x0F, 0xAC, 0x04, 0xAA, 0xBB});     // addr2 BSSID has 00:0F:AC:04!
+    append(eapolNoPmkid, {0x00, 0x0F, 0xAC, 0x04, 0xAA, 0xBB});     // addr3 SA
+    append(eapolNoPmkid, {0x00, 0x00});
+    append(eapolNoPmkid, {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E});  // LLC/SNAP EAPOL
+    append(eapolNoPmkid, {0x02, 0x03, 0x00, 0x5F});                 // EAPOL v2, type=Key(3), len=95
+    eapolNoPmkid.insert(eapolNoPmkid.end(), 95u, 0x00);             // 95-byte EAPOL-Key body, keyDataLen=0
+    const auto d1 = decodeRadiotapFrame(eapolNoPmkid.data(), eapolNoPmkid.size(), 100u);
+    assert(d1.has_value());
+    assert(d1->kind == zd::sec::FrameKind::Eapol);
+    assert(d1->bssid == "00:0f:ac:04:aa:bb");
+
+    // 3. EAPOL-Key frame with a real non-zero PMKID KDE in Key Data triggers FrameKind::Pmkid.
+    std::vector<uint8_t> eapolWithPmkid = eapolNoPmkid;
+    // Set keyDataLen = 22 (bytes 93..94 of EAPOL-Key body)
+    eapolWithPmkid[eapolWithPmkid.size() - 2u] = 0x00;
+    eapolWithPmkid[eapolWithPmkid.size() - 1u] = 22u;
+    // Append KDE: tag 0xDD, len 20, OUI 00:0F:AC, type 04, 16-byte non-zero PMKID
+    append(eapolWithPmkid, {0xDD, 20u, 0x00, 0x0F, 0xAC, 0x04});
+    for (uint8_t b = 1; b <= 16u; ++b) {
+        eapolWithPmkid.push_back(b);
+    }
+    const auto d2 = decodeRadiotapFrame(eapolWithPmkid.data(), eapolWithPmkid.size(), 200u);
+    assert(d2.has_value());
+    assert(d2->kind == zd::sec::FrameKind::Pmkid);
 }
 
 }  // namespace
@@ -208,6 +266,7 @@ int main() {
     testDecodeDeauth();
     testDecodedFrameFeedsEngine();
     testMalformedAndTruncatedFrames();
+    testEapolPmkidAndRsnOui();
     std::cout << "[linux-parsers] all backend parser/decoder tests passed\n";
     return 0;
 }

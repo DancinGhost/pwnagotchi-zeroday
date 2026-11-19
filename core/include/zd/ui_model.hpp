@@ -271,6 +271,8 @@ struct UiFrame {
 
     // Theming
     ThemeId theme;
+    ThemeEffect themeEffect;
+    uint32_t animTick;
     ToastView toast;
 };
 
@@ -535,6 +537,8 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         chartMaxBarH,
         spectrumSummary,
         state.theme,
+        themeSpec(state.theme).effect,
+        state.uptimeMs / 140u,
         buildThemeToast(state, dims, compact, bodyTop, bodyBottom)
     };
 }

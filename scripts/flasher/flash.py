@@ -9,16 +9,20 @@ import os
 import subprocess
 import sys
 
+
 def get_serial_ports():
     """Detect available serial / USB ports on Windows, macOS, and Linux."""
     ports = []
-    if sys.platform.startswith('win'):
+    if sys.platform.startswith("win"):
         try:
             import serial.tools.list_ports
+
             ports = [p.device for p in serial.tools.list_ports.comports()]
         except ImportError:
-            # Fallback if pyserial not installed: test COM ports 1..32
-            import serial
+            try:
+                import serial
+            except ImportError:
+                return []
             for i in range(1, 33):
                 port = f"COM{i}"
                 try:
@@ -27,25 +31,58 @@ def get_serial_ports():
                     ports.append(port)
                 except Exception:
                     pass
-    elif sys.platform.startswith('darwin'):
-        ports = glob.glob('/dev/cu.usbserial*') + glob.glob('/dev/cu.usbmodem*') + glob.glob('/dev/cu.wchusbserial*')
+    elif sys.platform.startswith("darwin"):
+        ports = (
+            glob.glob("/dev/cu.usbserial*")
+            + glob.glob("/dev/cu.usbmodem*")
+            + glob.glob("/dev/cu.wchusbserial*")
+        )
     else:
         # Linux
-        ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
+        ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
     return sorted(list(set(ports)))
+
+
+def is_safe_port_name(port):
+    """Reject empty or flag-like port names (e.g. starting with '-')."""
+    if not port or port.startswith("-"):
+        return False
+    return all(ord(c) >= 32 and ord(c) <= 126 for c in port)
+
+
+def locate_factory_binary(search_dir="."):
+    """Locate a merged *factory*.bin image suitable for flashing at offset 0x0."""
+    pattern = os.path.join(search_dir, "*factory*.bin")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        return None
+    for candidate in matches:
+        base = os.path.basename(candidate)
+        if not base.startswith("-"):
+            return candidate
+    return None
+
 
 def ensure_esptool():
     """Ensure esptool is installed and accessible."""
-    # Check if esptool.py is in PATH
     try:
-        subprocess.run(["esptool.py", "version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        subprocess.run(
+            ["esptool.py", "version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
         return ["esptool.py"]
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
 
-    # Check python -m esptool
     try:
-        subprocess.run([sys.executable, "-m", "esptool", "version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        subprocess.run(
+            [sys.executable, "-m", "esptool", "version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
         return [sys.executable, "-m", "esptool"]
     except (subprocess.SubprocessError, FileNotFoundError):
         pass
@@ -59,41 +96,40 @@ def ensure_esptool():
         print("[!] Aborted. Install esptool manually: python3 -m pip install 'esptool==4.8.1'")
         sys.exit(1)
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--only-binary", ":all:", "esptool==4.8.1"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "esptool==4.8.1"])
         return [sys.executable, "-m", "esptool"]
     except Exception as err:
         print(f"[!] Failed to install esptool: {err}")
         print("    Please install esptool manually: python3 -m pip install 'esptool==4.8.1'")
         sys.exit(1)
 
+
 def main():
     print("==================================================")
     print("      pwnagotchi-zeroday Easy Board Flasher       ")
     print("==================================================")
 
-    # 1. Locate factory binary in current directory
-    bins = glob.glob("*factory*.bin")
-    if not bins:
-        bins = glob.glob("*.bin")
-
-    if not bins:
-        print("[!] Error: No .bin firmware found in this folder.")
+    # 1. Locate merged factory binary in current directory (never flash an unmerged .bin at 0x0)
+    factory_bin = locate_factory_binary(".")
+    if not factory_bin:
+        print("[!] Error: No merged *factory*.bin image found in this folder.")
+        print("    Refusing to flash unmerged bootloader/firmware images at offset 0x0.")
+        print("    Download a release archive or run scripts/package_release.sh with esptool.")
         sys.exit(1)
 
-    factory_bin = bins[0]
-    for b in bins:
-        if "factory" in b:
-            factory_bin = b
-            break
+    display_bin = os.path.basename(factory_bin)
+    print(f"[*] Target Firmware: {display_bin}")
 
-    print(f"[*] Target Firmware: {factory_bin}")
-
-    # Determine chip family from filename or prompt
+    # Determine chip family from filename
     chip_arg = []
-    if "t-deck" in factory_bin.lower() or "s3" in factory_bin.lower():
+    lower_bin = display_bin.lower()
+    if "t-deck" in lower_bin or "s3" in lower_bin:
         chip_arg = ["--chip", "esp32s3"]
         print("[*] Detected Board: ESP32-S3 (LILYGO T-Deck / T-Deck Plus)")
-    elif "m5" in factory_bin.lower() or "stick" in factory_bin.lower() or "core2" in factory_bin.lower():
+    elif "cyd" in lower_bin or "2432" in lower_bin:
+        chip_arg = ["--chip", "esp32"]
+        print("[*] Detected Board: ESP32 (CYD ESP32-2432S028)")
+    elif "m5" in lower_bin or "stick" in lower_bin or "core2" in lower_bin:
         chip_arg = ["--chip", "esp32"]
         print("[*] Detected Board: ESP32 (M5StickC / Plus2 / Core2)")
 
@@ -106,6 +142,9 @@ def main():
         print("    Please plug in your board via USB.")
         manual = input("    Enter serial port name (or press Enter to let esptool auto-probe): ").strip()
         if manual:
+            if not is_safe_port_name(manual):
+                print(f"[!] Error: invalid serial port name '{manual}'.")
+                sys.exit(1)
             selected_port = manual
     elif len(ports) == 1:
         selected_port = ports[0]
@@ -124,12 +163,11 @@ def main():
     # 3. Ensure esptool is ready
     esptool_cmd = ensure_esptool()
 
-    # 4. Construct flashing command
-    # Unified factory image is flashed at offset 0x0
+    # 4. Construct flashing command (unified factory image at offset 0x0)
     cmd = esptool_cmd + chip_arg
     if selected_port:
         cmd += ["--port", selected_port]
-    cmd += ["--baud", "921600", "write_flash", "-z", "0x0", factory_bin]
+    cmd += ["--baud", "921600", "write_flash", "-z", "0x0", display_bin]
 
     print("\n[*] Starting flash process...")
     print(f"    Running: {' '.join(cmd)}\n")
@@ -137,7 +175,6 @@ def main():
     try:
         ret = subprocess.run(cmd)
         if ret.returncode != 0:
-            # Fallback to lower baud rate if 921600 failed
             print("\n[!] High-speed flash failed. Retrying at 115200 baud...")
             cmd[cmd.index("921600")] = "115200"
             ret = subprocess.run(cmd)
@@ -150,8 +187,11 @@ def main():
             print("==================================================")
         else:
             print("\n[!] Flashing failed. Please check your USB cable and board connection.")
+            sys.exit(1)
     except Exception as e:
         print(f"\n[!] Error during flashing: {e}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

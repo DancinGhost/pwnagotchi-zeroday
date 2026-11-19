@@ -102,19 +102,30 @@ void testAuthorizationGate() {
     auth.operatorConfirmed = true;
     assert(authorize(auth, "aa:bb:cc:dd:ee:ff") == AuthDecision::BlockedNotAllowlisted);
 
-    // Allow-listed (case/format-insensitive) => allowed.
-    auth.allow("AABBCCDDEEFF");
+    // Allow-listed (case/format-insensitive) => allowed; disallow revokes it cleanly.
+    assert(auth.allow("AABBCCDDEEFF"));
+    assert(!auth.allow("not-a-mac"));
+    assert(!auth.allow("ff:ff:ff:ff:ff:ff"));
+    assert(!auth.allow("01:00:5e:00:00:fb"));  // multicast rejected
+    assert(auth.isAllowed("aa:bb:cc:dd:ee:ff"));
     assert(authorize(auth, "aa:bb:cc:dd:ee:ff") == AuthDecision::Allowed);
     assert(authorize(auth, "11:22:33:44:55:66") == AuthDecision::BlockedNotAllowlisted);
+    assert(auth.disallow("AA-BB-CC-DD-EE-FF"));
+    assert(!auth.isAllowed("aa:bb:cc:dd:ee:ff"));
+    assert(!auth.disallow("aa:bb:cc:dd:ee:ff"));
+    assert(authorize(auth, "aa:bb:cc:dd:ee:ff") == AuthDecision::BlockedNotAllowlisted);
 
-    // allowAll wildcard still requires confirmation.
+    // allowAll wildcard still requires confirmation AND a valid unicast MAC.
     Authorization wild;
     wild.allowAll = true;
     assert(authorize(wild, "aa:bb:cc:dd:ee:ff") == AuthDecision::BlockedUnconfirmed);
     wild.operatorConfirmed = true;
-    assert(authorize(wild, "any") == AuthDecision::Allowed);
-    // Broadcast/empty BSSID is always rejected even with wildcard
+    assert(authorize(wild, "aa:bb:cc:dd:ee:ff") == AuthDecision::Allowed);
+    assert(authorize(wild, "any") == AuthDecision::BlockedNotAllowlisted);
+    assert(authorize(wild, "--flag") == AuthDecision::BlockedNotAllowlisted);
+    // Broadcast/multicast/empty BSSID is always rejected even with wildcard.
     assert(authorize(wild, "ff:ff:ff:ff:ff:ff") == AuthDecision::BlockedNotAllowlisted);
+    assert(authorize(wild, "01:00:5e:00:00:fb") == AuthDecision::BlockedNotAllowlisted);
     assert(authorize(wild, "") == AuthDecision::BlockedNotAllowlisted);
 }
 
@@ -137,6 +148,13 @@ void testOpenDowngrade() {
     // A different BSSID now broadcasts the same SSID as Open => downgrade/impersonation.
     s = reduce(s, ApObserved{1050u, "de:ad:be:ef:00:99", "SecureCorp", 6, -50, Encryption::Open});
     assert(hasAlert(s, AlertKind::OpenDowngrade, "de:ad:be:ef:00:99"));
+    assert(countAlerts(s, AlertKind::OpenDowngrade) == 1u);
+    // Cooldown prevents rogue open beacons from flooding the alert ring.
+    for (uint32_t i = 1; i <= 20u; ++i) {
+        s = reduce(s, ApObserved{1050u + i * 100u, "de:ad:be:ef:00:99", "SecureCorp", 6, -50,
+                                 Encryption::Open});
+    }
+    assert(countAlerts(s, AlertKind::OpenDowngrade) == 1u);
 }
 
 void testDeauthFloodDetection() {
@@ -194,7 +212,7 @@ void testWpsFlag() {
 
 void testStationProbeTracking() {
     SecState s;
-    const std::string client = "11:22:33:44:55:66";
+    const std::string client = "12:22:33:44:55:66";
 
     s = reduce(s, ProbeRequestObserved{1000u, client, "HomeNet"});
     assert(findStation(s, client) != nullptr);
@@ -232,7 +250,7 @@ void testStationProbeTracking() {
     assert(findStation(s, "aa:bb:cc:00:00:01") == nullptr);
 
     // stationsByActivity sorts most-active first.
-    s = reduce(s, ProbeRequestObserved{1500u, "77:88:99:aa:bb:cc", "Solo"});
+    s = reduce(s, ProbeRequestObserved{1500u, "76:88:99:aa:bb:cc", "Solo"});
     const std::vector<Station> ranked = stationsByActivity(s);
     assert(ranked.front().mac == client);
 }
@@ -271,8 +289,8 @@ void testSessionRecordReplay() {
     std::vector<SecEvent> events = {
         ApObserved{1000u, "aa:bb:cc:00:00:01", "Weird|Name\\With\nNewline", 6, -40,
                    Encryption::Wpa2, true},
-        ClientObserved{1100u, "aa:bb:cc:00:00:01", "11:22:33:44:55:66"},
-        ProbeRequestObserved{1150u, "11:22:33:44:55:66", "CoffeeShop"},
+        ClientObserved{1100u, "aa:bb:cc:00:00:01", "12:22:33:44:55:66"},
+        ProbeRequestObserved{1150u, "12:22:33:44:55:66", "CoffeeShop"},
         DataFrameObserved{1200u, "aa:bb:cc:00:00:01"},
         DeauthObserved{1300u, "aa:bb:cc:00:00:01", "src", "dst"},
         HandshakeObserved{1400u, "aa:bb:cc:00:00:01"},
@@ -297,8 +315,8 @@ void testSessionRecordReplay() {
     assert(replayed.totalPmkids == original.totalPmkids);
     assert(replayed.blockedInjections == original.blockedInjections);
     assert(replayed.stations.size() == original.stations.size());
-    assert(findStation(replayed, "11:22:33:44:55:66")->probedSsids ==
-           findStation(original, "11:22:33:44:55:66")->probedSsids);
+    assert(findStation(replayed, "12:22:33:44:55:66")->probedSsids ==
+           findStation(original, "12:22:33:44:55:66")->probedSsids);
 
     // A corrupt/truncated line is skipped, not fatal.
     std::vector<std::string> withJunk = lines;
@@ -451,7 +469,7 @@ void testCollectionRingCapsAndWeakProbes() {
 
 void testStationZeroTimestampAndClockSkew() {
     SecState s;
-    const std::string client = "11:22:33:44:55:66";
+    const std::string client = "12:22:33:44:55:66";
     s = reduce(s, ProbeRequestObserved{0u, client, "Home"});
     s = reduce(s, ProbeRequestObserved{5000u, client, "Work"});
     const Station* st = findStation(s, client);
@@ -463,6 +481,53 @@ void testStationZeroTimestampAndClockSkew() {
     s = reduce(s, ApObserved{2000u, "aa:bb:cc:00:00:01", "Lab", 6, -40, Encryption::Wpa2});
     s = reduce(s, ApObserved{2100u, "aa:bb:cc:00:00:02", "Lab", 6, -45, Encryption::Open});
     assert(deriveSecMood(s, 1500u) == SecMood::Alarmed);
+}
+
+void testHardeningInvariants() {
+    // 1. Fail-closed audit sink refuses transmission when audit persistence fails.
+    struct FailingAudit final : public IAuditLog {
+        bool record(const std::string&) override { return false; }
+    } badAudit;
+
+    SecSession sess;
+    SpyInjector inj;
+    const std::string bssid = "02:aa:bb:cc:dd:01";
+    sess.authorization().operatorConfirmed = true;
+    assert(sess.authorization().allow(bssid));
+    const InjectResult blocked = sess.requestDeauth(inj, bssid, "", 5u, 1000u, &badAudit);
+    assert(blocked.decision == AuthDecision::BlockedAuditFailed);
+    assert(!blocked.transmitted);
+    assert(inj.sent == 0);
+    assert(sess.state().blockedInjections == 1u);
+
+    // 2. Multicast MACs never create phantom stations; roaming decrements prior AP clientCount.
+    SecState s;
+    const uint64_t rev0 = s.revision;
+    s = reduce(std::move(s), ApObserved{100u, "02:00:00:00:00:01", "AP1\x1b[31m", 1, -40,
+                                        Encryption::Wpa2});
+    assert(s.revision == rev0 + 1u);
+    assert(findTarget(s, "02:00:00:00:00:01")->ssid == "AP1[31m");  // ESC stripped
+    s = reduce(std::move(s), ApObserved{110u, "02:00:00:00:00:02", "AP2", 6, -45,
+                                        Encryption::Wpa2});
+    s = reduce(std::move(s), ClientObserved{120u, "02:00:00:00:00:01", "01:00:5e:00:00:fb"});
+    assert(findTarget(s, "02:00:00:00:00:01")->clientCount == 0u);  // multicast ignored
+    s = reduce(std::move(s), ClientObserved{130u, "02:00:00:00:00:01", "02:11:22:33:44:55"});
+    assert(findTarget(s, "02:00:00:00:00:01")->clientCount == 1u);
+    s = reduce(std::move(s), ClientObserved{140u, "02:00:00:00:00:02", "02:11:22:33:44:55"});
+    assert(findTarget(s, "02:00:00:00:00:01")->clientCount == 0u);  // decremented on roam
+    assert(findTarget(s, "02:00:00:00:00:02")->clientCount == 1u);
+
+    // 3. DeauthTracker recentMs is strictly bounded under high-rate flood.
+    for (uint32_t i = 0; i < 200u; ++i) {
+        s = reduce(std::move(s), DeauthObserved{2000u + i, "02:00:00:00:00:01", "", ""});
+    }
+    assert(!s.deauthTrackers.empty());
+    assert(s.deauthTrackers[0].recentMs.size() <= kMaxDeauthTimestamps);
+
+    // 4. Embedded zero-retention mode keeps events_ empty.
+    sess.setMaxRecordedEvents(0u);
+    sess.dispatch(DataFrameObserved{3000u, bssid});
+    assert(sess.events().empty());
 }
 
 }  // namespace
@@ -489,6 +554,7 @@ int main() {
     testAlertRingCapCounter();
     testCollectionRingCapsAndWeakProbes();
     testStationZeroTimestampAndClockSkew();
+    testHardeningInvariants();
     std::cout << "[secops] all security-engine tests passed\n";
     return 0;
 }

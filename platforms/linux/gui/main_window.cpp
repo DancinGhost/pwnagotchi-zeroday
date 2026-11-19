@@ -9,8 +9,10 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QKeySequence>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStatusBar>
@@ -24,10 +26,48 @@
 namespace zd {
 namespace linux_gui {
 
+namespace {
+
+// Update an existing QTableWidgetItem in place or allocate one if absent (avoids recreating
+// thousands of items every tick).
+QTableWidgetItem* setCellText(QTableWidget* tbl, int row, int col, const QString& text) {
+    QTableWidgetItem* item = tbl->item(row, col);
+    if (item == nullptr) {
+        item = new QTableWidgetItem(text);
+        tbl->setItem(row, col, item);
+    } else if (item->text() != text) {
+        item->setText(text);
+    }
+    return item;
+}
+
+// High-contrast badge styling (>= 6.5:1 on both light and dark system themes).
+void styleWarnBadge(QTableWidgetItem* item, bool active) {
+    if (active) {
+        item->setBackground(QColor(255, 243, 205));
+        item->setForeground(QColor(122, 62, 0));
+    } else {
+        item->setData(Qt::BackgroundRole, QVariant());
+        item->setData(Qt::ForegroundRole, QVariant());
+    }
+}
+
+void styleAllowedBadge(QTableWidgetItem* item, bool active) {
+    if (active) {
+        item->setBackground(QColor(220, 252, 231));
+        item->setForeground(QColor(20, 83, 45));
+    } else {
+        item->setData(Qt::BackgroundRole, QVariant());
+        item->setData(Qt::ForegroundRole, QVariant());
+    }
+}
+
+}  // namespace
+
 MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     : QMainWindow(parent), app_(app) {
     setWindowTitle("pwnagotchi-zeroday — Linux");
-    resize(1040, 640);
+    resize(1080, 660);
 
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
@@ -40,44 +80,72 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     auto* statusBox = new QVBoxLayout();
     auto* statusHeader = new QHBoxLayout();
     status_ = new QLabel("booting…", central);
+    status_->setTextFormat(Qt::PlainText);
     status_->setStyleSheet("font-weight:bold; font-size:14px;");
     secMoodLabel_ = new QLabel("SEC: CALM", central);
+    secMoodLabel_->setTextFormat(Qt::PlainText);
     secMoodLabel_->setStyleSheet(
-        "font-weight:bold; padding:2px 6px; border-radius:4px; background:#145a32; color:#fff;");
+        "font-weight:bold; padding:2px 6px; border-radius:4px; background:#145a32; color:#ffffff;");
+    lastSecMoodStyled_ = static_cast<int>(sec::SecMood::Calm);
     statusHeader->addWidget(status_, 1);
     statusHeader->addWidget(secMoodLabel_, 0);
+
     phrase_ = new QLabel("", central);
+    phrase_->setTextFormat(Qt::PlainText);
     phrase_->setWordWrap(true);
     engineLabel_ = new QLabel("", central);
+    engineLabel_->setTextFormat(Qt::PlainText);
     statusBox->addLayout(statusHeader);
     statusBox->addWidget(phrase_);
     statusBox->addWidget(engineLabel_);
 
     auto* btnRow = new QHBoxLayout();
-    auto* scanBtn = new QPushButton("Scan", central);
-    monitorBtn_ = new QPushButton("Start Monitor", central);
-    auto* themeBtn = new QPushButton("Theme", central);
-    auto* viewBtn = new QPushButton("View", central);
-    auto* loadBtn = new QPushButton("Load Session…", central);
-    auto* saveBtn = new QPushButton("Save Session…", central);
+    auto* scanBtn = new QPushButton("&Scan", central);
+    monitorBtn_ = new QPushButton("Start &Monitor", central);
+    auto* prevThemeBtn = new QPushButton("◀ Theme", central);
+    prevThemeBtn->setAccessibleName("Previous Theme");
+    auto* themeBtn = new QPushButton("Theme ▶", central);
+    themeBtn->setAccessibleName("Next Theme");
+    auto* viewBtn = new QPushButton("&View", central);
+    auto* loadBtn = new QPushButton("&Load…", central);
+    auto* saveBtn = new QPushButton("Sa&ve…", central);
     btnRow->addWidget(scanBtn);
     btnRow->addWidget(monitorBtn_);
+    btnRow->addWidget(prevThemeBtn);
     btnRow->addWidget(themeBtn);
     btnRow->addWidget(viewBtn);
     btnRow->addWidget(loadBtn);
     btnRow->addWidget(saveBtn);
     statusBox->addLayout(btnRow);
 
+    // Channel control strip for monitor mode.
+    auto* chRow = new QHBoxLayout();
+    auto* chLabel = new QLabel("Monitor &channel:", central);
+    channelSpin_ = new QSpinBox(central);
+    channelSpin_->setRange(1, 177);
+    channelSpin_->setValue(6);
+    channelSpin_->setAccessibleName("Monitor Channel");
+    chLabel->setBuddy(channelSpin_);
+    channelBtn_ = new QPushButton("Set Channel", central);
+    channelBtn_->setEnabled(false);
+    chRow->addWidget(chLabel);
+    chRow->addWidget(channelSpin_);
+    chRow->addWidget(channelBtn_);
+    chRow->addStretch(1);
+    statusBox->addLayout(chRow);
+
     // --- Authorization / offensive panel ---
     auto* authGroup = new QGroupBox("Offensive controls (authorized use only)", central);
     auto* authLayout = new QVBoxLayout(authGroup);
     authBanner_ = new QLabel(central);
+    authBanner_->setTextFormat(Qt::PlainText);
     authBanner_->setWordWrap(true);
     authCheck_ = new QCheckBox("I am authorized to transmit against the allow-listed targets",
                                central);
-    auto* allowBtn = new QPushButton("Allow selected BSSID", central);
-    deauthBtn_ = new QPushButton("Deauth selected…", central);
-    deauthBtn_->setStyleSheet("color:#b00; font-weight:bold;");
+    auto* allowBtn = new QPushButton("&Allow / Remove BSSID", central);
+    deauthBtn_ = new QPushButton("&Deauth selected…", central);
+    deauthBtn_->setStyleSheet("font-weight:bold;");
+    deauthBtn_->setEnabled(false);
     authLayout->addWidget(authBanner_);
     authLayout->addWidget(authCheck_);
     auto* authBtnRow = new QHBoxLayout();
@@ -87,6 +155,7 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     statusBox->addWidget(authGroup);
 
     channelsLabel_ = new QLabel(central);
+    channelsLabel_->setTextFormat(Qt::PlainText);
     channelsLabel_->setWordWrap(true);
     channelsLabel_->setStyleSheet("font-family:monospace;");
     statusBox->addWidget(channelsLabel_);
@@ -99,9 +168,9 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     auto* split = new QSplitter(Qt::Horizontal, central);
 
     tabs_ = new QTabWidget(split);
-    table_ = new QTableWidget(0, 8, tabs_);
+    table_ = new QTableWidget(0, 9, tabs_);
     table_->setHorizontalHeaderLabels(
-        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS", "Clients", "Capture"});
+        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS", "Clients", "Capture", "Allowed"});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -121,8 +190,11 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
 
     auto* alertBox = new QWidget(split);
     auto* alertLayout = new QVBoxLayout(alertBox);
-    alertLayout->addWidget(new QLabel("Defensive alerts", alertBox));
+    auto* alertTitle = new QLabel("Defensive alerts", alertBox);
     alerts_ = new QListWidget(alertBox);
+    alerts_->setAccessibleName("Defensive alerts list");
+    alertTitle->setBuddy(alerts_);
+    alertLayout->addWidget(alertTitle);
     alertLayout->addWidget(alerts_);
     split->addWidget(alertBox);
     split->setStretchFactor(0, 3);
@@ -132,9 +204,11 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     setCentralWidget(central);
     statusBar()->showMessage(QString("Audit log: %1").arg(QString::fromStdString(app_.auditPath())));
 
-    // --- Wiring ---
+    // --- Wiring & Keyboard Shortcuts ---
     connect(scanBtn, &QPushButton::clicked, this, &MainWindow::onScan);
     connect(monitorBtn_, &QPushButton::clicked, this, &MainWindow::onToggleMonitor);
+    connect(channelBtn_, &QPushButton::clicked, this, &MainWindow::onSetChannel);
+    connect(prevThemeBtn, &QPushButton::clicked, this, &MainWindow::onPrevTheme);
     connect(themeBtn, &QPushButton::clicked, this, &MainWindow::onCycleTheme);
     connect(viewBtn, &QPushButton::clicked, this, &MainWindow::onCycleView);
     connect(loadBtn, &QPushButton::clicked, this, &MainWindow::onLoadSession);
@@ -142,6 +216,13 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     connect(authCheck_, &QCheckBox::toggled, this, &MainWindow::onAuthToggled);
     connect(allowBtn, &QPushButton::clicked, this, &MainWindow::onAllowSelected);
     connect(deauthBtn_, &QPushButton::clicked, this, &MainWindow::onDeauthSelected);
+
+    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_O), this), &QShortcut::activated,
+            this, &MainWindow::onLoadSession);
+    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_S), this), &QShortcut::activated,
+            this, &MainWindow::onSaveSession);
+    connect(new QShortcut(QKeySequence(Qt::Key_F5), this), &QShortcut::activated,
+            this, &MainWindow::onScan);
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &MainWindow::onTick);
@@ -153,12 +234,23 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     refreshStatus();
 }
 
+void MainWindow::closeEvent(QCloseEvent* event) {
+    if (timer_ != nullptr) {
+        timer_->stop();
+    }
+    if (app_.monitoring() || app_.asyncBusy()) {
+        statusBar()->showMessage("Stopping monitor mode and restoring interface…");
+        app_.shutdown();
+    }
+    QMainWindow::closeEvent(event);
+}
+
 void MainWindow::onTick() {
     app_.step();
     pollAsyncResult();
     pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
     pet_->setSecMood(app_.secMood());
-    refreshNetworks();
+    refreshNetworks(false);
     refreshStations();
     refreshAlerts();
     refreshChannels();
@@ -166,10 +258,6 @@ void MainWindow::onTick() {
 }
 
 void MainWindow::pollAsyncResult() {
-    // Monitor start/stop and deauth all run on a worker thread so this tick never blocks;
-    // their outcome (success/failure + message) surfaces here once it's ready. Status-bar
-    // only (not a modal): the user has usually moved on by the time a multi-second
-    // airmon-ng/aireplay-ng call finishes, so a surprise dialog would be worse UX than this.
     if (auto r = app_.takeLastAsyncResult()) {
         statusBar()->showMessage(QString::fromStdString(r->message), 6000);
     }
@@ -177,112 +265,147 @@ void MainWindow::pollAsyncResult() {
 
 void MainWindow::refreshStatus() {
     const AppState& ps = app_.petState();
-    status_->setText(QString("%1  ·  mood %2  ·  battery %3%%")
-                         .arg(themeSpec(ps.theme).name)
-                         .arg(faceForMood(ps.mood).moodLabel)
-                         .arg(ps.batteryPercent));
-    const sec::SecMood sm = app_.secMood();
-    secMoodLabel_->setText(QString("SEC: %1").arg(sec::secMoodLabel(sm)));
-    if (sm == sec::SecMood::Alarmed) {
-        secMoodLabel_->setStyleSheet(
-            "font-weight:bold; padding:2px 6px; border-radius:4px; background:#b00; color:#fff;");
-    } else if (sm == sec::SecMood::Watchful) {
-        secMoodLabel_->setStyleSheet(
-            "font-weight:bold; padding:2px 6px; border-radius:4px; background:#9a6000; color:#fff;");
-    } else {
-        secMoodLabel_->setStyleSheet(
-            "font-weight:bold; padding:2px 6px; border-radius:4px; background:#145a32; color:#fff;");
+    const QString statusText = QString("%1  ·  mood %2  ·  battery %3%%")
+                                   .arg(themeSpec(ps.theme).name)
+                                   .arg(faceForMood(ps.mood).moodLabel)
+                                   .arg(ps.batteryPercent);
+    if (status_->text() != statusText) {
+        status_->setText(statusText);
     }
-    phrase_->setText(QString::fromStdString(ps.phrase));
-    engineLabel_->setText(QString("Interface %1 · %2")
-                              .arg(QString::fromStdString(app_.interfaceName()))
-                              .arg(app_.monitoring()
-                                       ? QString::fromStdString(app_.engineLabel())
-                                       : QString("recon (active scan only)")));
+    const sec::SecMood sm = app_.secMood();
+    const int smInt = static_cast<int>(sm);
+    if (smInt != lastSecMoodStyled_) {
+        lastSecMoodStyled_ = smInt;
+        secMoodLabel_->setText(QString("SEC: %1").arg(sec::secMoodLabel(sm)));
+        if (sm == sec::SecMood::Alarmed) {
+            secMoodLabel_->setStyleSheet(
+                "font-weight:bold; padding:2px 6px; border-radius:4px; background:#b00000; color:#ffffff;");
+        } else if (sm == sec::SecMood::Watchful) {
+            secMoodLabel_->setStyleSheet(
+                "font-weight:bold; padding:2px 6px; border-radius:4px; background:#8a5200; color:#ffffff;");
+        } else {
+            secMoodLabel_->setStyleSheet(
+                "font-weight:bold; padding:2px 6px; border-radius:4px; background:#145a32; color:#ffffff;");
+        }
+    }
+    const QString phraseText = QString::fromStdString(ps.phrase);
+    if (phrase_->text() != phraseText) {
+        phrase_->setText(phraseText);
+    }
+    const QString engText = QString("Interface %1 · %2")
+                                .arg(QString::fromStdString(app_.interfaceName()))
+                                .arg(app_.monitoring()
+                                         ? QString::fromStdString(app_.engineLabel())
+                                         : QString("recon (active scan only)"));
+    if (engineLabel_->text() != engText) {
+        engineLabel_->setText(engText);
+    }
     const bool busy = app_.asyncBusy();
     const auto pending = app_.pendingActionKind();
-    QString monitorText = app_.monitoring() ? "Stop Monitor" : "Start Monitor";
+    QString monitorText = app_.monitoring() ? "Stop &Monitor" : "Start &Monitor";
     if (pending == linux_app::AsyncActionKind::StartMonitor) {
         monitorText = "Starting…";
     } else if (pending == linux_app::AsyncActionKind::StopMonitor) {
         monitorText = "Stopping…";
     }
-    monitorBtn_->setText(monitorText);
+    if (monitorBtn_->text() != monitorText) {
+        monitorBtn_->setText(monitorText);
+    }
     monitorBtn_->setEnabled(!busy);
-    deauthBtn_->setEnabled(!busy);
+    channelBtn_->setEnabled(!busy && app_.monitoring());
 
     const auto& auth = app_.authorization();
-    if (auth.operatorConfirmed) {
-        authBanner_->setText(QString("ARMED — allow-list holds %1 BSSID(s). Transmit permitted "
-                                     "only against those.")
-                                 .arg(auth.allowedBssids.size()));
-        authBanner_->setStyleSheet("color:#0a0;");
+    const bool deauthReady =
+        !busy && app_.monitoring() && auth.operatorConfirmed &&
+        (auth.allowAll || !auth.allowedBssids.empty());
+    deauthBtn_->setEnabled(deauthReady);
+    if (!auth.operatorConfirmed) {
+        deauthBtn_->setToolTip("Disabled: confirm authorization first.");
+    } else if (!auth.allowAll && auth.allowedBssids.empty()) {
+        deauthBtn_->setToolTip("Disabled: allow-list a target BSSID first.");
+    } else if (!app_.monitoring()) {
+        deauthBtn_->setToolTip("Disabled: start monitor mode first.");
     } else {
-        authBanner_->setText("Safe: transmit disabled. Confirm authorization AND allow-list a "
-                             "BSSID you own/are authorized to test to enable deauth.");
-        authBanner_->setStyleSheet("color:#b00;");
+        deauthBtn_->setToolTip("Send authorized deauth frames to the selected allow-listed BSSID.");
+    }
+
+    const int authStateCode = auth.operatorConfirmed ? 1 : 0;
+    if (auth.operatorConfirmed) {
+        const QString banner = QString("ARMED — allow-list holds %1 BSSID(s). Transmit permitted "
+                                       "only against those.")
+                                   .arg(auth.allowedBssids.size());
+        if (authBanner_->text() != banner) {
+            authBanner_->setText(banner);
+        }
+    } else {
+        const QString banner =
+            "Safe (passive): transmit disabled. Confirm authorization AND allow-list a BSSID "
+            "you own/are authorized to test to enable deauth.";
+        if (authBanner_->text() != banner) {
+            authBanner_->setText(banner);
+        }
+    }
+    if (authStateCode != lastAuthStyled_) {
+        lastAuthStyled_ = authStateCode;
+        if (auth.operatorConfirmed) {
+            authBanner_->setStyleSheet(
+                "background:#145a32; color:#ffffff; padding:4px 6px; border-radius:4px;");
+        } else {
+            authBanner_->setStyleSheet(
+                "background:#7f1d1d; color:#ffffff; padding:4px 6px; border-radius:4px;");
+        }
     }
 }
 
-void MainWindow::refreshNetworks() {
-    const auto targets = sec::targetsByStrength(app_.secState());
-    std::string sig = std::to_string(targets.size()) + ":";
-    for (const auto& t : targets) {
-        sig += t.bssid + "|" + t.ssid + "|" + std::to_string(t.channel) + "|" +
-               std::to_string(t.rssi) + "|" + std::to_string(static_cast<int>(t.enc)) + "|" +
-               (t.wps ? "1" : "0") + "|" + std::to_string(t.clientCount) + "|" +
-               (t.handshake ? "H" : (t.pmkid ? "P" : "-")) + ";";
-    }
-    if (sig == lastNetworksSig_) {
+void MainWindow::refreshNetworks(bool force) {
+    const auto& sec = app_.secState();
+    if (!force && sec.revision == lastNetworksRev_) {
         return;
     }
-    lastNetworksSig_ = std::move(sig);
+    lastNetworksRev_ = sec.revision;
+    const auto targets = sec::targetsByStrength(sec);
+    const auto& auth = app_.authorization();
     tabs_->setTabText(0, QString("Networks (%1)").arg(targets.size()));
-    // Preserve selection by BSSID across refreshes.
     const std::string selBssid = selectedBssid();
     table_->setRowCount(static_cast<int>(targets.size()));
     int selRow = -1;
     for (int i = 0; i < static_cast<int>(targets.size()); ++i) {
-        const auto& t = targets[i];
-        auto set = [&](int col, const QString& v) {
-            table_->setItem(i, col, new QTableWidgetItem(v));
-        };
-        set(0, QString::fromStdString(t.bssid));
-        set(1, t.ssid.empty() ? QString("<hidden>") : QString::fromStdString(t.ssid));
-        set(2, QString::number(t.channel));
-        set(3, QString::number(t.rssi));
-        set(4, QString(sec::encryptionLabel(t.enc)));
-        auto* wpsItem = new QTableWidgetItem(t.wps ? QString("WPS*") : QString("-"));
-        if (t.wps) {
-            wpsItem->setForeground(QColor(210, 120, 0));
-        }
-        table_->setItem(i, 5, wpsItem);
-        set(6, QString::number(t.clientCount));
-        set(7, t.handshake ? QString("HANDSHAKE") : (t.pmkid ? QString("PMKID") : QString("-")));
+        const auto& t = targets[static_cast<std::size_t>(i)];
+        setCellText(table_, i, 0, QString::fromStdString(t.bssid));
+        setCellText(table_, i, 1,
+                    t.ssid.empty() ? QString("<hidden>") : QString::fromStdString(t.ssid));
+        setCellText(table_, i, 2, QString::number(t.channel));
+        setCellText(table_, i, 3, QString::number(t.rssi));
+        setCellText(table_, i, 4, QString(sec::encryptionLabel(t.enc)));
+        QTableWidgetItem* wpsItem = setCellText(table_, i, 5, t.wps ? QString("WPS*") : QString("-"));
+        styleWarnBadge(wpsItem, t.wps);
+        setCellText(table_, i, 6, QString::number(t.clientCount));
+        setCellText(table_, i, 7,
+                    t.handshake ? QString("HANDSHAKE") : (t.pmkid ? QString("PMKID") : QString("-")));
+        const bool isAllowed = auth.isAllowed(t.bssid);
+        QTableWidgetItem* alwItem =
+            setCellText(table_, i, 8, isAllowed ? QString("YES") : QString("-"));
+        styleAllowedBadge(alwItem, isAllowed);
         if (t.bssid == selBssid) {
             selRow = i;
         }
     }
-    if (selRow >= 0) {
+    if (selRow >= 0 && table_->currentRow() != selRow) {
         table_->selectRow(selRow);
     }
 }
 
 void MainWindow::refreshStations() {
-    const auto stations = sec::stationsByActivity(app_.secState());
-    std::string sig = std::to_string(stations.size()) + ":";
-    for (const auto& st : stations) {
-        sig += st.mac + "|" + st.lastBssid + "|" + std::to_string(st.probeCount) + "|" +
-               std::to_string(st.probedSsids.size()) + ";";
-    }
-    if (sig == lastStationsSig_) {
+    const auto& sec = app_.secState();
+    if (sec.revision == lastStationsRev_) {
         return;
     }
-    lastStationsSig_ = std::move(sig);
+    lastStationsRev_ = sec.revision;
+    const auto stations = sec::stationsByActivity(sec);
     tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(stations.size()));
     stationsTable_->setRowCount(static_cast<int>(stations.size()));
     for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
-        const auto& st = stations[i];
+        const auto& st = stations[static_cast<std::size_t>(i)];
         const bool weak = sec::hasWeakOrDefaultProbe(st);
         QString probedList;
         for (std::size_t k = 0; k < st.probedSsids.size(); ++k) {
@@ -294,18 +417,14 @@ void MainWindow::refreshStations() {
         if (probedList.isEmpty()) {
             probedList = "<wildcard>";
         }
-        stationsTable_->setItem(i, 0, new QTableWidgetItem(QString::fromStdString(st.mac)));
-        stationsTable_->setItem(
-            i, 1,
-            new QTableWidgetItem(st.lastBssid.empty() ? QString("-")
-                                                      : QString::fromStdString(st.lastBssid)));
-        stationsTable_->setItem(i, 2, new QTableWidgetItem(QString::number(st.probeCount)));
-        auto* riskItem = new QTableWidgetItem(weak ? QString("WEAK / DEFAULT") : QString("-"));
-        if (weak) {
-            riskItem->setForeground(QColor(210, 120, 0));
-        }
-        stationsTable_->setItem(i, 3, riskItem);
-        stationsTable_->setItem(i, 4, new QTableWidgetItem(probedList));
+        setCellText(stationsTable_, i, 0, QString::fromStdString(st.mac));
+        setCellText(stationsTable_, i, 1,
+                    st.lastBssid.empty() ? QString("-") : QString::fromStdString(st.lastBssid));
+        setCellText(stationsTable_, i, 2, QString::number(st.probeCount));
+        QTableWidgetItem* riskItem =
+            setCellText(stationsTable_, i, 3, weak ? QString("WEAK / DEFAULT") : QString("-"));
+        styleWarnBadge(riskItem, weak);
+        setCellText(stationsTable_, i, 4, probedList);
     }
 }
 
@@ -326,11 +445,13 @@ void MainWindow::refreshAlerts() {
                 .arg(al.nowMs)
                 .arg(sec::alertKindLabel(al.kind))
                 .arg(QString::fromStdString(al.bssid))
-                .arg(QString::fromStdString(al.message)));
+                .arg(QString::fromStdString(sec::sanitizePrintableText(al.message, 160u))));
         if (al.severity == sec::Severity::Critical) {
-            item->setForeground(Qt::red);
+            item->setBackground(QColor(254, 226, 226));
+            item->setForeground(QColor(153, 27, 27));
         } else if (al.severity == sec::Severity::Warn) {
-            item->setForeground(QColor(200, 140, 0));
+            item->setBackground(QColor(255, 243, 205));
+            item->setForeground(QColor(122, 62, 0));
         }
         alerts_->addItem(item);
     }
@@ -342,14 +463,16 @@ void MainWindow::refreshAlerts() {
 }
 
 void MainWindow::refreshChannels() {
-    // Channel distribution across both bands: the Linux backend sees real 5GHz channel
-    // numbers (unlike the portable 2.4GHz-only Channel Spectrum pet-UI page).
-    const auto dist = sec::channelDistribution(app_.secState());
+    const auto& sec = app_.secState();
+    if (sec.revision == lastChannelsRev_) {
+        return;
+    }
+    lastChannelsRev_ = sec.revision;
+    const auto dist = sec::channelDistribution(sec);
     QString band24;
     QString band5;
     for (const auto& c : dist) {
-        const QString part =
-            QString("ch%1×%2 ").arg(c.channel).arg(c.count);
+        const QString part = QString("ch%1×%2 ").arg(c.channel).arg(c.count);
         if (c.band == sec::Band::Band24GHz) {
             band24 += part;
         } else if (c.band == sec::Band::Band5GHz) {
@@ -379,6 +502,15 @@ void MainWindow::onToggleMonitor() {
     }
 }
 
+void MainWindow::onSetChannel() {
+    const auto r = app_.setChannel(channelSpin_->value());
+    statusBar()->showMessage(QString::fromStdString(r.message), 5000);
+    if (!r.ok) {
+        QMessageBox::warning(this, "Set channel", QString::fromStdString(r.message));
+    }
+}
+
+void MainWindow::onPrevTheme() { app_.dispatchPet(CycleThemeEvent{linux_app::nowMs(), -1}); }
 void MainWindow::onCycleTheme() { app_.dispatchPet(CycleThemeEvent{linux_app::nowMs(), +1}); }
 void MainWindow::onCycleView() { app_.dispatchPet(CyclePageEvent{linux_app::nowMs(), +1}); }
 
@@ -388,13 +520,17 @@ void MainWindow::onLoadSession() {
     if (path.isEmpty()) {
         return;
     }
-    alerts_->clear();
-    lastTotalAlerts_ = 0;
     const auto r = app_.loadSession(path.toStdString());
     statusBar()->showMessage(QString::fromStdString(r.message), 6000);
     if (!r.ok) {
         QMessageBox::warning(this, "Load Session", QString::fromStdString(r.message));
+        return;
     }
+    alerts_->clear();
+    lastTotalAlerts_ = 0;
+    lastNetworksRev_ = UINT64_MAX;
+    lastStationsRev_ = UINT64_MAX;
+    lastChannelsRev_ = UINT64_MAX;
     onTick();
 }
 
@@ -422,8 +558,12 @@ void MainWindow::onAllowSelected() {
         QMessageBox::information(this, "Allow-list", "Select a network row first.");
         return;
     }
-    app_.allowBssid(bssid);
-    statusBar()->showMessage(QString("Allow-listed %1").arg(QString::fromStdString(bssid)), 4000);
+    const bool added = app_.toggleAllowBssid(bssid);
+    statusBar()->showMessage(
+        QString(added ? "Allow-listed %1" : "Removed %1 from allow-list")
+            .arg(QString::fromStdString(bssid)),
+        4000);
+    refreshNetworks(true);
     refreshStatus();
 }
 
@@ -453,7 +593,7 @@ void MainWindow::onDeauthSelected() {
         "authorized to test. This action is logged.",
         &dlg);
     warn->setWordWrap(true);
-    warn->setStyleSheet("color:#b00;");
+    warn->setStyleSheet("background:#7f1d1d; color:#ffffff; padding:6px; border-radius:4px;");
     form->addRow(warn);
     auto* bssidEdit = new QLineEdit(QString::fromStdString(bssid), &dlg);
     bssidEdit->setReadOnly(true);
@@ -493,10 +633,6 @@ void MainWindow::onDeauthSelected() {
         QMessageBox::warning(this, "Deauth", QString::fromStdString(r.message));
         return;
     }
-    // r.message here is just the immediate "transmitting..." ack - aireplay-ng runs on a
-    // worker thread and can take a while for a large frame count. The final result (and
-    // the audit-log reminder) surfaces via the status bar once pollAsyncResult() collects
-    // it, same as every other background action.
 }
 
 }  // namespace linux_gui

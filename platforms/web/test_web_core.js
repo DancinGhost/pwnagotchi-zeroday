@@ -239,9 +239,9 @@ function testResponsiveUiAndPixelRasterizer() {
 }
 
 function testThemesMultiDeviceAndCppParity() {
-  assert.strictEqual(themes.THEME_COUNT, 10);
+  assert.strictEqual(themes.THEME_COUNT, 14);
 
-  // Bidirectional cycling visits all 10 themes and wraps cleanly
+  // Bidirectional cycling visits all 14 themes and wraps cleanly
   let cur = themes.ThemeId.PaperInk;
   const seen = new Set();
   for (let i = 0; i < themes.THEME_COUNT; i++) {
@@ -250,7 +250,11 @@ function testThemesMultiDeviceAndCppParity() {
   }
   assert.strictEqual(cur, themes.ThemeId.PaperInk);
   assert.strictEqual(seen.size, themes.THEME_COUNT);
-  assert.strictEqual(themes.prevTheme(themes.ThemeId.PaperInk), themes.ThemeId.SunsetGrid);
+  assert.strictEqual(themes.prevTheme(themes.ThemeId.PaperInk), themes.ThemeId.BlueTeam);
+  assert.strictEqual(themes.themeFromKey('rain'), themes.ThemeId.CodeRain);
+  assert.strictEqual(themes.themeFromKey('crimson'), themes.ThemeId.CrimsonOps);
+  assert.strictEqual(themes.themeFromKey('redrain'), themes.ThemeId.RedRain);
+  assert.strictEqual(themes.themeFromKey('blueteam'), themes.ThemeId.BlueTeam);
 
   // Toast lifecycle & multi-device rendering across all 5 screen profiles
   let s = logic.initialState(77);
@@ -349,7 +353,7 @@ function testThemesMultiDeviceAndCppParity() {
   assert.strictEqual(Number(toastMatch[1]), themes.THEME_TOAST_MS);
 
   const entryRe =
-    /\{ThemeId::(\w+),\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*(true|false),\s*\{\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\}\}\}/g;
+    /\{ThemeId::(\w+),\s*"([^"]+)",\s*"([^"]+)",\s*"([^"]+)",\s*(true|false),\s*ThemeEffect::(\w+),\s*\{\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\},\s*\{(\d+),\s*(\d+),\s*(\d+)\}\}\}/g;
 
   const cppEntries = [];
   let m;
@@ -360,11 +364,12 @@ function testThemesMultiDeviceAndCppParity() {
       name: m[3],
       blurb: m[4],
       lightBackground: m[5] === 'true',
-      bg: [Number(m[6]), Number(m[7]), Number(m[8])],
-      fg: [Number(m[9]), Number(m[10]), Number(m[11])],
-      accent: [Number(m[12]), Number(m[13]), Number(m[14])],
-      muted: [Number(m[15]), Number(m[16]), Number(m[17])],
-      highlight: [Number(m[18]), Number(m[19]), Number(m[20])]
+      effect: m[6],
+      bg: [Number(m[7]), Number(m[8]), Number(m[9])],
+      fg: [Number(m[10]), Number(m[11]), Number(m[12])],
+      accent: [Number(m[13]), Number(m[14]), Number(m[15])],
+      muted: [Number(m[16]), Number(m[17]), Number(m[18])],
+      highlight: [Number(m[19]), Number(m[20]), Number(m[21])]
     });
   }
 
@@ -382,6 +387,7 @@ function testThemesMultiDeviceAndCppParity() {
     assert.strictEqual(j.name, c.name);
     assert.strictEqual(j.blurb, c.blurb);
     assert.strictEqual(j.lightBackground, c.lightBackground);
+    assert.strictEqual(j.effect, c.effect);
     assert.deepStrictEqual([j.palette.bg.r, j.palette.bg.g, j.palette.bg.b], c.bg);
     assert.deepStrictEqual([j.palette.fg.r, j.palette.fg.g, j.palette.fg.b], c.fg);
     assert.deepStrictEqual([j.palette.accent.r, j.palette.accent.g, j.palette.accent.b], c.accent);
@@ -391,6 +397,28 @@ function testThemesMultiDeviceAndCppParity() {
       c.highlight
     );
   }
+  testWebAccessibilityMarkup();
+}
+
+function testWebAccessibilityMarkup() {
+  const html = fs.readFileSync(path.resolve(__dirname, './index.html'), 'utf8');
+  const css = fs.readFileSync(path.resolve(__dirname, './styles.css'), 'utf8');
+
+  assert.ok(html.includes('<h1 class="brand-logo">'), 'Page must include an <h1> heading');
+  assert.ok(!html.includes('1/10'), 'Initial theme counter must not be stale 1/10');
+  assert.ok(html.includes('1/' + themes.THEME_COUNT), 'Initial theme counter must match THEME_COUNT');
+  assert.ok(html.includes('id="btn-hotkeys"'), 'Must expose WCAG 2.1.4 hotkey toggle button');
+  assert.ok(html.includes('id="sr-status"') && html.includes('aria-live="polite"'),
+    'Must expose screen-reader aria-live status region');
+  assert.ok(html.includes('id="pwn-screen"') && html.includes('role="img"'),
+    'Canvas must expose role="img" and accessible fallback');
+  assert.ok(html.includes('id="term-log"') && html.includes('role="log"'),
+    'Terminal log must expose role="log"');
+  assert.ok(html.includes('id="select-resolution"') && html.includes('aria-label="Target Hardware Display Profile"'),
+    'Select controls must have explicit aria-label');
+  assert.ok(css.includes(':focus-visible'), 'CSS must define visible :focus-visible rings');
+  assert.ok(css.includes('min-width: 24px') && css.includes('min-height: 24px'),
+    'Remove button targets must meet WCAG 2.5.8 24x24px minimum');
 }
 
 testFunctionalCombinators();

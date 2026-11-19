@@ -13,7 +13,7 @@ required by, the distributed binaries**. Each remains under its own license.
 | ESP-IDF (bootloader, partition table, libraries; incl. FreeRTOS, lwIP, mbedTLS, etc.) | Apache-2.0 (bundled components under their own permissive licenses) | https://github.com/espressif/esp-idf |
 | M5Unified (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5Unified |
 | M5GFX (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5GFX |
-| LovyanGFX (T-Deck targets) | FreeBSD (BSD-2-Clause); incorporates Adafruit_GFX (BSD) and Adafruit_ILI9341 (MIT); bundled fonts under their own licenses | https://github.com/lovyan03/LovyanGFX |
+| LovyanGFX (T-Deck & CYD targets) | FreeBSD (BSD-2-Clause); incorporates Adafruit_GFX (BSD) and Adafruit_ILI9341 (MIT); bundled fonts under their own licenses | https://github.com/lovyan03/LovyanGFX |
 
 **LGPL notice (Arduino-ESP32):** the firmware images statically link the Arduino core for
 ESP32. The complete corresponding source of this project (MIT) and the upstream library

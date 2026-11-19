@@ -86,10 +86,12 @@ public:
 };
 
 // Optional audit sink: a durable record of every transmit decision (allowed or blocked).
+// Returns true if the record was durably persisted; returning false causes beginDeauth()
+// to fail closed and refuse transmission.
 class IAuditLog {
 public:
     virtual ~IAuditLog() = default;
-    virtual void record(const std::string& line) = 0;
+    virtual bool record(const std::string& line) = 0;
 };
 
 // Optional sink for live session event recording (--record <file>).
@@ -115,14 +117,32 @@ public:
 
     void setRecorder(ISessionRecorder* rec) { recorder_ = rec; }
 
+    // Configure how many SecEvents are retained in memory for saveSession() (0 disables
+    // in-memory retention — recommended for RAM-constrained embedded targets like ESP32).
+    void setMaxRecordedEvents(std::size_t cap) {
+        maxRecordedEvents_ = cap;
+        if (maxRecordedEvents_ == 0u) {
+            events_.clear();
+            events_.shrink_to_fit();
+        } else if (events_.size() > maxRecordedEvents_) {
+            events_.erase(events_.begin(),
+                          events_.begin() +
+                              static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_));
+        }
+    }
+
     // Replace current state by replaying a sequence of recorded events through reduce().
     void loadEvents(const std::vector<SecEvent>& recorded) {
         state_ = replaySecEvents(recorded);
+        if (maxRecordedEvents_ == 0u) {
+            events_.clear();
+            return;
+        }
         events_ = recorded;
-        if (events_.size() > kMaxRecordedEvents) {
+        if (events_.size() > maxRecordedEvents_) {
             events_.erase(events_.begin(),
                           events_.begin() +
-                              static_cast<std::ptrdiff_t>(events_.size() - kMaxRecordedEvents));
+                              static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_));
         }
     }
 
@@ -164,38 +184,47 @@ public:
     }
 
     void dispatch(const SecEvent& ev) {
-        state_ = reduce(state_, ev);
-        if (events_.size() >= kMaxRecordedEvents + (kMaxRecordedEvents / 10u)) {
-            events_.erase(events_.begin(),
-                          events_.begin() +
-                              static_cast<std::ptrdiff_t>(events_.size() - kMaxRecordedEvents + 1u));
+        state_ = reduce(std::move(state_), ev);
+        if (maxRecordedEvents_ > 0u) {
+            const std::size_t slack = maxRecordedEvents_ / 10u;
+            if (events_.size() >= maxRecordedEvents_ + slack) {
+                events_.erase(
+                    events_.begin(),
+                    events_.begin() +
+                        static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_ + 1u));
+            }
+            events_.push_back(ev);
         }
-        events_.push_back(ev);
         if (recorder_ != nullptr) {
             recorder_->recordEvent(encodeSecEvent(ev));
         }
     }
 
     // Fast, synchronous half of the transmit chokepoint: resolves the authorization
-    // decision and records the attempt (state + audit log) immediately. Never calls the
-    // injector, so it never blocks on backend I/O — safe to call right before handing the
-    // actual (potentially slow) `injector.deauth()` off to a worker thread.
+    // decision and records the attempt (state + audit log) immediately. Fails closed if
+    // an audit sink is configured and fails to durably record an Allowed transmit.
     AuthDecision beginDeauth(const std::string& bssid, const std::string& client, uint32_t count,
                              uint32_t nowMs, IAuditLog* audit = nullptr) {
-        const AuthDecision decision = authorize(auth_, bssid);
+        AuthDecision decision = authorize(auth_, bssid);
+        const std::string normBssid = normalizeMac(bssid);
         const std::string normClient =
-            (client.empty() || isBroadcastMac(normalizeMac(client))) ? std::string{} : normalizeMac(client);
-        dispatch(InjectionAttempt{nowMs, bssid, normClient, count, decision});
+            (client.empty() || isBroadcastMac(normalizeMac(client))) ? std::string{}
+                                                                     : normalizeMac(client);
         if (audit != nullptr) {
-            if (decision != AuthDecision::Allowed) {
-                audit->record("DEAUTH BLOCKED bssid=" + normalizeMac(bssid) +
-                              " reason=" + std::string(authDecisionLabel(decision)));
+            if (decision == AuthDecision::Allowed) {
+                const bool persisted = audit->record(
+                    "DEAUTH ALLOWED bssid=" + normBssid +
+                    " client=" + (normClient.empty() ? std::string("broadcast") : normClient) +
+                    " count=" + std::to_string(count));
+                if (!persisted) {
+                    decision = AuthDecision::BlockedAuditFailed;
+                }
             } else {
-                audit->record("DEAUTH ALLOWED bssid=" + normalizeMac(bssid) +
-                              " client=" + (normClient.empty() ? std::string("broadcast") : normClient) +
-                              " count=" + std::to_string(count));
+                (void)audit->record("DEAUTH BLOCKED bssid=" + normBssid +
+                                    " reason=" + std::string(authDecisionLabel(decision)));
             }
         }
+        dispatch(InjectionAttempt{nowMs, bssid, normClient, count, decision});
         return decision;
     }
 
@@ -224,6 +253,7 @@ private:
     SecState state_{};
     Authorization auth_{};
     std::vector<SecEvent> events_{};
+    std::size_t maxRecordedEvents_ = kMaxRecordedEvents;
     ISessionRecorder* recorder_ = nullptr;
 };
 

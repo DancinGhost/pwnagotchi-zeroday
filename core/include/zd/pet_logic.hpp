@@ -208,7 +208,7 @@ inline fp::RngPick<std::string> selectPhrase(Mood mood, const ScanSummary& scan,
         case Mood::Sleepy: {
             constexpr std::array<const char*, 3> kPhrases = {
                 "Zzz... resting my pixels...",
-                "Power nap... press M5 to wake me.",
+                "Power nap... tap or press to wake me.",
                 "Dreaming of 5-bar beacons... zZz"
             };
             const auto pick = fp::pickFrom(seed, kPhrases);

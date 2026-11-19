@@ -123,9 +123,9 @@ sudo ./zd-linux watch --record session.zds   # monitor mode: stream alerts & rec
 ./zd-linux replay session.zds    # deterministically replay a recorded session file
 ```
 
-TUI keys: `s` scan · `m` toggle monitor · `p`/`Tab` toggle APs vs Stations/Probes ·
-`t` theme · `v` view · ↑/↓ select row · `A` toggle authorization · `L` allow-list selected ·
-`x` deauth selected · `c` set channel · `w` save session · `r` load session · `q` quit.
+TUI keys: `s` scan · `m` toggle monitor · `c` set channel · `p`/`Tab` toggle APs vs Stations/Probes ·
+`t`/`T` next/prev theme · ↑/↓ or `j`/`k` select row · `A` toggle authorization · `L` toggle allow-list on selected BSSID ·
+`x` deauth selected · `w` save session · `r` load session · `q` quit.
 
 ### GUI
 

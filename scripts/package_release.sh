@@ -43,6 +43,14 @@ if [ -d "$ROOT_DIR/platforms/web" ]; then
     zip -j "$DIST_DIR/pwnagotchi-zd-web.zip" "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.md"
 fi
 
+# Resolve esptool command for merging factory images
+ESPTOOL_CMD=()
+if command -v esptool.py >/dev/null 2>&1; then
+    ESPTOOL_CMD=(esptool.py)
+elif python3 -m esptool version >/dev/null 2>&1; then
+    ESPTOOL_CMD=(python3 -m esptool)
+fi
+
 # 3. Package Any Pre-Built ESP32 Firmwares in .pio/build
 for env_dir in "$ROOT_DIR/.pio/build"/*; do
     if [ -d "$env_dir" ] && [ -f "$env_dir/firmware.bin" ]; then
@@ -52,10 +60,35 @@ for env_dir in "$ROOT_DIR/.pio/build"/*; do
         cp "$env_dir/firmware.bin" "$TEMP_FW/"
         [ -f "$env_dir/bootloader.bin" ] && cp "$env_dir/bootloader.bin" "$TEMP_FW/"
         [ -f "$env_dir/partitions.bin" ] && cp "$env_dir/partitions.bin" "$TEMP_FW/"
-        # Copy flasher utilities and docs
-        if [ -d "$ROOT_DIR/scripts/flasher" ]; then
-            cp "$ROOT_DIR/scripts/flasher"/* "$TEMP_FW/"
+
+        # Merge unified factory image when bootloader + partitions + esptool are available
+        if [ "${#ESPTOOL_CMD[@]}" -gt 0 ] && [ -f "$env_dir/bootloader.bin" ] && [ -f "$env_dir/partitions.bin" ]; then
+            CHIP="esp32"
+            BOOT_OFFSET="0x1000"
+            if [[ "$target" == *t-deck* ]] || [[ "$target" == *s3* ]]; then
+                CHIP="esp32s3"
+                BOOT_OFFSET="0x0"
+            fi
+            MERGE_ARGS=(
+                --chip "$CHIP" merge_bin
+                -o "$TEMP_FW/pwnagotchi-zd-${target}-factory.bin"
+                "$BOOT_OFFSET" "$env_dir/bootloader.bin"
+                0x8000 "$env_dir/partitions.bin"
+            )
+            BOOT_APP0="$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
+            if [ -f "$BOOT_APP0" ]; then
+                MERGE_ARGS+=(0xe000 "$BOOT_APP0")
+            fi
+            MERGE_ARGS+=(0x10000 "$env_dir/firmware.bin")
+            "${ESPTOOL_CMD[@]}" "${MERGE_ARGS[@]}"
+        else
+            echo "[!] Warning: esptool unavailable or bootloader/partitions missing; skipping factory.bin merge for $target" >&2
         fi
+
+        # Copy only flasher scripts explicitly (never __pycache__ or stray files)
+        for f in flash.py flash.sh flash.bat; do
+            [ -f "$ROOT_DIR/scripts/flasher/$f" ] && cp "$ROOT_DIR/scripts/flasher/$f" "$TEMP_FW/"
+        done
         [ -f "$ROOT_DIR/docs/FLASHING.md" ] && cp "$ROOT_DIR/docs/FLASHING.md" "$TEMP_FW/"
         cp "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$TEMP_FW/"
         (cd "$TEMP_FW" && zip -r "$DIST_DIR/pwnagotchi-zd-${target}.zip" ./*)

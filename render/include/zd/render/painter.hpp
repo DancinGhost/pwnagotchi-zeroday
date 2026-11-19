@@ -293,6 +293,138 @@ void drawSpectrumPage(Gfx& gfx, const zd::UiFrame& frame) {
 }
 
 template <typename Gfx>
+void drawDigitalRainBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    const int16_t top = static_cast<int16_t>(frame.headerDividerY + 2);
+    const int16_t bottom = static_cast<int16_t>(frame.footerDividerY - 2);
+    const int16_t bodyH = static_cast<int16_t>(bottom - top);
+    if (bodyH < 12 || frame.dims.width < 96) {
+        return;
+    }
+
+    const int16_t colStep = frame.compact ? 22 : 18;
+    const int16_t rows = static_cast<int16_t>(bodyH / 8);
+    if (rows < 2) {
+        return;
+    }
+
+    const int32_t span = static_cast<int32_t>(rows) + 4;
+    const int32_t trail = frame.compact ? 2 : 3;
+    static constexpr const char kGlyphs[] = "01:+=*|7x;<>";
+    constexpr uint32_t kGlyphCount = 12u;
+
+    const auto& g = frame.faceGeom;
+    const int16_t faceLeft = static_cast<int16_t>(g.centerX - g.bracketOffsetX - 6);
+    const int16_t faceRight = static_cast<int16_t>(g.centerX + g.bracketOffsetX + 6);
+    const int16_t faceTop = static_cast<int16_t>(g.centerY - g.bracketHalfHeight - 6);
+    const int16_t faceBottom = static_cast<int16_t>(g.moodBadgeY + 9);
+
+    for (int32_t col = 0;; ++col) {
+        const int16_t x = static_cast<int16_t>(4 + col * colStep);
+        if (x + 6 > frame.dims.width - 2) {
+            break;
+        }
+        const uint32_t h = (static_cast<uint32_t>(col + 1) * 2654435761u) ^ 0x9E3779B9u;
+        const uint32_t speed = (h & 1u) ? 2u : 1u;
+        const uint32_t phase = (h >> 4u) % static_cast<uint32_t>(span);
+        const int32_t headRow =
+            static_cast<int32_t>(((frame.animTick * speed) + phase) % static_cast<uint32_t>(span));
+
+        for (int32_t k = 0; k < trail; ++k) {
+            const int32_t r = headRow - k;
+            if (r < 0 || r >= rows) {
+                continue;
+            }
+            const int16_t gy = static_cast<int16_t>(top + r * 8);
+            if (gy < top || (gy + 8) > bottom) {
+                continue;
+            }
+            // Keep the pet face and mood badge unobstructed for crisp legibility.
+            if (frame.page == zd::ScreenPage::PetFace &&
+                (x + 6) > faceLeft && x < faceRight &&
+                (gy + 8) > faceTop && gy < faceBottom) {
+                continue;
+            }
+            const uint32_t gh = h ^
+                                (static_cast<uint32_t>(r) * 2246822519u) ^
+                                ((frame.animTick >> 1u) * 374761393u);
+            const char glyph[2] = {kGlyphs[gh % kGlyphCount], '\0'};
+            gfx.setTextColor(frame.palette.muted, frame.palette.bg);
+            gfx.drawString(glyph, x, gy);
+            if (k == 0 && !frame.compact) {
+                gfx.fillRect(x + 1, gy + 7, 2, 1, frame.palette.accent);
+            }
+        }
+    }
+}
+
+template <typename Gfx>
+void drawTacticalHudBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    const int16_t top = static_cast<int16_t>(frame.headerDividerY + 2);
+    const int16_t bottom = static_cast<int16_t>(frame.footerDividerY - 2);
+    const int16_t left = 2;
+    const int16_t right = static_cast<int16_t>(frame.dims.width - 3);
+    const int16_t corner = frame.compact ? 4 : 7;
+
+    if ((bottom - top) < (corner * 2 + 2) || (right - left) < (corner * 2 + 2)) {
+        return;
+    }
+
+    const uint16_t col = frame.palette.muted;
+    // Four tactical corner reticle brackets
+    gfx.drawLine(left, top, left + corner, top, col);
+    gfx.drawLine(left, top, left, top + corner, col);
+
+    gfx.drawLine(right - corner, top, right, top, col);
+    gfx.drawLine(right, top, right, top + corner, col);
+
+    gfx.drawLine(left, bottom, left + corner, bottom, col);
+    gfx.drawLine(left, bottom - corner, left, bottom, col);
+
+    gfx.drawLine(right - corner, bottom, right, bottom, col);
+    gfx.drawLine(right, bottom - corner, right, bottom, col);
+
+    // Subtle rangefinder ticks along top divider edge
+    if ((frame.headerDividerY + 2) < frame.footerDividerY) {
+        const int16_t tickStep = frame.compact ? 32 : 24;
+        for (int16_t tx = 16; tx < (frame.dims.width - 12); tx = static_cast<int16_t>(tx + tickStep)) {
+            gfx.fillRect(tx, frame.headerDividerY + 1, 1, 2, col);
+        }
+    }
+}
+
+template <typename Gfx>
+void drawThemeBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    switch (frame.themeEffect) {
+        case zd::ThemeEffect::None:
+            break;
+        case zd::ThemeEffect::DigitalRain:
+            drawDigitalRainBackdrop(gfx, frame);
+            break;
+        case zd::ThemeEffect::TacticalHud:
+            drawTacticalHudBackdrop(gfx, frame);
+            break;
+    }
+}
+
+template <typename Gfx>
+void drawThemeDividerAccent(Gfx& gfx, const zd::UiFrame& frame) {
+    if (frame.themeEffect != zd::ThemeEffect::TacticalHud) {
+        return;
+    }
+    const int16_t pipW = frame.compact ? 6 : 10;
+    const int32_t travel = static_cast<int32_t>(frame.dims.width) - static_cast<int32_t>(pipW);
+    if (travel <= 1) {
+        return;
+    }
+    const uint32_t period = static_cast<uint32_t>(travel) * 2u;
+    const uint32_t step = (frame.animTick * (frame.compact ? 4u : 6u)) % period;
+    const int16_t pipX = static_cast<int16_t>((step <= static_cast<uint32_t>(travel))
+                                                  ? step
+                                                  : (period - step));
+    gfx.fillRect(pipX, frame.headerDividerY, pipW, 1, frame.palette.highlight);
+}
+
+template <typename Gfx>
 void drawThemeToast(Gfx& gfx, const zd::UiFrame& frame) {
     const auto& t = frame.toast;
     if (!t.visible) {
@@ -310,10 +442,14 @@ template <typename Gfx>
 void paintUiFrame(Gfx& gfx, const zd::UiFrame& frame) {
     gfx.fillScreen(frame.palette.bg);
 
+    // Optional zero-RAM procedural theme backdrop (drawn behind all UI chrome)
+    drawThemeBackdrop(gfx, frame);
+
     // Top telemetry bar
     gfx.setTextColor(frame.palette.fg, frame.palette.bg);
     gfx.drawString(frame.headerLine.c_str(), 4, frame.headerTextY);
     gfx.drawLine(0, frame.headerDividerY, frame.dims.width - 1, frame.headerDividerY, frame.palette.muted);
+    drawThemeDividerAccent(gfx, frame);
 
     // Main content page
     switch (frame.page) {

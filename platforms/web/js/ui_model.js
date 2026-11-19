@@ -411,6 +411,8 @@
       chartMaxBarH,
       spectrumSummary,
       theme: state.theme,
+      themeEffect: themes.themeSpec(state.theme).effect,
+      animTick: Math.floor((state.uptimeMs >>> 0) / 140),
       toast
     });
   }

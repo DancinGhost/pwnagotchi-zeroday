@@ -119,16 +119,45 @@ target_include_directories(test_linux_parsers PRIVATE
 target_compile_options(test_linux_parsers PRIVATE ${ZD_WARN_FLAGS})
 add_test(NAME linux_backend_parser_tests COMMAND test_linux_parsers)
 
+add_executable(test_dot11_frames tests/core/test_dot11_frames.cpp)
+target_link_libraries(test_dot11_frames PRIVATE zd_core)
+target_compile_options(test_dot11_frames PRIVATE ${ZD_WARN_FLAGS})
+add_test(NAME dot11_frame_builder_tests COMMAND test_dot11_frames)
+
+set(ZD_TEST_TARGETS
+    test_functional_core
+    test_painter
+    test_secops
+    test_linux_parsers
+    test_dot11_frames)
+
+if(UNIX AND NOT APPLE)
+    add_executable(test_linux_shell tests/core/test_linux_shell.cpp)
+    target_include_directories(test_linux_shell PRIVATE ${ZD_LINUX_INCLUDES})
+    target_link_libraries(test_linux_shell PRIVATE pthread)
+    target_compile_options(test_linux_shell PRIVATE ${ZD_WARN_FLAGS})
+    add_test(NAME linux_shell_tests COMMAND test_linux_shell)
+    list(APPEND ZD_TEST_TARGETS test_linux_shell)
+endif()
+
 # The tests rely on assert(). Release builds define NDEBUG, which would compile every
 # assertion away (making the tests no-ops and tripping -Werror on assert-only variables),
 # so force assertions back on for the test executables regardless of build type.
-foreach(zd_test test_functional_core test_painter test_secops test_linux_parsers)
+foreach(zd_test ${ZD_TEST_TARGETS})
     if(MSVC)
         target_compile_options(${zd_test} PRIVATE /UNDEBUG)
     else()
         target_compile_options(${zd_test} PRIVATE -UNDEBUG)
     endif()
 endforeach()
+
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE)
+    add_test(
+        NAME flasher_script_tests
+        COMMAND "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_flasher.py"
+    )
+endif()
 
 find_program(NODE_EXECUTABLE node)
 if(NODE_EXECUTABLE)

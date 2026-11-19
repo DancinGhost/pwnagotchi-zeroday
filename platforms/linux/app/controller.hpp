@@ -7,9 +7,11 @@
 // on a timer. All policy (mood, layout, defensive detection, the transmit authorization
 // gate) stays in the pure cores; this file only sequences hardware I/O and scheduling.
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "zd/hal.hpp"
@@ -37,18 +39,53 @@ struct ActionResult {
 // Monitor start/stop and deauth all shell out to commands that can block for a while
 // (airmon-ng, aireplay-ng); all three run through one single-flight AsyncJob so the UI
 // thread is never stuck waiting, and so they can never race each other.
-enum class AsyncActionKind { StartMonitor, StopMonitor, Deauth };
+enum class AsyncActionKind { StartMonitor, StopMonitor, SetChannel, Deauth };
 
 struct AsyncActionOutcome {
     AsyncActionKind kind = AsyncActionKind::StartMonitor;
     ActionResult result;
     std::string monitorIface;  // StartMonitor only: resolved interface, or "" on failure
+    bool killedNetworkManager = false;
 };
 
 class AppController {
 public:
     explicit AppController(std::string iface = "wlan0")
         : iface_(sec::isValidIfaceName(iface) ? std::move(iface) : std::string("wlan0")) {}
+
+    ~AppController() { shutdown(); }
+
+    // Synchronously wait for any in-flight background job and restore managed WiFi if
+    // monitor mode is active (or was just brought up by an in-flight StartMonitor).
+    void shutdown() {
+        if (actionJob_.running()) {
+            // Wait until the worker finishes so we never leave a monitor interface stranded.
+            while (actionJob_.running()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+        if (std::optional<AsyncActionOutcome> outcome = actionJob_.collect()) {
+            if (outcome->kind == AsyncActionKind::StartMonitor && !outcome->monitorIface.empty()) {
+                monitor_.applyUp(outcome->monitorIface, outcome->killedNetworkManager);
+                monitoring_ = true;
+            }
+        }
+        if (monitoring_ || monitor_.isMonitor()) {
+            const std::string monIface = monitor_.monitorIface();
+            const bool restartNm = monitor_.killedNetworkManager();
+            monitoring_ = false;
+            monitor_.applyDown();
+            if (capture_) {
+                capture_->stop();
+                capture_.reset();
+            }
+            injector_.reset();
+            engine_ = CaptureEngine::None;
+            if (!monIface.empty()) {
+                linux_backend::CliMonitorControl::takeDownMonitor(monIface, restartNm);
+            }
+        }
+    }
 
     void boot(uint32_t seed = 0xC0FFEEu) {
         pet_.boot(seed, nowMs(), &themeStore_);
@@ -86,12 +123,14 @@ public:
         }
         pendingKind_ = AsyncActionKind::StartMonitor;
         actionJob_.start([iface = iface_]() {
-            const std::string mon = linux_backend::CliMonitorControl::bringUpMonitor(iface);
-            const bool ok = !mon.empty();
-            ActionResult res{ok, ok ? ("monitor interface " + mon + " is up")
+            const linux_backend::MonitorBringUpResult up =
+                linux_backend::CliMonitorControl::bringUpMonitorDetailed(iface);
+            const bool ok = !up.monitorIface.empty();
+            ActionResult res{ok, ok ? ("monitor interface " + up.monitorIface + " is up")
                                     : ("failed to enable monitor mode on " + iface +
                                        " (need root / supported adapter)")};
-            return AsyncActionOutcome{AsyncActionKind::StartMonitor, res, mon};
+            return AsyncActionOutcome{AsyncActionKind::StartMonitor, res, up.monitorIface,
+                                      up.killedNetworkManager};
         });
         return {true, "starting monitor mode on " + iface_ + "..."};
     }
@@ -108,18 +147,19 @@ public:
         // capture_/injector_ out gives the worker thread exclusive, uncontended ownership.
         monitoring_ = false;
         const std::string monIface = monitor_.monitorIface();
+        const bool restartNm = monitor_.killedNetworkManager();
         monitor_.applyDown();
         std::unique_ptr<sec::ICaptureSource> cap = std::move(capture_);
         injector_.reset();
         engine_ = CaptureEngine::None;
         pendingKind_ = AsyncActionKind::StopMonitor;
-        actionJob_.start([cap = std::move(cap), monIface]() mutable {
+        actionJob_.start([cap = std::move(cap), monIface, restartNm]() mutable {
             if (cap) {
                 cap->stop();
             }
-            linux_backend::CliMonitorControl::takeDownMonitor(monIface);
+            linux_backend::CliMonitorControl::takeDownMonitor(monIface, restartNm);
             return AsyncActionOutcome{AsyncActionKind::StopMonitor,
-                                      {true, "monitor mode stopped"}, {}};
+                                      {true, "monitor mode stopped"}, {}, false};
         });
         return {true, "stopping monitor mode..."};
     }
@@ -128,15 +168,55 @@ public:
         if (!monitoring_) {
             return {false, "not in monitor mode"};
         }
-        const bool ok = monitor_.setChannel(channel);
-        return {ok, ok ? ("channel " + std::to_string(channel)) : "failed to set channel"};
+        if (channel < 1 || channel > 177) {
+            return {false, "invalid channel (must be 1..177)"};
+        }
+        if (actionJob_.running()) {
+            return {false, "an action is already in progress"};
+        }
+        const std::string monIface = monitor_.monitorIface();
+        pendingKind_ = AsyncActionKind::SetChannel;
+        actionJob_.start([monIface, channel]() {
+            const bool ok =
+                linux_backend::CliMonitorControl::setChannelOnIface(monIface, channel);
+            return AsyncActionOutcome{
+                AsyncActionKind::SetChannel,
+                {ok, ok ? ("channel " + std::to_string(channel)) : "failed to set channel"},
+                {},
+                false};
+        });
+        return {true, "switching to channel " + std::to_string(channel) + "..."};
     }
 
     // --- Authorization (operator-only; drives the transmit gate) ---
-    void confirmAuthorization(bool on) { sec_.authorization().operatorConfirmed = on; }
-    void allowBssid(const std::string& bssid) { sec_.authorization().allow(bssid); }
+    void confirmAuthorization(bool on) {
+        const bool prev = sec_.authorization().operatorConfirmed;
+        sec_.authorization().operatorConfirmed = on;
+        if (prev != on) {
+            (void)audit_.record(on ? "ARM operatorConfirmed=true" : "DISARM operatorConfirmed=false");
+        }
+    }
+    bool allowBssid(const std::string& bssid) { return sec_.authorization().allow(bssid); }
+    bool toggleAllowBssid(const std::string& bssid) {
+        if (sec_.authorization().isAllowed(bssid)) {
+            sec_.authorization().disallow(bssid);
+            return false;
+        }
+        return sec_.authorization().allow(bssid);
+    }
     void setAllowAll(bool on) { sec_.authorization().allowAll = on; }
     const sec::Authorization& authorization() const { return sec_.authorization(); }
+
+    // Pre-flight authorization check that also writes a blocked audit record when refused
+    // (used by CLI subcommands before touching monitor mode / NetworkManager).
+    sec::AuthDecision preflightDeauth(const std::string& bssid, const std::string& client,
+                                      uint32_t count) {
+        const sec::AuthDecision d = sec::authorize(sec_.authorization(), bssid);
+        if (d != sec::AuthDecision::Allowed) {
+            return sec_.beginDeauth(bssid, client, count, nowMs(), &audit_);
+        }
+        return d;
+    }
 
     // --- The one offensive transmit entry point (gate enforced inside SecSession) ---
     // The gate check + state/audit recording (beginDeauth) is fast and runs synchronously
@@ -167,7 +247,7 @@ public:
         pendingKind_ = AsyncActionKind::Deauth;
         actionJob_.start([injector, bssid, client, count]() {
             const sec::InjectResult r = injector->deauth(bssid, client, count);
-            return AsyncActionOutcome{AsyncActionKind::Deauth, {r.transmitted, r.detail}, {}};
+            return AsyncActionOutcome{AsyncActionKind::Deauth, {r.transmitted, r.detail}, {}, false};
         });
         return {true, "transmitting " + std::to_string(count) + " deauth frame(s)..."};
     }
@@ -276,16 +356,14 @@ private:
             return;
         }
         if (outcome->kind == AsyncActionKind::StartMonitor) {
-            monitor_.applyUp(outcome->monitorIface);
+            monitor_.applyUp(outcome->monitorIface, outcome->killedNetworkManager);
             if (!outcome->monitorIface.empty() && monitor_.isMonitor()) {
                 buildCaptureAndInjector();
                 if (capture_ && capture_->start(outcome->monitorIface)) {
                     monitoring_ = true;
                 } else {
-                    // Rare failure path (monitor mode came up but capture didn't): same
-                    // brief airmon-ng-stop blocking call the old synchronous code made
-                    // here too, just reached via a different path.
-                    linux_backend::CliMonitorControl::takeDownMonitor(outcome->monitorIface);
+                    linux_backend::CliMonitorControl::takeDownMonitor(
+                        outcome->monitorIface, outcome->killedNetworkManager);
                     monitor_.applyDown();
                     capture_.reset();
                     injector_.reset();

@@ -6,11 +6,16 @@
 // SecSession; this window only exposes it and refuses to arm it without explicit operator
 // confirmation + an allow-list entry.
 
+#include <cstdint>
+#include <string>
+
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
@@ -26,10 +31,15 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(linux_app::AppController& app, QWidget* parent = nullptr);
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private slots:
     void onTick();
     void onScan();
     void onToggleMonitor();
+    void onSetChannel();
+    void onPrevTheme();
     void onCycleTheme();
     void onCycleView();
     void onLoadSession();
@@ -39,7 +49,7 @@ private slots:
     void onDeauthSelected();
 
 private:
-    void refreshNetworks();
+    void refreshNetworks(bool force = false);
     void refreshStations();
     void refreshAlerts();
     void refreshStatus();
@@ -61,11 +71,16 @@ private:
     QListWidget* alerts_ = nullptr;
     QCheckBox* authCheck_ = nullptr;
     QPushButton* monitorBtn_ = nullptr;
+    QSpinBox* channelSpin_ = nullptr;
+    QPushButton* channelBtn_ = nullptr;
     QPushButton* deauthBtn_ = nullptr;
     QTimer* timer_ = nullptr;
     std::uint32_t lastTotalAlerts_ = 0;
-    std::string lastNetworksSig_;
-    std::string lastStationsSig_;
+    std::uint64_t lastNetworksRev_ = UINT64_MAX;
+    std::uint64_t lastStationsRev_ = UINT64_MAX;
+    std::uint64_t lastChannelsRev_ = UINT64_MAX;
+    int lastSecMoodStyled_ = -1;
+    int lastAuthStyled_ = -1;
 };
 
 }  // namespace linux_gui

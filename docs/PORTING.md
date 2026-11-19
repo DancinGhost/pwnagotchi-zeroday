@@ -11,7 +11,7 @@ pwnagotchi-zeroday/
 ├── core/include/zd/              # Layer 1: Zero-dependency C++17 Functional Core + HAL
 │   ├── fp.hpp                    # Pure higher-order combinators & stateless xorshift32 PRNG
 │   ├── domain.hpp                # Immutable AppState, ThemeId, and semantic AppEvents
-│   ├── theme.hpp                 # 10-theme RGB888 catalog + RGB565 / RGB888 / Luma helpers
+│   ├── theme.hpp                 # 14-theme RGB888 catalog, effects & RGB565 / Luma helpers
 │   ├── wifi_analysis.hpp         # Pure SSID sanitization, mesh deduplication & histograms
 │   ├── pet_logic.hpp             # Pure reducer: reduce(AppState, AppEvent) -> AppState
 │   ├── ui_model.hpp              # Multi-device responsive layout (128x64 up to 320x240+)
@@ -24,6 +24,7 @@ pwnagotchi-zeroday/
 ├── platforms/                    # Layer 3: Imperative Hardware & OS Shells
 │   ├── m5stick/main.cpp          # ESP32 + M5Unified + WiFi + NVS Preferences + Serial CLI
 │   ├── tdeck/main.cpp            # ESP32-S3 + LovyanGFX + Trackball + Touch + Keyboard + GPS
+│   ├── cyd/main.cpp              # ESP32-2432S028 (CYD) + LovyanGFX + XPT2046 Touch + BOOT btn
 │   ├── linux/                    # Desktop Linux CLI/ncurses TUI (`zd-linux`) + Qt6 GUI (`zd-gui`)
 │   ├── native/main.cpp           # Linux / macOS / Windows / RPi terminal simulator & PPM exporter
 │   └── web/                      # Standalone HTML5 Canvas + JS functional core port

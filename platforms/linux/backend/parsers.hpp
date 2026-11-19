@@ -138,15 +138,17 @@ inline std::vector<ScannedAp> parseNmcliScanDetailed(const std::string& text) {
         if (f.size() < 5) {
             continue;
         }
+        const std::string rawBssid = trim(f[0]);
+        if (!sec::isValidMac(rawBssid)) {
+            continue;
+        }
         ScannedAp ap;
-        ap.bssid = sec::normalizeMac(trim(f[0]));
+        ap.bssid = sec::normalizeMac(rawBssid);
         ap.ssid = sec::sanitizePrintableText(trim(f[1]));
         ap.channel = std::atoi(f[2].c_str());
         ap.enc = encryptionFromText(f[3]);
         ap.rssi = nmcliSignalToDbm(std::atoi(f[4].c_str()));
-        if (!ap.bssid.empty()) {
-            out.push_back(ap);
-        }
+        out.push_back(ap);
     }
     return out;
 }
@@ -214,20 +216,25 @@ inline AirodumpDump parseAirodumpCsv(const std::string& text) {
         }
         const std::vector<std::string> f = splitCsv(line);
         if (!inStations) {
-            if (f.size() < 14) {
+            if (f.size() < 14 || !sec::isValidMac(f[0])) {
                 continue;
             }
             AirodumpAp ap;
             ap.bssid = sec::normalizeMac(f[0]);
-            if (ap.bssid.empty()) {
-                continue;
-            }
             ap.channel = std::atoi(f[3].c_str());
             // Privacy(5) + Cipher(6) + Authentication(7) describe encryption.
             ap.enc = encryptionFromText(f[5] + " " + f[6] + " " + f[7]);
             ap.rssi = std::atoi(f[8].c_str());
-            ap.beacons = static_cast<uint32_t>(std::atoi(f[9].c_str()));
-            ap.ssid = sec::sanitizePrintableText(f[13]);
+            const int rawBeacons = std::atoi(f[9].c_str());
+            ap.beacons = (rawBeacons > 0) ? static_cast<uint32_t>(rawBeacons) : 0u;
+            // Rejoin ESSID if it contained commas (columns 0..12 fixed, last column is Key).
+            std::string rawEssid = f[13];
+            if (f.size() > 15u) {
+                for (std::size_t col = 14u; col + 1u < f.size(); ++col) {
+                    rawEssid += "," + f[col];
+                }
+            }
+            ap.ssid = sec::sanitizePrintableText(rawEssid);
             dump.aps.push_back(ap);
         } else {
             if (f.size() < 6) {

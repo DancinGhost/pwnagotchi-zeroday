@@ -48,6 +48,14 @@ jobs:
             name: LILYGO T-Deck
             chip: esp32s3
             boot_offset: '0x0'
+          - env: cyd-esp32-2432s028
+            name: CYD ESP32-2432S028 (ILI9341)
+            chip: esp32
+            boot_offset: '0x1000'
+          - env: cyd-esp32-2432s028-2usb
+            name: CYD ESP32-2432S028 2USB (ST7789)
+            chip: esp32
+            boot_offset: '0x1000'
 
     steps:
       - name: Checkout repository
@@ -72,7 +80,6 @@ jobs:
           key: pio-${{ runner.os }}-${{ matrix.target.env }}-${{ hashFiles('platformio.ini') }}
           restore-keys: |
             pio-${{ runner.os }}-${{ matrix.target.env }}-
-            pio-${{ runner.os }}-
 
       - name: Build firmware for ${{ matrix.target.env }}
         run: |
@@ -80,6 +87,7 @@ jobs:
 
       - name: Generate merged factory binary and package zip
         run: |
+          set -euo pipefail
           ENV_DIR=".pio/build/${{ matrix.target.env }}"
           DIST_DIR="dist/${{ matrix.target.env }}"
           mkdir -p "$DIST_DIR"
@@ -89,26 +97,27 @@ jobs:
           cp "$ENV_DIR/bootloader.bin" "$DIST_DIR/bootloader.bin"
           cp "$ENV_DIR/partitions.bin" "$DIST_DIR/partitions.bin"
 
-          # Find boot_app0.bin if available
-          BOOT_APP0=$(find ~/.platformio/packages -name "boot_app0.bin" 2>/dev/null | head -n 1)
-          EXTRA_BOOT=""
-          if [ -n "$BOOT_APP0" ]; then
-            EXTRA_BOOT="0xe000 $BOOT_APP0"
-          fi
-
-          # Merge binaries into a single, unified factory flash image (start address 0x0)
+          # Resolve boot_app0.bin deterministically from the pinned Arduino-ESP32 package
           FACTORY_BIN="$DIST_DIR/pwnagotchi-zd-${{ matrix.target.env }}-factory.bin"
-          esptool.py --chip ${{ matrix.target.chip }} merge_bin \
-            -o "$FACTORY_BIN" \
-            ${{ matrix.target.boot_offset }} "$ENV_DIR/bootloader.bin" \
-            0x8000 "$ENV_DIR/partitions.bin" \
-            $EXTRA_BOOT \
-            0x10000 "$ENV_DIR/firmware.bin"
-
-          # Include cross-platform one-click flashing utilities
-          if [ -d "scripts/flasher" ]; then
-            cp scripts/flasher/* "$DIST_DIR/"
+          MERGE_ARGS=(
+            --chip "${{ matrix.target.chip }}" merge_bin
+            -o "$FACTORY_BIN"
+            "${{ matrix.target.boot_offset }}" "$ENV_DIR/bootloader.bin"
+            0x8000 "$ENV_DIR/partitions.bin"
+          )
+          BOOT_APP0="$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
+          if [ -f "$BOOT_APP0" ]; then
+            MERGE_ARGS+=(0xe000 "$BOOT_APP0")
           fi
+          MERGE_ARGS+=(0x10000 "$ENV_DIR/firmware.bin")
+          esptool.py "${MERGE_ARGS[@]}"
+
+          # Include cross-platform one-click flashing utilities explicitly (no __pycache__)
+          for f in flash.py flash.sh flash.bat; do
+            if [ -f "scripts/flasher/$f" ]; then
+              cp "scripts/flasher/$f" "$DIST_DIR/"
+            fi
+          done
           if [ -f "docs/FLASHING.md" ]; then
             cp docs/FLASHING.md "$DIST_DIR/"
           fi
@@ -117,9 +126,7 @@ jobs:
 
           # Create zip archive
           ZIP_NAME="pwnagotchi-zd-${{ matrix.target.env }}.zip"
-          cd "$DIST_DIR"
-          zip -r "../../$ZIP_NAME" ./*
-          cd ../..
+          (cd "$DIST_DIR" && zip -r "../../$ZIP_NAME" ./*)
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -141,7 +148,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libpcap-dev libncurses-dev qt6-base-dev
+          sudo apt-get install -y build-essential cmake pkg-config libpcap-dev libncurses-dev qt6-base-dev
 
       - name: Configure CMake
         run: |
@@ -157,15 +164,16 @@ jobs:
 
       - name: Package Linux binaries
         run: |
+          set -euo pipefail
           DIST_DIR="dist/linux-x86_64"
           mkdir -p "$DIST_DIR/bin"
           cp build/zd-linux "$DIST_DIR/bin/"
-          cp build/zd-gui "$DIST_DIR/bin/" 2>/dev/null || true
+          cp build/zd-gui "$DIST_DIR/bin/"
           cp build/zd_sim "$DIST_DIR/bin/"
           cp README.md "$DIST_DIR/"
           cp LICENSE "$DIST_DIR/"
           cp THIRD_PARTY_NOTICES.md "$DIST_DIR/"
-          cp docs/LINUX.md "$DIST_DIR/" 2>/dev/null || true
+          cp docs/LINUX.md "$DIST_DIR/"
 
           TAR_NAME="pwnagotchi-zd-linux-x86_64.tar.gz"
           tar -czvf "$TAR_NAME" -C dist/linux-x86_64 .
@@ -215,6 +223,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -228,6 +238,11 @@ jobs:
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: release-assets/*
+
       - name: Create or Update Canary Release
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
@@ -239,6 +254,8 @@ jobs:
             ### Included Artifacts
             - **LILYGO T-Deck Plus**: `pwnagotchi-zd-t-deck-plus.zip` (ESP32-S3, 320x240 ST7789, Touch, Keyboard, GPS)
             - **LILYGO T-Deck**: `pwnagotchi-zd-t-deck.zip` (Standard T-Deck)
+            - **CYD ESP32-2432S028 (Classic ILI9341)**: `pwnagotchi-zd-cyd-esp32-2432s028.zip` (ESP32, 2.8" 320x240 ILI9341, XPT2046 Touch)
+            - **CYD ESP32-2432S028 2USB (ST7789)**: `pwnagotchi-zd-cyd-esp32-2432s028-2usb.zip` (ESP32, dual-USB 2.8" 320x240 ST7789, XPT2046 Touch)
             - **M5StickC / M5StickC Plus**: `pwnagotchi-zd-m5stick-c.zip`
             - **M5StickC Plus2**: `pwnagotchi-zd-m5stick-c-plus2.zip`
             - **M5Stack Core2**: `pwnagotchi-zd-m5stack-core2.zip`

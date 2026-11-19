@@ -93,6 +93,24 @@
             ]
         },
         {
+            "label": "PlatformIO: Build (CYD ESP32-2432S028 ILI9341)",
+            "type": "shell",
+            "command": "pio run -e cyd-esp32-2432s028",
+            "group": "build",
+            "problemMatcher": [
+                "$platformio"
+            ]
+        },
+        {
+            "label": "PlatformIO: Build (CYD ESP32-2432S028 2USB ST7789)",
+            "type": "shell",
+            "command": "pio run -e cyd-esp32-2432s028-2usb",
+            "group": "build",
+            "problemMatcher": [
+                "$platformio"
+            ]
+        },
+        {
             "label": "PlatformIO: Serial Monitor",
             "type": "shell",
             "command": "pio device monitor -b 115200",

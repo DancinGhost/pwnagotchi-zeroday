@@ -2,14 +2,17 @@
 
 // Minimal POSIX subprocess helpers for the CLI-tool WiFi backend.
 //
-// Uses fork/execvp with explicit argv vectors (never a shell string), so tool arguments
-// such as interface names and BSSIDs cannot be interpreted as shell metacharacters.
-// Two shapes are provided:
-//   - runCapture(): run a short command to completion, capturing stdout.
-//   - DetachedProcess: launch a long-running tool (airodump-ng) and later signal/kill it.
+// Security & concurrency guarantees:
+//   - Never invokes a shell; builds argv vectors BEFORE fork() so multi-threaded callers
+//     (Qt6 GUI, AsyncJob workers) perform only async-signal-safe syscalls in the child.
+//   - Resolves bare binary names exclusively against trusted root-owned system directories
+//     (/usr/sbin, /sbin, /usr/bin, /bin) via execv(), preventing PATH hijacking (CWE-426)
+//     when running with elevated privileges.
+//   - Bounds captured output size and wall-clock runtime in runCapture() with EINTR retries.
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +20,8 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,56 +31,198 @@ namespace linux_backend {
 struct CommandResult {
     int exitCode = -1;
     bool launched = false;
+    bool timedOut = false;
+    bool truncated = false;
     std::string stdoutText;
 };
 
-// Run argv[0] with argv to completion, capturing stdout. Blocks until exit. Intended for
-// fast commands (iw scan, nmcli, airmon-ng start). Returns exitCode == 0 on success.
-inline CommandResult runCapture(const std::vector<std::string>& argv) {
+namespace detail {
+
+inline bool isTrustedExecutable(const std::string& path) {
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0) {
+        return false;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return false;
+    }
+    if ((st.st_mode & 0111) == 0) {
+        return false;
+    }
+    // Reject group/world-writable binaries unconditionally, and require root ownership
+    // when running privileged (euid == 0). (Unprivileged user-namespace sandboxes/containers
+    // map host root to nobody/65534, so checking uid==0 only when euid==0 stays portable.)
+    if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        return false;
+    }
+    if (::geteuid() == 0 && st.st_uid != 0) {
+        return false;
+    }
+    return true;
+}
+
+// Resolve `prog` to an absolute path in fixed trusted system directories (never $PATH).
+inline std::string resolveTrustedExecutable(const std::string& prog) {
+    if (prog.empty()) {
+        return {};
+    }
+    if (prog.front() == '/') {
+        return isTrustedExecutable(prog) ? prog : std::string{};
+    }
+    // Reject relative paths containing '/'.
+    if (prog.find('/') != std::string::npos) {
+        return {};
+    }
+    static constexpr const char* kTrustedDirs[] = {"/usr/sbin", "/sbin", "/usr/bin", "/bin"};
+    for (const char* dir : kTrustedDirs) {
+        const std::string candidate = std::string(dir) + "/" + prog;
+        if (isTrustedExecutable(candidate)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+inline pid_t waitpidNoIntr(pid_t pid, int* status, int options) {
+    pid_t r;
+    do {
+        r = ::waitpid(pid, status, options);
+    } while (r < 0 && errno == EINTR);
+    return r;
+}
+
+inline void terminateChild(pid_t pid) {
+    if (pid <= 0) {
+        return;
+    }
+    ::kill(pid, SIGTERM);
+    for (int i = 0; i < 10; ++i) {
+        int st = 0;
+        if (waitpidNoIntr(pid, &st, WNOHANG) == pid) {
+            return;
+        }
+        ::usleep(20 * 1000);
+    }
+    ::kill(pid, SIGKILL);
+    int st = 0;
+    waitpidNoIntr(pid, &st, 0);
+}
+
+}  // namespace detail
+
+// Run argv[0] with argv to completion, capturing stdout+stderr with bounded output and timeout.
+// Returns exitCode == 0 on success.
+inline CommandResult runCapture(const std::vector<std::string>& argv,
+                                uint32_t timeoutMs = 15000u,
+                                std::size_t maxBytes = 4u * 1024u * 1024u) {
     CommandResult res;
     if (argv.empty()) {
         return res;
     }
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
+    const std::string resolved = detail::resolveTrustedExecutable(argv[0]);
+    if (resolved.empty()) {
         return res;
     }
 
-    const pid_t pid = fork();
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) {
+        return res;
+    }
+    ::fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+
+    // Pre-build argv pointers BEFORE fork() so the child performs zero heap allocations.
+    std::vector<std::string> ownedArgs = argv;
+    ownedArgs[0] = resolved;
+    std::vector<char*> cargv;
+    cargv.reserve(ownedArgs.size() + 1u);
+    for (std::string& a : ownedArgs) {
+        cargv.push_back(a.data());
+    }
+    cargv.push_back(nullptr);
+    const char* const execPath = resolved.c_str();
+    char* const* const execArgv = cargv.data();
+
+    const pid_t pid = ::fork();
     if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
         return res;
     }
 
     if (pid == 0) {
-        // Child: redirect stdout (and stderr) to the pipe, then exec.
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        std::vector<char*> cargv;
-        cargv.reserve(argv.size() + 1);
-        for (const std::string& a : argv) {
-            cargv.push_back(const_cast<char*>(a.c_str()));
-        }
-        cargv.push_back(nullptr);
-        execvp(cargv[0], cargv.data());
-        _exit(127);  // exec failed
+        // Child: async-signal-safe calls only.
+        ::dup2(pipefd[1], STDOUT_FILENO);
+        ::dup2(pipefd[1], STDERR_FILENO);
+        ::close(pipefd[0]);
+        ::close(pipefd[1]);
+        ::execv(execPath, execArgv);
+        ::_exit(127);
     }
 
-    // Parent: read all stdout.
-    close(pipefd[1]);
+    // Parent: bounded non-hanging read with monotonic deadline.
+    ::close(pipefd[1]);
     res.launched = true;
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-        res.stdoutText.append(buf, static_cast<std::size_t>(n));
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        int pollMs = -1;
+        if (timeoutMs > 0u) {
+            if (now >= deadline) {
+                res.timedOut = true;
+                break;
+            }
+            const auto rem =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            pollMs = (rem > 0) ? static_cast<int>(rem) : 1;
+        }
+
+        struct pollfd pfd {};
+        pfd.fd = pipefd[0];
+        pfd.events = POLLIN;
+        const int pr = ::poll(&pfd, 1, pollMs);
+        if (pr < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (pr == 0) {
+            res.timedOut = true;
+            break;
+        }
+
+        const ssize_t n = ::read(pipefd[0], buf, sizeof(buf));
+        if (n > 0) {
+            const std::size_t got = static_cast<std::size_t>(n);
+            if (res.stdoutText.size() < maxBytes) {
+                const std::size_t room = maxBytes - res.stdoutText.size();
+                const std::size_t take = (got < room) ? got : room;
+                res.stdoutText.append(buf, take);
+                if (got > room) {
+                    res.truncated = true;
+                }
+            } else {
+                res.truncated = true;
+            }
+        } else if (n == 0) {
+            break;
+        } else if (errno != EINTR) {
+            break;
+        }
     }
-    close(pipefd[0]);
+    ::close(pipefd[0]);
+
+    if (res.timedOut) {
+        detail::terminateChild(pid);
+        return res;
+    }
 
     int status = 0;
-    if (waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+    if (detail::waitpidNoIntr(pid, &status, 0) == pid && WIFEXITED(status)) {
         res.exitCode = WEXITSTATUS(status);
     }
     return res;
@@ -92,33 +239,44 @@ public:
     ~DetachedProcess() { stop(); }
 
     bool start(const std::vector<std::string>& argv) {
-        if (running_ || argv.empty()) {
+        if (running_.load() || argv.empty()) {
             return false;
         }
-        const pid_t pid = fork();
+        const std::string resolved = detail::resolveTrustedExecutable(argv[0]);
+        if (resolved.empty()) {
+            return false;
+        }
+
+        // Pre-build argv pointers BEFORE fork() so the child performs zero heap allocations.
+        std::vector<std::string> ownedArgs = argv;
+        ownedArgs[0] = resolved;
+        std::vector<char*> cargv;
+        cargv.reserve(ownedArgs.size() + 1u);
+        for (std::string& a : ownedArgs) {
+            cargv.push_back(a.data());
+        }
+        cargv.push_back(nullptr);
+        const char* const execPath = resolved.c_str();
+        char* const* const execArgv = cargv.data();
+
+        const pid_t pid = ::fork();
         if (pid < 0) {
             return false;
         }
         if (pid == 0) {
-            const int devnull = open("/dev/null", O_WRONLY);
+            const int devnull = ::open("/dev/null", O_WRONLY);
             if (devnull >= 0) {
-                dup2(devnull, STDOUT_FILENO);
-                dup2(devnull, STDERR_FILENO);
+                ::dup2(devnull, STDOUT_FILENO);
+                ::dup2(devnull, STDERR_FILENO);
                 if (devnull > STDERR_FILENO) {
-                    close(devnull);
+                    ::close(devnull);
                 }
             }
-            std::vector<char*> cargv;
-            cargv.reserve(argv.size() + 1);
-            for (const std::string& a : argv) {
-                cargv.push_back(const_cast<char*>(a.c_str()));
-            }
-            cargv.push_back(nullptr);
-            execvp(cargv[0], cargv.data());
-            _exit(127);
+            ::execv(execPath, execArgv);
+            ::_exit(127);
         }
         pid_ = pid;
-        running_ = true;
+        running_.store(true);
         return true;
     }
 
@@ -127,7 +285,7 @@ public:
             return false;
         }
         int status = 0;
-        const pid_t r = waitpid(pid_, &status, WNOHANG);
+        const pid_t r = detail::waitpidNoIntr(pid_, &status, WNOHANG);
         if (r == pid_) {
             running_.store(false);  // reaped
         }
@@ -141,16 +299,18 @@ public:
         ::kill(pid_, SIGTERM);
         for (int i = 0; i < 20; ++i) {
             int status = 0;
-            if (waitpid(pid_, &status, WNOHANG) == pid_) {
+            if (detail::waitpidNoIntr(pid_, &status, WNOHANG) == pid_) {
                 running_.store(false);
+                pid_ = -1;
                 return;
             }
-            usleep(50 * 1000);  // 50ms
+            ::usleep(50 * 1000);  // 50ms
         }
         ::kill(pid_, SIGKILL);
         int status = 0;
-        waitpid(pid_, &status, 0);
+        detail::waitpidNoIntr(pid_, &status, 0);
         running_.store(false);
+        pid_ = -1;
     }
 
     pid_t pid() const { return pid_; }

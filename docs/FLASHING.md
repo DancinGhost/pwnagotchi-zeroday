@@ -2,6 +2,7 @@
 
 This guide covers how to easily flash **pwnagotchi-zeroday** to any supported ESP32 hardware:
 - **LILYGO T-Deck / T-Deck Plus** (ESP32-S3)
+- **CYD ESP32-2432S028 / 2432S028R** — Classic single-USB (ILI9341) & 2USB (ST7789) (ESP32)
 - **M5StickC / M5StickC Plus** (ESP32)
 - **M5StickC Plus2** (ESP32-PICO-V3-02)
 - **M5Stack Core2** (ESP32)
@@ -51,6 +52,10 @@ If you prefer using `esptool.py` directly:
 # LILYGO T-Deck / T-Deck Plus (ESP32-S3)
 esptool.py --chip esp32s3 write_flash -z 0x0 pwnagotchi-zd-t-deck-plus-factory.bin
 
+# CYD ESP32-2432S028 (Classic ILI9341) or 2USB variant (ST7789) (ESP32)
+esptool.py --chip esp32 write_flash -z 0x0 pwnagotchi-zd-cyd-esp32-2432s028-factory.bin
+esptool.py --chip esp32 write_flash -z 0x0 pwnagotchi-zd-cyd-esp32-2432s028-2usb-factory.bin
+
 # M5Stack / M5StickC (ESP32)
 esptool.py --chip esp32 write_flash -z 0x0 pwnagotchi-zd-m5stick-c-factory.bin
 ```
@@ -58,7 +63,7 @@ esptool.py --chip esp32 write_flash -z 0x0 pwnagotchi-zd-m5stick-c-factory.bin
 ### Separate Partitions (Advanced)
 If you prefer flashing individual partition components:
 ```bash
-# ESP32 (M5StickC, M5StickC Plus2, M5Stack Core2):
+# ESP32 (CYD ESP32-2432S028, M5StickC, M5StickC Plus2, M5Stack Core2):
 esptool.py --chip esp32 write_flash \
   0x1000 bootloader.bin \
   0x8000 partitions.bin \

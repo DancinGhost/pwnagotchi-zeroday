@@ -18,22 +18,28 @@ endif
 .PHONY: all test sim demo linux web-serve clean dist
 
 all: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops \
-     $(BUILD)/test_linux_parsers $(BUILD)/zd_sim
+     $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell $(BUILD)/zd_sim
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/test_functional_core: tests/core/test_functional_core.cpp core/include/zd/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Icore/include tests/core/test_functional_core.cpp -o $@
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_functional_core.cpp -o $@
 
 $(BUILD)/test_painter: tests/render/test_painter.cpp core/include/zd/*.hpp render/include/zd/render/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) tests/render/test_painter.cpp -o $@
+	$(CXX) $(CXXFLAGS) -UNDEBUG $(INCLUDES) tests/render/test_painter.cpp -o $@
 
 $(BUILD)/test_secops: tests/core/test_secops.cpp core/include/zd/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Icore/include tests/core/test_secops.cpp -o $@
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_secops.cpp -o $@
 
 $(BUILD)/test_linux_parsers: tests/core/test_linux_parsers.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -Icore/include -Iplatforms/linux/backend tests/core/test_linux_parsers.cpp -o $@
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include -Iplatforms/linux/backend tests/core/test_linux_parsers.cpp -o $@
+
+$(BUILD)/test_dot11_frames: tests/core/test_dot11_frames.cpp core/include/zd/*.hpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_dot11_frames.cpp -o $@
+
+$(BUILD)/test_linux_shell: tests/core/test_linux_shell.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp platforms/linux/app/*.hpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -UNDEBUG $(LINUX_INCLUDES) tests/core/test_linux_shell.cpp -lpthread -o $@
 
 $(BUILD)/zd_sim: platforms/native/main.cpp core/include/zd/*.hpp render/include/zd/render/*.hpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) platforms/native/main.cpp -o $@
@@ -46,11 +52,14 @@ $(BUILD)/zd-linux: platforms/linux/cli/main.cpp core/include/zd/*.hpp platforms/
 
 linux: $(BUILD)/zd-linux
 
-test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers
+test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell
 	./$(BUILD)/test_functional_core
 	./$(BUILD)/test_painter
 	./$(BUILD)/test_secops
 	./$(BUILD)/test_linux_parsers
+	./$(BUILD)/test_dot11_frames
+	./$(BUILD)/test_linux_shell
+	python3 tests/scripts/test_flasher.py
 	node platforms/web/test_web_core.js
 
 sim: $(BUILD)/zd_sim
@@ -60,7 +69,7 @@ demo: $(BUILD)/zd_sim
 	./$(BUILD)/zd_sim --demo
 
 web-serve:
-	python3 -m http.server 8080 --directory platforms/web
+	python3 -m http.server 8080 --bind 127.0.0.1 --directory platforms/web
 
 clean:
 	rm -rf $(BUILD) build_cmake dist dist_release

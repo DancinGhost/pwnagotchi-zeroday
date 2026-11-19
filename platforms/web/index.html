@@ -11,17 +11,17 @@
     <!-- Top Workbench Header -->
     <header class="topbar">
       <div class="brand-group">
-        <div class="brand-logo">
-          <span class="brand-face-pill" id="header-ascii-face">(o_o)</span>
+        <h1 class="brand-logo">
+          <span class="brand-face-pill" id="header-ascii-face" aria-hidden="true">(o_o)</span>
           <span>pwnagotchi-zeroday</span>
-        </div>
+        </h1>
         <span class="sandbox-badge" title="100% browser-safe simulated 2.4 GHz playground">
           PLAYFUL RF TOY &bull; ZERO LOW-LEVEL ACCESS
         </span>
       </div>
 
       <div class="toolbar-controls">
-        <select id="select-resolution" class="tool-select" title="Switch Target Hardware Display Profile">
+        <select id="select-resolution" class="tool-select" aria-label="Target Hardware Display Profile" title="Switch Target Hardware Display Profile">
           <option value="plus">240&times;135 (StickC Plus2 / Cardputer)</option>
           <option value="compact">160&times;80 (StickC Classic)</option>
           <option value="micro">128&times;64 (SSD1306 OLED)</option>
@@ -29,18 +29,22 @@
           <option value="wide">320&times;240 (Core2 / CYD QVGA)</option>
         </select>
 
-        <select id="select-shell" class="tool-select" title="Hardware Casing Color">
+        <select id="select-shell" class="tool-select" aria-label="Hardware Casing Color" title="Hardware Casing Color">
           <option value="orange">Shell: M5 Orange</option>
           <option value="stealth">Shell: Stealth Black</option>
           <option value="paper">Shell: Classic E-Ink</option>
           <option value="atomic">Shell: Atomic Cyber</option>
         </select>
 
-        <select id="select-fx" class="tool-select" title="Display Overlay Effect">
+        <select id="select-fx" class="tool-select" aria-label="Display Overlay Effect" title="Display Overlay Effect">
           <option value="grid">FX: LCD Pixel Grid</option>
           <option value="crt">FX: CRT Scanlines</option>
           <option value="clean">FX: Crisp Raw</option>
         </select>
+
+        <button id="btn-hotkeys" class="tool-chip active" type="button" aria-pressed="true" title="Toggle Single-Key Global Shortcuts">
+          KEYS: ON
+        </button>
 
         <button id="btn-sfx" class="tool-chip" type="button" aria-pressed="false" title="Toggle M5Stick Piezo Buzzer Chirps">
           SFX: OFF
@@ -85,11 +89,22 @@
                 <span id="dims-badge">240&times;135 RGB565</span>
               </div>
 
-              <div id="screen-viewport" class="screen-viewport" data-fx="grid" title="Click ZeroDay's face to pet/boop!">
-                <canvas id="pwn-screen" width="960" height="540"></canvas>
-                <div class="screen-fx-overlay"></div>
-                <div id="floating-fx" class="floating-fx-layer"></div>
+              <div
+                id="screen-viewport"
+                class="screen-viewport"
+                data-fx="grid"
+                role="button"
+                tabindex="0"
+                aria-label="ZeroDay virtual pet screen — activate to boop pet"
+                title="Click or press Enter/Space to pet/boop ZeroDay!"
+              >
+                <canvas id="pwn-screen" width="960" height="540" role="img" aria-label="ZeroDay virtual pet display">
+                  ZeroDay virtual pet display. Use the serial monitor log below for text telemetry.
+                </canvas>
+                <div class="screen-fx-overlay" aria-hidden="true"></div>
+                <div id="floating-fx" class="floating-fx-layer" aria-hidden="true"></div>
               </div>
+              <div id="sr-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
               <div class="bezel-bottom-meta">
                 <span>pwnagotchi-zeroday</span>
@@ -116,10 +131,10 @@
 
           <!-- Quick Screen Views & Theme Cycle Dock -->
           <div class="stage-dock">
-            <div class="seg-group" role="tablist" aria-label="Display Page">
-              <button class="seg-btn active" role="tab" aria-selected="true" data-page="PetFace" type="button">Pet Face</button>
-              <button class="seg-btn" role="tab" aria-selected="false" data-page="NearbyRadar" type="button">WiFi Radar</button>
-              <button class="seg-btn" role="tab" aria-selected="false" data-page="ChannelSpectrum" type="button">Ch Spectrum</button>
+            <div class="seg-group" role="group" aria-label="Display Page">
+              <button class="seg-btn active" aria-pressed="true" data-page="PetFace" type="button">Pet Face</button>
+              <button class="seg-btn" aria-pressed="false" data-page="NearbyRadar" type="button">WiFi Radar</button>
+              <button class="seg-btn" aria-pressed="false" data-page="ChannelSpectrum" type="button">Ch Spectrum</button>
             </div>
 
             <div class="theme-cycler" aria-label="Cycle Themes">
@@ -132,7 +147,7 @@
               >
                 &lsaquo;
               </button>
-              <span id="active-theme-label" class="active-theme-pill">Paper Ink &bull; 1/10</span>
+              <span id="active-theme-label" class="active-theme-pill">Paper Ink &bull; 1/14</span>
               <button
                 id="btn-theme-next"
                 class="theme-step-btn"
@@ -291,6 +306,7 @@
                 class="ssid-input"
                 type="text"
                 maxlength="28"
+                aria-label="Custom Beacon SSID"
                 placeholder="SSID (e.g. PrettyFlyForAWiFi)"
               />
               <button id="btn-rand-ssid" class="mini-btn" type="button" title="Roll a funny hacker SSID">
@@ -310,7 +326,8 @@
                 </select>
 
                 <label style="font-size: 11px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px;">
-                  <input id="input-ap-rssi" type="range" min="-92" max="-32" value="-44" style="width: 78px;" />
+                  <span class="sr-only">Signal Strength RSSI</span>
+                  <input id="input-ap-rssi" type="range" min="-92" max="-32" value="-44" aria-label="Custom Beacon Signal Strength in dBm" style="width: 78px;" />
                   <span id="ap-rssi-label">-44dB</span>
                 </label>
 
@@ -343,16 +360,17 @@
         </button>
       </div>
 
-      <div id="term-log" class="term-log"></div>
+      <div id="term-log" class="term-log" role="log" aria-live="polite" aria-label="Serial monitor output"></div>
 
       <form id="form-terminal" class="terminal-input-row">
-        <span id="term-prompt-label" class="term-prompt">zeroday@ttyACM0:~$</span>
+        <label id="term-prompt-label" class="term-prompt" for="input-terminal">zeroday@ttyACM0:~$</label>
         <input
           id="input-terminal"
           class="term-input"
           type="text"
           autocomplete="off"
           spellcheck="false"
+          aria-label="Serial console command"
           placeholder="Try: help, scan, env con, pwn, peer, snack, inject ShadowClanLAN, ascii..."
         />
       </form>

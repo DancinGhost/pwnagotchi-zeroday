@@ -11,7 +11,7 @@ A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner wri
 
 ## Features
 
-- **10 Original, Trademark-Clean Themes**: Cycle forward and backward through `Paper Ink`, `Dark Ink`, `ZeroDay`, `Phosphor`, `Neon Noir` (magenta/cyan neon nightlife), `Neon Volt` (acid-yellow/cyan visor), `Operator` (cobalt-blue & steel security workstation), `Red Team` (night-ops red), `Amber CRT`, and `Sunset Grid` — complete with an on-screen toast overlay, pet reactions, and NVS/local persistence. See [docs/THEMES.md](docs/THEMES.md).
+- **14 Original, Trademark-Clean Themes (with Zero-RAM Animated Backdrops)**: Cycle forward and backward through `Paper Ink`, `Dark Ink`, `ZeroDay`, `Phosphor`, `Neon Noir`, `Neon Volt`, `Operator`, `Red Team`, `Amber CRT`, `Sunset Grid`, `Code Rain` (cascading emerald digital rain), `Crimson Ops` (Team Red tactical HUD + radar sweep), `Red Rain` (Team Red cascading crimson rain), and `Blue Team` (defensive ops HUD) — all built into every binary with zero extra imports or compile flags, complete with on-screen toasts, pet reactions, and NVS/local persistence. See [docs/THEMES.md](docs/THEMES.md).
 - **Expressive Pwnagotchi-Style Faces**: Crisp vector/pixel expressions (`Awake`, `LookingLeft`, `LookingRight`, `Happy`, `Excited`, `Cool`, `Lonely`, `Bored`, `Sleepy`) rendered tear-free via `zd::render::paintUiFrame`.
 - **Non-Blocking WiFi Scanning**: Pure functional scan pipeline sanitizes SSIDs, deduplicates mesh BSSIDs, builds channel 1–13 histograms, and drives mood & commentary without blocking animations or inputs.
 - **Three Switchable Views**:
@@ -29,7 +29,7 @@ A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner wri
 core/include/zd/              # Zero-dependency C++17 Functional Core & HAL
   ├── fp.hpp                  # Higher-order combinators & stateless xorshift32 PRNG
   ├── domain.hpp              # Immutable AppState, ThemeId & semantic AppEvents
-  ├── theme.hpp               # Single-source-of-truth 10-theme catalog & color helpers
+  ├── theme.hpp               # Single-source-of-truth 14-theme catalog, effects & color helpers
   ├── wifi_analysis.hpp       # Pure scan sanitization, deduplication & histograms
   ├── pet_logic.hpp           # Pure Elm/Redux reducer: reduce(AppState, AppEvent)
   ├── ui_model.hpp            # Responsive multi-device layout & ASCII frame renderer
@@ -43,6 +43,7 @@ render/include/zd/render/     # Hardware-agnostic immediate-mode renderer
 platforms/                    # Device & OS shells
   ├── m5stick/main.cpp        # ESP32 + M5Unified + WiFi + NVS Preferences + Serial CLI
   ├── tdeck/main.cpp          # ESP32-S3 + LovyanGFX + Trackball + Touch + Keyboard + GPS
+  ├── cyd/main.cpp            # ESP32-2432S028 (CYD) + LovyanGFX + XPT2046 Touch + BOOT btn
   ├── native/main.cpp         # Desktop / Linux / RPi CLI simulator & PPM exporter (zd_sim)
   ├── linux/                  # Linux desktop app: real offensive/defensive WiFi tooling
   │   ├── backend/            #   hybrid libpcap/libnl + CLI-tool adapters & pure parsers
@@ -73,10 +74,19 @@ docs/                         # Theme design rules (THEMES.md) & porting guide (
 | **Trackball Hold (~0.6s)** / `Enter` | Trigger an immediate WiFi scan |
 | **Trackball Up / Down** | Cycle screen views backward / forward |
 | **Trackball Left / Right** | Cycle themes backward / forward (shows toast & persists to NVS) |
-| **GT911 Touchscreen** (T-Deck Plus) | Tap top bar to cycle theme; tap left/right third to cycle views; tap center to scan/wake |
+| **GT911 Touchscreen** (T-Deck Plus) | Tap top bar for **next** theme; hold top bar (~0.6s) for **previous** theme; tap left/right third to cycle views; tap center to scan/wake |
 | **QWERTY Keyboard Hotkeys** | `Space`/`Tab`: cycle views; `Enter`: immediate scan; `1`/`2`/`3`: jump to Face/Radar/Spectrum |
 | **Keyboard / Serial CLI** | Interactive typing: `theme neon`, `theme prev`, `themes`, `view next`, `scan`, `status`, `gps` |
 | **MIA-M10Q GPS** (T-Deck Plus) | Real-time GNSS coordinate & satellite acquisition; queried via `gps` command or telemetry |
+
+### CYD ESP32-2432S028 ("Cheap Yellow Display")
+| Input | Action |
+| :--- | :--- |
+| **XPT2046 Resistive Touch — Top Bar** | Tap to cycle to **next** theme; hold (~0.6s) to cycle to **previous** theme (persists to NVS) |
+| **XPT2046 Resistive Touch — Left / Right Third** | Tap left third for **previous** view; tap right third for **next** view |
+| **XPT2046 Resistive Touch — Center** | Tap center area to trigger an immediate WiFi scan & wake pet |
+| **BOOT Button (GPIO 0)** | Short press: cycle screen views & wake pet; Hold (~0.6s): immediate WiFi scan |
+| **Serial CLI (`115200` baud)** | Standard commands (`themes`, `theme <key>`, `view`, `scan`, `status`, `ascii`) plus `bl <10-255>`, `rot <1\|3>`, `ldr` |
 
 ---
 
@@ -100,6 +110,12 @@ pio run -e t-deck-plus --target upload
 
 # Standard LILYGO T-Deck
 pio run -e t-deck --target upload
+
+# Sunton CYD ESP32-2432S028R (Classic single-USB ILI9341, 2.8" 320x240, XPT2046 Touch)
+pio run -e cyd-esp32-2432s028 --target upload
+
+# Sunton CYD ESP32-2432S028R 2USB (Dual-USB ST7789, 2.8" 320x240, XPT2046 Touch)
+pio run -e cyd-esp32-2432s028-2usb --target upload
 
 # M5StickC (160x80) / M5StickC Plus (240x135)
 pio run -e m5stick-c --target upload

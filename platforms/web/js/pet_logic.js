@@ -309,7 +309,7 @@
       case Mood.Sleepy: {
         const kPhrases = [
           'Zzz... resting my pixels...',
-          'Power nap... press M5 to wake me.',
+          'Power nap... tap or press to wake me.',
           'Dreaming of 5-bar beacons... zZz'
         ];
         return fp.pickFrom(seed, kPhrases);

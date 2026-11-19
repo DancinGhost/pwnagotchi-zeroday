@@ -16,13 +16,16 @@
 
 #include "zd/hal.hpp"
 #include "zd/render/painter.hpp"
+#include "esp32_cli.hpp"
 #include "esp32_hal.hpp"
+#include "esp32_offensive.hpp"
 
 #include <Arduino.h>
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include <Wire.h>
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <esp_random.h>
 #include <string_view>
@@ -246,64 +249,101 @@ void initGps() {
     gGpsSerial.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 }
 
-// Zero-heap-allocation NMEA field tokenizer using string_view to eliminate heap fragmentation
-void parseNmeaField(std::string_view line, std::vector<std::string_view>& fields) {
-    fields.clear();
-    std::size_t start = 0;
-    for (std::size_t i = 0; i < line.size(); ++i) {
+// Verify standard NMEA-0183 XOR checksum ($body*XX).
+bool verifyNmeaChecksum(std::string_view line) {
+    if (line.size() < 4u || line.front() != '$') {
+        return false;
+    }
+    const std::size_t star = line.rfind('*');
+    if (star == std::string_view::npos || star + 3u > line.size()) {
+        return false;
+    }
+    auto hexNib = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        return -1;
+    };
+    const int hi = hexNib(line[star + 1u]);
+    const int lo = hexNib(line[star + 2u]);
+    if (hi < 0 || lo < 0) {
+        return false;
+    }
+    uint8_t x = 0u;
+    for (std::size_t i = 1u; i < star; ++i) {
+        x ^= static_cast<uint8_t>(line[i]);
+    }
+    return x == static_cast<uint8_t>((hi << 4) | lo);
+}
+
+// True zero-heap-allocation NMEA field tokenizer using fixed stack array.
+std::size_t parseNmeaFields(std::string_view line, std::array<std::string_view, 16>& fields) {
+    std::size_t count = 0u;
+    std::size_t start = 0u;
+    for (std::size_t i = 0u; i < line.size() && count < fields.size(); ++i) {
         if (line[i] == ',' || line[i] == '*') {
-            fields.push_back(line.substr(start, i - start));
-            start = i + 1;
+            fields[count++] = line.substr(start, i - start);
+            start = i + 1u;
+            if (line[i] == '*') {
+                break;
+            }
         }
     }
-    fields.push_back(line.substr(start));
+    if (count < fields.size() && start <= line.size()) {
+        fields[count++] = line.substr(start);
+    }
+    return count;
 }
 
 void pollGps(uint32_t nowMs) {
+    // Expire stale GPS fix if no valid RMC sentence arrived in > 5 seconds.
+    if (gGps.hasFix && (nowMs - gGps.lastSentenceMs) > 5000u) {
+        gGps.hasFix = false;
+    }
     while (gGpsSerial.available() > 0) {
         const char c = static_cast<char>(gGpsSerial.read());
         if (c == '\n' || c == '\r') {
-            if (gGpsNmeaLine.rfind("$GNRMC", 0) == 0 || gGpsNmeaLine.rfind("$GPRMC", 0) == 0) {
-                // Example: $GNRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
-                std::vector<std::string_view> f;
-                f.reserve(16);
-                parseNmeaField(gGpsNmeaLine, f);
-                if (f.size() >= 7 && f[2] == "A") { // Status 'A' = Valid fix
-                    gGps.hasFix = true;
-                    gGps.lastSentenceMs = nowMs;
-                    if (f[1].size() >= 6) {
-                        snprintf(gGps.utcTime, sizeof(gGps.utcTime), "%.2s:%.2s:%.2s",
-                                 f[1].data(), f[1].data() + 2, f[1].data() + 4);
-                    }
-                    if (!f[3].empty() && !f[5].empty()) {
-                        char latBuf[16] = {0};
-                        const std::size_t latLen = std::min(f[3].size(), sizeof(latBuf) - 1);
-                        std::memcpy(latBuf, f[3].data(), latLen);
-                        const float rawLat = std::strtof(latBuf, nullptr);
-                        const float latDeg = std::floor(rawLat / 100.0f);
-                        float lat = latDeg + ((rawLat - (latDeg * 100.0f)) / 60.0f);
-                        if (f[4] == "S") lat = -lat;
-                        gGps.latitude = lat;
+            if (!gGpsNmeaLine.empty() && verifyNmeaChecksum(gGpsNmeaLine)) {
+                std::array<std::string_view, 16> f{};
+                const std::size_t n = parseNmeaFields(gGpsNmeaLine, f);
+                if (gGpsNmeaLine.rfind("$GNRMC", 0) == 0 || gGpsNmeaLine.rfind("$GPRMC", 0) == 0) {
+                    if (n >= 7u && f[2] == "A") {  // Status 'A' = Valid fix
+                        gGps.hasFix = true;
+                        gGps.lastSentenceMs = nowMs;
+                        if (f[1].size() >= 6u) {
+                            snprintf(gGps.utcTime, sizeof(gGps.utcTime), "%.2s:%.2s:%.2s",
+                                     f[1].data(), f[1].data() + 2, f[1].data() + 4);
+                        }
+                        if (!f[3].empty() && !f[5].empty()) {
+                            char latBuf[16] = {0};
+                            const std::size_t latLen = std::min(f[3].size(), sizeof(latBuf) - 1);
+                            std::memcpy(latBuf, f[3].data(), latLen);
+                            const float rawLat = std::strtof(latBuf, nullptr);
+                            const float latDeg = std::floor(rawLat / 100.0f);
+                            float lat = latDeg + ((rawLat - (latDeg * 100.0f)) / 60.0f);
+                            if (f[4] == "S") lat = -lat;
+                            gGps.latitude = lat;
 
-                        char lonBuf[16] = {0};
-                        const std::size_t lonLen = std::min(f[5].size(), sizeof(lonBuf) - 1);
-                        std::memcpy(lonBuf, f[5].data(), lonLen);
-                        const float rawLon = std::strtof(lonBuf, nullptr);
-                        const float lonDeg = std::floor(rawLon / 100.0f);
-                        float lon = lonDeg + ((rawLon - (lonDeg * 100.0f)) / 60.0f);
-                        if (f[6] == "W") lon = -lon;
-                        gGps.longitude = lon;
+                            char lonBuf[16] = {0};
+                            const std::size_t lonLen = std::min(f[5].size(), sizeof(lonBuf) - 1);
+                            std::memcpy(lonBuf, f[5].data(), lonLen);
+                            const float rawLon = std::strtof(lonBuf, nullptr);
+                            const float lonDeg = std::floor(rawLon / 100.0f);
+                            float lon = lonDeg + ((rawLon - (lonDeg * 100.0f)) / 60.0f);
+                            if (f[6] == "W") lon = -lon;
+                            gGps.longitude = lon;
+                        }
+                    } else if (n >= 3u && f[2] == "V") {  // Status 'V' = Warning / Fix lost
+                        gGps.hasFix = false;
                     }
-                }
-            } else if (gGpsNmeaLine.rfind("$GNGGA", 0) == 0 || gGpsNmeaLine.rfind("$GPGGA", 0) == 0) {
-                std::vector<std::string_view> f;
-                f.reserve(16);
-                parseNmeaField(gGpsNmeaLine, f);
-                if (f.size() >= 8 && !f[7].empty()) {
-                    char satBuf[8] = {0};
-                    const std::size_t satLen = std::min(f[7].size(), sizeof(satBuf) - 1);
-                    std::memcpy(satBuf, f[7].data(), satLen);
-                    gGps.satellites = static_cast<uint8_t>(std::atoi(satBuf));
+                } else if (gGpsNmeaLine.rfind("$GNGGA", 0) == 0 ||
+                           gGpsNmeaLine.rfind("$GPGGA", 0) == 0) {
+                    if (n >= 8u && !f[7].empty()) {
+                        char satBuf[8] = {0};
+                        const std::size_t satLen = std::min(f[7].size(), sizeof(satBuf) - 1);
+                        std::memcpy(satBuf, f[7].data(), satLen);
+                        gGps.satellites = static_cast<uint8_t>(std::atoi(satBuf));
+                    }
                 }
             }
             gGpsNmeaLine.clear();
@@ -321,7 +361,11 @@ NvsThemeStore gThemeStore;
 TDeckDisplaySink gDisplay;
 zd::hal::PlatformSession gSession;
 
-uint32_t gLastRenderMs = 0;
+// Active-offense console (deauth injection). Inert until explicitly armed + allow-listed at
+// the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
+zd::esp32_common::OffensiveConsole gOffensive;
+
+zd::esp32_common::DirtyFramePacer gFramePacer;
 std::string gSerialLine;
 std::string gKeyboardLine;
 
@@ -333,6 +377,7 @@ uint32_t gLastTbRollMs = 0;
 
 // Touch button state
 bool gTouchActive = false;
+bool gTouchLongHandled = false;
 uint32_t gTouchStartMs = 0;
 uint16_t gTouchStartX = 0;
 uint16_t gTouchStartY = 0;
@@ -356,34 +401,30 @@ void logSerialStatus(const char* eventTag) {
 }
 
 void pollSerialCli(uint32_t nowMs) {
-    while (Serial.available() > 0) {
-        const char c = static_cast<char>(Serial.read());
-        if (c == '\n' || c == '\r') {
-            if (!gSerialLine.empty()) {
-                if (gSerialLine == "gps") {
-                    if (gGps.hasFix) {
-                        Serial.printf("GPS: FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
-                                      gGps.latitude, gGps.longitude, gGps.satellites, gGps.utcTime);
-                    } else {
-                        Serial.println("GPS: Searching for satellites (no fix yet)...");
-                    }
-                } else {
-                    const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
-                        gSerialLine, gSession.state(), gDisplay.dimensions(), nowMs);
-                    if (!res.output.empty()) {
-                        Serial.print(res.output.c_str());
-                    }
-                    if (res.event.has_value()) {
-                        gSession.dispatch(*res.event, &gThemeStore);
-                        logSerialStatus("SERIAL");
-                    }
-                }
-                gSerialLine.clear();
-            }
-        } else if (gSerialLine.size() < 64u) {
-            gSerialLine.push_back(c);
+    zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
+        if (line == "sec" || line.rfind("sec ", 0) == 0) {
+            Serial.print(gOffensive.handleLine(line, nowMs).c_str());
+            return;
         }
-    }
+        if (line == "gps") {
+            if (gGps.hasFix) {
+                Serial.printf("GPS: FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
+                              gGps.latitude, gGps.longitude, gGps.satellites, gGps.utcTime);
+            } else {
+                Serial.println("GPS: Searching for satellites (no fix yet)...");
+            }
+        } else {
+            const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
+                line, gSession.state(), gDisplay.dimensions(), nowMs);
+            if (!res.output.empty()) {
+                Serial.print(res.output.c_str());
+            }
+            if (res.event.has_value()) {
+                gSession.dispatch(*res.event, &gThemeStore);
+                logSerialStatus("SERIAL");
+            }
+        }
+    });
 }
 
 void initTrackball() {
@@ -410,7 +451,7 @@ void pollTrackball(uint32_t nowMs) {
         }
     } else if (!clickPressed && gTbClickActive) {
         gTbClickActive = false;
-        if (!gTbLongHandled) {
+        if (!gTbLongHandled && (nowMs - gTbClickStartMs) >= 25u) {
             // Short center click -> Cycle screen view (Button A) / wake pet
             gSession.dispatch(zd::ButtonAPressedEvent{nowMs}, &gThemeStore);
             logSerialStatus("TB_CLICK_VIEW");
@@ -470,6 +511,11 @@ void pollKeyboard(uint32_t nowMs) {
                 gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
                 logSerialStatus("KB_SCAN");
             } else {
+                if (gKeyboardLine == "sec" || gKeyboardLine.rfind("sec ", 0) == 0) {
+                    Serial.print(gOffensive.handleLine(gKeyboardLine, nowMs).c_str());
+                    gKeyboardLine.clear();
+                    return;
+                }
                 if (gKeyboardLine == "gps") {
                     if (gGps.hasFix) {
                         Serial.printf("[GPS] FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
@@ -521,14 +567,25 @@ void pollTouch(uint32_t nowMs, LGFX_TDeck& lcd) {
 
     if (isTouched && !gTouchActive) {
         gTouchActive = true;
+        gTouchLongHandled = false;
         gTouchStartMs = nowMs;
         gTouchStartX = tx;
         gTouchStartY = ty;
+    } else if (isTouched && gTouchActive && !gTouchLongHandled) {
+        // Long-press top header bar (>= 600ms) -> previous theme (matches CYD touch controls)
+        if (gTouchStartY < 42 && (nowMs - gTouchStartMs) >= 600u) {
+            gTouchLongHandled = true;
+            gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
+            logSerialStatus("TOUCH_THEME_PREV");
+        }
     } else if (!isTouched && gTouchActive) {
         gTouchActive = false;
+        if (gTouchLongHandled) {
+            return;
+        }
         const uint32_t duration = nowMs - gTouchStartMs;
-        if (duration < 500u) {
-            // Tapped top header bar -> cycle theme
+        if (duration < 600u) {
+            // Tapped top header bar -> next theme
             if (gTouchStartY < 42) {
                 gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
                 logSerialStatus("TOUCH_THEME");
@@ -563,6 +620,7 @@ void setup() {
     gRadio.init();
     gPower.init();
     gThemeStore.init();
+    gOffensive.begin();
 
     // Seed pure functional PRNG with hardware entropy & restore theme from NVS
     gSession.boot(esp_random(), millis(), &gThemeStore);
@@ -586,9 +644,8 @@ void loop() {
     }
     gSession.stepTick(nowMs, gPower);
 
-    // 3. Refresh display at ~20 FPS (50ms frame pacing)
-    if ((nowMs - gLastRenderMs) >= 50u) {
-        gLastRenderMs = nowMs;
+    // 3. Refresh display only when state changed, animating, or on 1 Hz uptime tick
+    if (gFramePacer.shouldRender(gSession.state(), nowMs)) {
         gSession.renderTo(gDisplay);
     }
 

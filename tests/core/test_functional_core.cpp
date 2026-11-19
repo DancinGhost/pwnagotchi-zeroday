@@ -236,13 +236,23 @@ void testThemeCatalog() {
     assert(zd::themeFromKey("neon") == zd::ThemeId::NeonNoir);
     assert(zd::themeFromKey("volt") == zd::ThemeId::NeonVolt);
     assert(zd::themeFromKey("operator") == zd::ThemeId::OperatorBlue);
+    assert(zd::themeFromKey("rain") == zd::ThemeId::CodeRain);
+    assert(zd::themeFromKey("crimson") == zd::ThemeId::CrimsonOps);
+    assert(zd::themeFromKey("redrain") == zd::ThemeId::RedRain);
+    assert(zd::themeFromKey("blueteam") == zd::ThemeId::BlueTeam);
+    assert(zd::themeSpec(zd::ThemeId::CodeRain).effect == zd::ThemeEffect::DigitalRain);
+    assert(zd::themeSpec(zd::ThemeId::RedRain).effect == zd::ThemeEffect::DigitalRain);
+    assert(zd::themeSpec(zd::ThemeId::CrimsonOps).effect == zd::ThemeEffect::TacticalHud);
+    assert(zd::themeSpec(zd::ThemeId::BlueTeam).effect == zd::ThemeEffect::TacticalHud);
     assert(zd::themeLabel(zd::ThemeId::NeonNoir) == "NEON NOIR");
+    assert(zd::themeLabel(zd::ThemeId::CodeRain) == "CODE RAIN");
+    assert(zd::themeLabel(zd::ThemeId::CrimsonOps) == "CRIMSON OPS");
     assert(zd::toRgb888Packed({0x12, 0x34, 0x56}) == 0x123456u);
 
     // Cycling wraps both directions and visits every theme exactly once
     static_assert(zd::nextTheme(zd::ThemeId::PaperInk) == zd::ThemeId::DarkInk, "next");
-    static_assert(zd::prevTheme(zd::ThemeId::PaperInk) == zd::ThemeId::SunsetGrid, "prev wrap");
-    static_assert(zd::nextTheme(zd::ThemeId::SunsetGrid) == zd::ThemeId::PaperInk, "next wrap");
+    static_assert(zd::prevTheme(zd::ThemeId::PaperInk) == zd::ThemeId::BlueTeam, "prev wrap");
+    static_assert(zd::nextTheme(zd::ThemeId::BlueTeam) == zd::ThemeId::PaperInk, "next wrap");
     static_assert(zd::cycleTheme(zd::ThemeId::PaperInk,
                                  -(2 * static_cast<int>(zd::kThemeCount) + 1)) ==
                       zd::prevTheme(zd::ThemeId::PaperInk),
@@ -279,7 +289,7 @@ void testThemeEventsAndToast() {
     assert(s0.theme == zd::ThemeId::PaperInk);                   // s0 untouched
 
     const zd::AppState sPrev = zd::reduce(s0, zd::CycleThemeEvent{5000u, -1});
-    assert(sPrev.theme == zd::ThemeId::SunsetGrid);
+    assert(sPrev.theme == zd::ThemeId::BlueTeam);
 
     // Direct set (e.g. restored from flash) can be silent
     const zd::AppState sSilent =

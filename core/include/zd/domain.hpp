@@ -69,6 +69,10 @@ enum class ThemeId : uint8_t {
     RedTeam,          // Night-ops red on black (preserves dark-adapted vision)
     AmberCrt,         // Vintage amber monochrome terminal
     SunsetGrid,       // Retro synthwave sunset: warm orange + pink on deep purple
+    CodeRain,         // Cascading emerald digital rain on pitch-black void
+    CrimsonOps,       // Team Red tactical HUD: scarlet ink, rose telemetry & radar sweep
+    RedRain,          // Team Red cascading crimson code rain on obsidian black
+    BlueTeam,         // Defensive ops HUD: crisp ice blue, sapphire grid & radar sweep
     Count_            // Sentinel: number of themes (not a real theme)
 };
 

@@ -632,6 +632,125 @@
     }
   }
 
+  function drawDigitalRainBackdrop(gfx, frame) {
+    const top = frame.headerDividerY + 2;
+    const bottom = frame.footerDividerY - 2;
+    const bodyH = bottom - top;
+    if (bodyH < 12 || frame.dims.width < 96) {
+      return;
+    }
+
+    const colStep = frame.compact ? 22 : 18;
+    const rows = Math.floor(bodyH / 8);
+    if (rows < 2) {
+      return;
+    }
+
+    const span = rows + 4;
+    const trail = frame.compact ? 2 : 3;
+    const glyphs = '01:+=*|7x;<>';
+    const animTick = (frame.animTick >>> 0);
+
+    const g = frame.faceGeom;
+    const faceLeft = g.centerX - g.bracketOffsetX - 6;
+    const faceRight = g.centerX + g.bracketOffsetX + 6;
+    const faceTop = g.centerY - g.bracketHalfHeight - 6;
+    const faceBottom = g.moodBadgeY + 9;
+
+    for (let col = 0; ; col++) {
+      const x = 4 + col * colStep;
+      if (x + 6 > frame.dims.width - 2) {
+        break;
+      }
+      const h = (Math.imul(col + 1, 2654435761) ^ 0x9e3779b9) >>> 0;
+      const speed = (h & 1) !== 0 ? 2 : 1;
+      const phase = (h >>> 4) % span;
+      const headRow = ((animTick * speed + phase) % span) | 0;
+
+      for (let k = 0; k < trail; k++) {
+        const r = headRow - k;
+        if (r < 0 || r >= rows) {
+          continue;
+        }
+        const gy = top + r * 8;
+        if (gy < top || gy + 8 > bottom) {
+          continue;
+        }
+        if (
+          frame.page === logic.ScreenPage.PetFace &&
+          x + 6 > faceLeft &&
+          x < faceRight &&
+          gy + 8 > faceTop &&
+          gy < faceBottom
+        ) {
+          continue;
+        }
+        const gh =
+          (h ^ Math.imul(r, 2246822519) ^ Math.imul(animTick >>> 1, 374761393)) >>> 0;
+        gfx.setTextColor(frame.palette.muted, frame.palette.bg);
+        gfx.drawString(glyphs.charAt(gh % glyphs.length), x, gy);
+        if (k === 0 && !frame.compact) {
+          gfx.fillRect(x + 1, gy + 7, 2, 1, frame.palette.accent);
+        }
+      }
+    }
+  }
+
+  function drawTacticalHudBackdrop(gfx, frame) {
+    const top = frame.headerDividerY + 2;
+    const bottom = frame.footerDividerY - 2;
+    const left = 2;
+    const right = frame.dims.width - 3;
+    const corner = frame.compact ? 4 : 7;
+
+    if (bottom - top < corner * 2 + 2 || right - left < corner * 2 + 2) {
+      return;
+    }
+
+    const col = frame.palette.muted;
+    gfx.drawLine(left, top, left + corner, top, col);
+    gfx.drawLine(left, top, left, top + corner, col);
+
+    gfx.drawLine(right - corner, top, right, top, col);
+    gfx.drawLine(right, top, right, top + corner, col);
+
+    gfx.drawLine(left, bottom, left + corner, bottom, col);
+    gfx.drawLine(left, bottom - corner, left, bottom, col);
+
+    gfx.drawLine(right - corner, bottom, right, bottom, col);
+    gfx.drawLine(right, bottom - corner, right, bottom, col);
+
+    if (frame.headerDividerY + 2 < frame.footerDividerY) {
+      const tickStep = frame.compact ? 32 : 24;
+      for (let tx = 16; tx < frame.dims.width - 12; tx += tickStep) {
+        gfx.fillRect(tx, frame.headerDividerY + 1, 1, 2, col);
+      }
+    }
+  }
+
+  function drawThemeBackdrop(gfx, frame) {
+    if (frame.themeEffect === 'DigitalRain') {
+      drawDigitalRainBackdrop(gfx, frame);
+    } else if (frame.themeEffect === 'TacticalHud') {
+      drawTacticalHudBackdrop(gfx, frame);
+    }
+  }
+
+  function drawThemeDividerAccent(gfx, frame) {
+    if (frame.themeEffect !== 'TacticalHud') {
+      return;
+    }
+    const pipW = frame.compact ? 6 : 10;
+    const travel = frame.dims.width - pipW;
+    if (travel <= 1) {
+      return;
+    }
+    const period = travel * 2;
+    const step = (((frame.animTick >>> 0) * (frame.compact ? 4 : 6)) % period) >>> 0;
+    const pipX = step <= travel ? step : period - step;
+    gfx.fillRect(pipX, frame.headerDividerY, pipW, 1, frame.palette.highlight);
+  }
+
   function drawThemeToast(gfx, frame) {
     const t = frame.toast;
     if (!t || !t.visible) {
@@ -647,10 +766,14 @@
   function paintUiFrame(gfx, frame, opts) {
     gfx.fillScreen(frame.palette.bg);
 
+    // Optional zero-RAM procedural theme backdrop (mirrors render/include/zd/render/painter.hpp)
+    drawThemeBackdrop(gfx, frame);
+
     // Top telemetry bar
     gfx.setTextColor(frame.palette.fg, frame.palette.bg);
     gfx.drawString(frame.headerLine, 4, frame.headerTextY);
     gfx.drawLine(0, frame.headerDividerY, frame.dims.width - 1, frame.headerDividerY, frame.palette.muted);
+    drawThemeDividerAccent(gfx, frame);
 
     // Main content page
     switch (frame.page) {

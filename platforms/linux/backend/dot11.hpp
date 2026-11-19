@@ -43,8 +43,11 @@ inline RadiotapInfo parseRadiotap(const uint8_t* data, std::size_t len) {
     }
     info.length = rtLen;
 
-    const uint32_t firstPresent = static_cast<uint32_t>(
-        data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24));
+    const uint32_t firstPresent =
+        static_cast<uint32_t>(data[4]) |
+        (static_cast<uint32_t>(data[5]) << 8u) |
+        (static_cast<uint32_t>(data[6]) << 16u) |
+        (static_cast<uint32_t>(data[7]) << 24u);
     // Skip any extended present-flag words (bit 31 chains another word).
     std::size_t off = 8;
     uint32_t present = firstPresent;
@@ -52,8 +55,11 @@ inline RadiotapInfo parseRadiotap(const uint8_t* data, std::size_t len) {
         if (off + 4 > rtLen) {
             return info;
         }
-        present = static_cast<uint32_t>(data[off] | (data[off + 1] << 8) | (data[off + 2] << 16) |
-                                        (data[off + 3] << 24));
+        present =
+            static_cast<uint32_t>(data[off]) |
+            (static_cast<uint32_t>(data[off + 1]) << 8u) |
+            (static_cast<uint32_t>(data[off + 2]) << 16u) |
+            (static_cast<uint32_t>(data[off + 3]) << 24u);
         off += 4;
     }
 
@@ -102,10 +108,12 @@ inline sec::Encryption encryptionFromRsn(const uint8_t* ie, std::size_t len) {
     const uint16_t akmCount = static_cast<uint16_t>(ie[off] | (ie[off + 1] << 8));
     off += 2;
     for (uint16_t i = 0; i < akmCount && off + 4 <= len; ++i, off += 4) {
-        // AKM suite: OUI(3) + type(1). Type 8 = SAE (WPA3), 18 = OWE.
-        const uint8_t suiteType = ie[off + 3];
-        if (suiteType == 8 || suiteType == 18) {
-            return sec::Encryption::Wpa3;
+        // IEEE 802.11 AKM suite: OUI 00:0F:AC + suite type (8 = SAE/WPA3, 18 = OWE).
+        if (ie[off] == 0x00 && ie[off + 1] == 0x0F && ie[off + 2] == 0xAC) {
+            const uint8_t suiteType = ie[off + 3];
+            if (suiteType == 8 || suiteType == 18) {
+                return sec::Encryption::Wpa3;
+            }
         }
     }
     return sec::Encryption::Wpa2;
@@ -161,10 +169,11 @@ inline void parseTaggedParams(const uint8_t* tags, std::size_t tlen, bool privac
     }
 }
 
-// True if a data frame carries an EAPOL (0x888E) payload after the MAC+LLC/SNAP headers.
-inline bool looksLikeEapol(const uint8_t* f, std::size_t len) {
+// Returns the offset of the EAPOL payload (after 802.11 MAC + LLC/SNAP headers) if the
+// data frame carries an EAPOL-Key (0x888E, EAPOL type 3) packet, or 0 otherwise.
+inline std::size_t eapolKeyPayloadOffset(const uint8_t* f, std::size_t len) {
     if (len < 24) {
-        return false;
+        return 0u;
     }
     const uint8_t fc1 = f[1];
     const bool toDs = (fc1 & 0x01) != 0;
@@ -174,24 +183,75 @@ inline bool looksLikeEapol(const uint8_t* f, std::size_t len) {
     if ((subtype & 0x08) != 0) {  // QoS data: +2 byte QoS control
         hdr += 2;
     }
-    // LLC/SNAP: AA AA 03 00 00 00 <ethertype>
-    if (hdr + 8 > len) {
-        return false;
+    if ((fc1 & 0x80) != 0 && (subtype & 0x08) != 0) {  // Order/HT Control (+4 bytes)
+        hdr += 4;
+    }
+    // LLC/SNAP: AA AA 03 00 00 00 <ethertype=0x888E>
+    if (hdr + 8u + 4u > len) {
+        return 0u;
     }
     const uint8_t* llc = f + hdr;
-    if (llc[0] == 0xAA && llc[1] == 0xAA && llc[2] == 0x03) {
-        const uint16_t ethertype = static_cast<uint16_t>((llc[6] << 8) | llc[7]);
-        return ethertype == 0x888E;
+    if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) {
+        return 0u;
     }
-    return false;
+    const uint16_t ethertype = static_cast<uint16_t>((static_cast<uint16_t>(llc[6]) << 8u) | llc[7]);
+    if (ethertype != 0x888Eu) {
+        return 0u;
+    }
+    const std::size_t eapolOff = hdr + 8u;
+    // EAPOL header: version(1), type(1 == 3 for Key), bodyLen(2).
+    if (f[eapolOff + 1] != 0x03) {
+        return 0u;
+    }
+    return eapolOff;
 }
 
-// Heuristic: an EAPOL M1 carrying an RSN PMKID KDE (OUI 00-0F-AC, data type 0x04).
+// True if a data frame carries an EAPOL-Key (0x888E, type 3) payload.
+inline bool looksLikeEapol(const uint8_t* f, std::size_t len) {
+    return eapolKeyPayloadOffset(f, len) != 0u;
+}
+
+// Parses the EAPOL-Key Key Data TLV list for an RSN PMKID KDE (tag 0xDD, len >= 20,
+// OUI 00-0F-AC, data type 0x04, and non-zero 16-byte PMKID).
 inline bool carriesPmkid(const uint8_t* f, std::size_t len) {
-    for (std::size_t i = 0; i + 4 <= len; ++i) {
-        if (f[i] == 0x00 && f[i + 1] == 0x0F && f[i + 2] == 0xAC && f[i + 3] == 0x04) {
-            return true;
+    const std::size_t eapolOff = eapolKeyPayloadOffset(f, len);
+    // EAPOL header (4) + EAPOL-Key fixed body (95) = 99 bytes before Key Data.
+    constexpr std::size_t kEapolKeyHeaderLen = 4u + 95u;
+    if (eapolOff == 0u || eapolOff + kEapolKeyHeaderLen > len) {
+        return false;
+    }
+    const uint8_t* eapol = f + eapolOff;
+    const std::size_t keyDataLen =
+        (static_cast<std::size_t>(eapol[4u + 93u]) << 8u) | eapol[4u + 94u];
+    const std::size_t keyDataOff = eapolOff + kEapolKeyHeaderLen;
+    if (keyDataLen == 0u || keyDataOff + keyDataLen > len) {
+        return false;
+    }
+    const uint8_t* kd = f + keyDataOff;
+    std::size_t i = 0u;
+    while (i + 2u <= keyDataLen) {
+        const uint8_t tag = kd[i];
+        const uint8_t kl = kd[i + 1u];
+        if (tag == 0xDD && kl == 0u) {
+            break;  // padding sentinel
         }
+        if (i + 2u + kl > keyDataLen) {
+            break;
+        }
+        if (tag == 0xDD && kl >= 20u &&
+            kd[i + 2u] == 0x00 && kd[i + 3u] == 0x0F && kd[i + 4u] == 0xAC && kd[i + 5u] == 0x04) {
+            bool nonZero = false;
+            for (std::size_t p = 0; p < 16u; ++p) {
+                if (kd[i + 6u + p] != 0u) {
+                    nonZero = true;
+                    break;
+                }
+            }
+            if (nonZero) {
+                return true;
+            }
+        }
+        i += 2u + kl;
     }
     return false;
 }

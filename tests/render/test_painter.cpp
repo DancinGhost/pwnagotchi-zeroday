@@ -112,6 +112,25 @@ void testPainterAcrossDevicesThemesAndMoods() {
             zd::render::paintUiFrame(surf, frame);
             assert(surf.outOfBoundsDrops() == 0u);
         }
+
+        // Animated backdrop effects (DigitalRain & TacticalHud) must animate cleanly and stay
+        // strictly in-bounds across multiple uptime ticks on every hardware profile.
+        for (zd::ThemeId fxTheme : {zd::ThemeId::CodeRain, zd::ThemeId::CrimsonOps,
+                                    zd::ThemeId::RedRain, zd::ThemeId::BlueTeam}) {
+            zd::AppState s1 = zd::reduce(base, zd::SetThemeEvent{20000u, fxTheme, false});
+            zd::AppState s2 = zd::reduce(s1, zd::TickEvent{20700u, 90, false});
+            const zd::UiFrame f1 = zd::buildUiFrame(s1, prof.dims);
+            const zd::UiFrame f2 = zd::buildUiFrame(s2, prof.dims);
+            assert(f1.animTick != f2.animTick);
+
+            zd::render::Rgb565Surface surf1(prof.dims.width, prof.dims.height);
+            zd::render::Rgb565Surface surf2(prof.dims.width, prof.dims.height);
+            zd::render::paintUiFrame(surf1, f1);
+            zd::render::paintUiFrame(surf2, f2);
+            assert(surf1.outOfBoundsDrops() == 0u);
+            assert(surf2.outOfBoundsDrops() == 0u);
+            assert(surf1.pixels() != surf2.pixels());
+        }
     }
 }
 

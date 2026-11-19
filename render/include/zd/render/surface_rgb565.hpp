@@ -182,10 +182,17 @@ public:
         };
         const float a0 = normDeg(deg0);
         const float a1 = normDeg(deg1);
-        const bool wraps = a0 > a1;
+        const float span = (a0 > a1) ? (360.0f - a0 + a1) : (a1 - a0);
+        const bool fullCircle = (std::fabs(deg1 - deg0) >= 360.0f);
+        const bool reflex = (span > 180.0f);
+        constexpr float kDegToRad = 0.01745329252f;
+        const float c0x = std::cos(a0 * kDegToRad);
+        const float c0y = std::sin(a0 * kDegToRad);
+        const float c1x = std::cos(a1 * kDegToRad);
+        const float c1y = std::sin(a1 * kDegToRad);
+
         const int outerSq = rOuter * rOuter;
         const int innerSq = rInner * rInner;
-        constexpr float kRadToDeg = 57.2957795f;
 
         for (int dy = -rOuter; dy <= rOuter; ++dy) {
             for (int dx = -rOuter; dx <= rOuter; ++dx) {
@@ -193,11 +200,16 @@ public:
                 if (dSq > outerSq || dSq < innerSq) {
                     continue;
                 }
-                float deg = std::atan2(static_cast<float>(dy), static_cast<float>(dx)) * kRadToDeg;
-                if (deg < 0.0f) {
-                    deg += 360.0f;
+                if (fullCircle || (dx == 0 && dy == 0)) {
+                    setPixel(cx + dx, cy + dy, color);
+                    continue;
                 }
-                const bool inAngle = wraps ? (deg >= a0 || deg <= a1) : (deg >= a0 && deg <= a1);
+                const float fx = static_cast<float>(dx);
+                const float fy = static_cast<float>(dy);
+                const float cross0 = c0x * fy - c0y * fx;
+                const float cross1 = c1x * fy - c1y * fx;
+                const bool inAngle = reflex ? (cross0 >= -1e-4f || cross1 <= 1e-4f)
+                                            : (cross0 >= -1e-4f && cross1 <= 1e-4f);
                 if (inAngle) {
                     setPixel(cx + dx, cy + dy, color);
                 }

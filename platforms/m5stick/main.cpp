@@ -7,7 +7,9 @@
 
 #include "zd/hal.hpp"
 #include "zd/render/painter.hpp"
+#include "esp32_cli.hpp"
 #include "esp32_hal.hpp"
+#include "esp32_offensive.hpp"
 
 #include <Arduino.h>
 #include <M5Unified.h>
@@ -75,8 +77,12 @@ NvsThemeStore gThemeStore;
 M5DisplaySink gDisplay;
 zd::hal::PlatformSession gSession;
 
+// Active-offense console (deauth injection). Inert until explicitly armed + allow-listed at
+// the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
+zd::esp32_common::OffensiveConsole gOffensive;
+
 bool gBtnBLongHandled = false;
-uint32_t gLastRenderMs = 0;
+zd::esp32_common::DirtyFramePacer gFramePacer;
 std::string gSerialLine;
 
 void logSerialStatus(const char* eventTag) {
@@ -93,25 +99,21 @@ void logSerialStatus(const char* eventTag) {
 }
 
 void pollSerialCli(uint32_t nowMs) {
-    while (Serial.available() > 0) {
-        const char c = static_cast<char>(Serial.read());
-        if (c == '\n' || c == '\r') {
-            if (!gSerialLine.empty()) {
-                const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
-                    gSerialLine, gSession.state(), gDisplay.dimensions(), nowMs);
-                if (!res.output.empty()) {
-                    Serial.print(res.output.c_str());
-                }
-                if (res.event.has_value()) {
-                    gSession.dispatch(*res.event, &gThemeStore);
-                    logSerialStatus("SERIAL");
-                }
-                gSerialLine.clear();
-            }
-        } else if (gSerialLine.size() < 64u) {
-            gSerialLine.push_back(c);
+    zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
+        if (line == "sec" || line.rfind("sec ", 0) == 0) {
+            Serial.print(gOffensive.handleLine(line, nowMs).c_str());
+            return;
         }
-    }
+        const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
+            line, gSession.state(), gDisplay.dimensions(), nowMs);
+        if (!res.output.empty()) {
+            Serial.print(res.output.c_str());
+        }
+        if (res.event.has_value()) {
+            gSession.dispatch(*res.event, &gThemeStore);
+            logSerialStatus("SERIAL");
+        }
+    });
 }
 
 }  // namespace
@@ -124,6 +126,7 @@ void setup() {
     gDisplay.init();
     gRadio.init();
     gThemeStore.init();
+    gOffensive.begin();
 
     // Seed pure functional PRNG with hardware entropy & restore saved theme from NVS
     gSession.boot(esp_random(), millis(), &gThemeStore);
@@ -172,9 +175,8 @@ void loop() {
     }
     gSession.stepTick(nowMs, gPower);
 
-    // 6. Refresh display at ~20 FPS (50ms frame pacing)
-    if ((nowMs - gLastRenderMs) >= 50u) {
-        gLastRenderMs = nowMs;
+    // 6. Refresh display only when state changed, animating, or on 1 Hz uptime tick
+    if (gFramePacer.shouldRender(gSession.state(), nowMs)) {
         gSession.renderTo(gDisplay);
     }
 

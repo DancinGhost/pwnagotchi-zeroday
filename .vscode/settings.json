@@ -6,7 +6,8 @@
         "${workspaceFolder}/platforms/common",
         "${workspaceFolder}/platforms/linux",
         "${workspaceFolder}/platforms/m5stick",
-        "${workspaceFolder}/platforms/tdeck"
+        "${workspaceFolder}/platforms/tdeck",
+        "${workspaceFolder}/platforms/cyd"
     ],
     "files.associations": {
         "*.hpp": "cpp",
