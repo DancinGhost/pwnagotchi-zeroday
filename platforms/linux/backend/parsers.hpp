@@ -105,13 +105,17 @@ inline std::vector<AccessPoint> parseNmcliScan(const std::string& text) {
         if (f.size() < 5) {
             continue;
         }
+        const std::string rawBssid = trim(f[0]);
+        if (!sec::isValidMac(rawBssid)) {
+            continue;
+        }
         // Fields: BSSID, SSID, CHAN, SECURITY, SIGNAL
         AccessPoint ap;
         ap.ssid = sec::sanitizePrintableText(trim(f[1]));
-        ap.channel = std::atoi(f[2].c_str());
+        ap.channel = sec::detail::parseI32(f[2]);
         const sec::Encryption enc = encryptionFromText(f[3]);
         ap.secure = (enc != sec::Encryption::Open && enc != sec::Encryption::Unknown);
-        ap.rssi = nmcliSignalToDbm(std::atoi(f[4].c_str()));
+        ap.rssi = nmcliSignalToDbm(sec::detail::parseI32(f[4]));
         out.push_back(ap);
     }
     return out;
@@ -145,9 +149,9 @@ inline std::vector<ScannedAp> parseNmcliScanDetailed(const std::string& text) {
         ScannedAp ap;
         ap.bssid = sec::normalizeMac(rawBssid);
         ap.ssid = sec::sanitizePrintableText(trim(f[1]));
-        ap.channel = std::atoi(f[2].c_str());
+        ap.channel = sec::detail::parseI32(f[2]);
         ap.enc = encryptionFromText(f[3]);
-        ap.rssi = nmcliSignalToDbm(std::atoi(f[4].c_str()));
+        ap.rssi = nmcliSignalToDbm(sec::detail::parseI32(f[4]));
         out.push_back(ap);
     }
     return out;
@@ -181,18 +185,26 @@ struct AirodumpDump {
     std::vector<AirodumpStation> stations;
 };
 
-inline std::vector<std::string> splitCsv(const std::string& line) {
+inline std::vector<std::string> splitCsvRaw(const std::string& line) {
     std::vector<std::string> out;
     std::string cur;
     for (char c : line) {
         if (c == ',') {
-            out.push_back(trim(cur));
+            out.push_back(cur);
             cur.clear();
         } else {
             cur.push_back(c);
         }
     }
-    out.push_back(trim(cur));
+    out.push_back(cur);
+    return out;
+}
+
+inline std::vector<std::string> splitCsv(const std::string& line) {
+    std::vector<std::string> out = splitCsvRaw(line);
+    for (std::string& field : out) {
+        field = trim(field);
+    }
     return out;
 }
 
@@ -214,40 +226,43 @@ inline AirodumpDump parseAirodumpCsv(const std::string& text) {
             inStations = true;
             continue;  // station header
         }
-        const std::vector<std::string> f = splitCsv(line);
+        const std::vector<std::string> raw = splitCsvRaw(line);
         if (!inStations) {
-            if (f.size() < 14 || !sec::isValidMac(f[0])) {
+            if (raw.size() < 14 || !sec::isValidMac(trim(raw[0]))) {
                 continue;
             }
             AirodumpAp ap;
-            ap.bssid = sec::normalizeMac(f[0]);
-            ap.channel = std::atoi(f[3].c_str());
+            ap.bssid = sec::normalizeMac(trim(raw[0]));
+            ap.channel = sec::detail::parseI32(raw[3]);
             // Privacy(5) + Cipher(6) + Authentication(7) describe encryption.
-            ap.enc = encryptionFromText(f[5] + " " + f[6] + " " + f[7]);
-            ap.rssi = std::atoi(f[8].c_str());
-            const int rawBeacons = std::atoi(f[9].c_str());
+            ap.enc = encryptionFromText(trim(raw[5]) + " " + trim(raw[6]) + " " + trim(raw[7]));
+            ap.rssi = sec::detail::parseI32(raw[8]);
+            const int32_t rawBeacons = sec::detail::parseI32(raw[9]);
             ap.beacons = (rawBeacons > 0) ? static_cast<uint32_t>(rawBeacons) : 0u;
-            // Rejoin ESSID if it contained commas (columns 0..12 fixed, last column is Key).
-            std::string rawEssid = f[13];
-            if (f.size() > 15u) {
-                for (std::size_t col = 14u; col + 1u < f.size(); ++col) {
-                    rawEssid += "," + f[col];
+            // Rejoin ESSID if it contained commas (columns 0..12 fixed, last column is Key),
+            // preserving internal spaces after commas (e.g. "Coffee, Tea").
+            std::string rawEssid = raw[13];
+            if (raw.size() > 15u) {
+                for (std::size_t col = 14u; col + 1u < raw.size(); ++col) {
+                    rawEssid += "," + raw[col];
                 }
             }
-            ap.ssid = sec::sanitizePrintableText(rawEssid);
+            ap.ssid = sec::sanitizePrintableText(trim(rawEssid));
             dump.aps.push_back(ap);
         } else {
-            if (f.size() < 6) {
+            if (raw.size() < 6) {
                 continue;
             }
-            if (!sec::isValidMac(f[0])) {
+            const std::string mac = trim(raw[0]);
+            if (!sec::isValidMac(mac)) {
                 continue;
             }
             AirodumpStation st;
-            st.mac = sec::normalizeMac(f[0]);
-            st.bssid = sec::isValidMac(f[5]) ? sec::normalizeMac(f[5]) : std::string{};
-            for (std::size_t k = 6; k < f.size(); ++k) {
-                const std::string cleaned = sec::sanitizePrintableText(f[k]);
+            st.mac = sec::normalizeMac(mac);
+            const std::string assoc = trim(raw[5]);
+            st.bssid = sec::isValidMac(assoc) ? sec::normalizeMac(assoc) : std::string{};
+            for (std::size_t k = 6; k < raw.size(); ++k) {
+                const std::string cleaned = sec::sanitizePrintableText(trim(raw[k]));
                 if (!cleaned.empty()) {
                     st.probedEssids.push_back(cleaned);
                 }
@@ -256,6 +271,155 @@ inline AirodumpDump parseAirodumpCsv(const std::string& text) {
         }
     }
     return dump;
+}
+
+// --- Pure BLE & Sub-GHz tool line parsers (BlueZ / hcitool / rtl_433) ---------------
+
+struct ScannedBleDevice {
+    std::string mac;
+    std::string name;
+    int32_t rssi = -100;
+    uint16_t companyId = 0;
+    uint16_t serviceUuid = 0;
+    bool trackerPayload = false;
+    BleThreatKind threat = BleThreatKind::None;
+};
+
+struct ScannedSubGhzSignal {
+    uint32_t freqKhz = 433920u;
+    int32_t rssi = -100;
+    std::string protocol;
+    uint32_t burstCount = 1u;
+    bool continuousCarrier = false;
+};
+
+// Parses lines such as:
+//   "AA:BB:CC:DD:EE:FF|-55|Tracker_Tag|0x004C|0x0000|1"
+//   "Device 00:80:E1:11:22:33 MultiTool_Unit"
+//   "00:80:E1:11:22:33 MultiTool_Unit"
+inline std::optional<ScannedBleDevice> parseBluezBleLine(std::string_view rawLine) {
+    std::string line = trim(std::string(rawLine));
+    if (line.empty()) {
+        return std::nullopt;
+    }
+    ScannedBleDevice dev{};
+    if (line.find('|') != std::string::npos) {
+        std::vector<std::string> parts;
+        std::string cur;
+        for (char c : line) {
+            if (c == '|') {
+                parts.push_back(trim(cur));
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        parts.push_back(trim(cur));
+        if (parts.size() < 2 || !sec::isValidMac(parts[0])) {
+            return std::nullopt;
+        }
+        dev.mac = sec::normalizeMac(parts[0]);
+        dev.rssi = sec::detail::parseI32(parts[1]);
+        if (parts.size() >= 3) dev.name = sec::sanitizePrintableText(parts[2], 48u);
+        auto parseHexOrDec = [](const std::string& s) -> uint16_t {
+            if (s.empty()) return 0u;
+            if (s.rfind("0x", 0) == 0 || s.rfind("0X", 0) == 0) {
+                uint32_t val = 0u;
+                for (std::size_t i = 2u; i < s.size(); ++i) {
+                    const char ch = s[i];
+                    uint32_t nib = 0u;
+                    if (ch >= '0' && ch <= '9') nib = static_cast<uint32_t>(ch - '0');
+                    else if (ch >= 'a' && ch <= 'f') nib = static_cast<uint32_t>(10 + ch - 'a');
+                    else if (ch >= 'A' && ch <= 'F') nib = static_cast<uint32_t>(10 + ch - 'A');
+                    else break;
+                    val = (val << 4u) | nib;
+                }
+                return static_cast<uint16_t>(val & 0xFFFFu);
+            }
+            return static_cast<uint16_t>(sec::detail::parseU32(s) & 0xFFFFu);
+        };
+        if (parts.size() >= 4) dev.companyId = parseHexOrDec(parts[3]);
+        if (parts.size() >= 5) dev.serviceUuid = parseHexOrDec(parts[4]);
+        if (parts.size() >= 6) dev.trackerPayload = (parts[5] == "1" || parts[5] == "true");
+    } else {
+        if (line.rfind("Device ", 0) == 0) {
+            line = trim(line.substr(7));
+        }
+        const std::size_t sp = line.find(' ');
+        const std::string macPart = (sp == std::string::npos) ? line : line.substr(0, sp);
+        if (!sec::isValidMac(macPart)) {
+            return std::nullopt;
+        }
+        dev.mac = sec::normalizeMac(macPart);
+        dev.rssi = -65;
+        if (sp != std::string::npos) {
+            dev.name = sec::sanitizePrintableText(trim(line.substr(sp + 1)), 48u);
+        }
+    }
+    dev.threat = classifyBleDevice(dev.mac, dev.name, dev.companyId, dev.serviceUuid,
+                                   dev.trackerPayload);
+    return dev;
+}
+
+// Parses compact Sub-GHz capture lines such as:
+//   "SUBGHZ|433920|-52|OOK|6|0"
+//   "433.92MHz|-55|Keeloq|2|0"
+inline std::optional<ScannedSubGhzSignal> parseRtl433Line(std::string_view rawLine) {
+    const std::string line = trim(std::string(rawLine));
+    if (line.empty()) {
+        return std::nullopt;
+    }
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : line) {
+        if (c == '|') {
+            parts.push_back(trim(cur));
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    parts.push_back(trim(cur));
+    std::size_t off = 0u;
+    if (!parts.empty() && parts[0] == "SUBGHZ") {
+        off = 1u;
+    }
+    if (parts.size() < off + 3u) {
+        return std::nullopt;
+    }
+    const std::string& fStr = parts[off];
+    uint32_t freqKhz = 0u;
+    if (fStr.find('.') != std::string::npos) {
+        const std::size_t dot = fStr.find('.');
+        const uint32_t mhz = sec::detail::parseU32(fStr.substr(0, dot));
+        std::string fracStr;
+        for (std::size_t i = dot + 1; i < fStr.size() && std::isdigit(static_cast<unsigned char>(fStr[i])); ++i) {
+            fracStr.push_back(fStr[i]);
+        }
+        while (fracStr.size() < 3u) fracStr.push_back('0');
+        if (fracStr.size() > 3u) fracStr.resize(3u);
+        freqKhz = mhz * 1000u + sec::detail::parseU32(fracStr);
+    } else {
+        freqKhz = sec::detail::parseU32(fStr);
+        if (freqKhz > 0u && freqKhz < 1000u) {
+            freqKhz *= 1000u;
+        }
+    }
+    if (freqKhz < 300000u || freqKhz > 928000u) {
+        return std::nullopt;
+    }
+    ScannedSubGhzSignal sig{};
+    sig.freqKhz = freqKhz;
+    sig.rssi = sec::detail::parseI32(parts[off + 1u]);
+    sig.protocol = sec::sanitizePrintableText(parts[off + 2u], 24u);
+    if (parts.size() > off + 3u) {
+        sig.burstCount = sec::detail::parseU32(parts[off + 3u]);
+        if (sig.burstCount == 0u) sig.burstCount = 1u;
+    }
+    if (parts.size() > off + 4u) {
+        sig.continuousCarrier = (parts[off + 4u] == "1" || parts[off + 4u] == "true");
+    }
+    return sig;
 }
 
 }  // namespace linux_backend

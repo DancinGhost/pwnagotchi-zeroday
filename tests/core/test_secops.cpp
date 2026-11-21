@@ -528,6 +528,81 @@ void testHardeningInvariants() {
     sess.setMaxRecordedEvents(0u);
     sess.dispatch(DataFrameObserved{3000u, bssid});
     assert(sess.events().empty());
+
+    // 5. Client target validator & beginDeauth reject multicast client MACs (empty/broadcast ok).
+    assert(isValidClientTarget(""));
+    assert(isValidClientTarget("ff:ff:ff:ff:ff:ff"));
+    assert(isValidClientTarget("02:11:22:33:44:55"));
+    assert(!isValidClientTarget("01:00:5e:00:00:01"));
+    assert(!isValidClientTarget("not-a-mac"));
+    const AuthDecision badSta = sess.beginDeauth(bssid, "01:00:5e:00:00:01", 4u, 3100u);
+    assert(badSta == AuthDecision::BlockedNotAllowlisted);
+
+    // 6. Strict EAPOL 4-way handshake M1+M2 pairing per (bssid, sta).
+    SecSession hs;
+    hs.dispatch(ApObserved{10u, bssid, "LabAP", 6, -42, Encryption::Wpa2});
+    CapturedFrame m1{};
+    m1.nowMs = 20u;
+    m1.kind = FrameKind::Eapol;
+    m1.bssid = bssid;
+    m1.hasStation = true;
+    m1.station = "02:11:22:33:44:01";
+    m1.eapolMsg = 1u;
+    hs.ingest(m1);
+    assert(!findTarget(hs.state(), bssid)->handshake);
+
+    CapturedFrame m2WrongSta = m1;
+    m2WrongSta.nowMs = 25u;
+    m2WrongSta.station = "02:11:22:33:44:99";
+    m2WrongSta.eapolMsg = 2u;
+    hs.ingest(m2WrongSta);
+    assert(!findTarget(hs.state(), bssid)->handshake);  // mismatched station!
+
+    CapturedFrame m2RightSta = m1;
+    m2RightSta.nowMs = 30u;
+    m2RightSta.eapolMsg = 2u;
+    hs.ingest(m2RightSta);
+    assert(findTarget(hs.state(), bssid)->handshake);
+
+    // 7. Wrap-safe deriveSecMood across uint32_t rollover + O(1) index LRU eviction.
+    SecState lru;
+    char macBuf[24];
+    for (uint32_t i = 0u; i < kMaxTargets + 10u; ++i) {
+        std::snprintf(macBuf, sizeof(macBuf), "02:00:00:00:%02x:%02x", (i >> 8) & 0xff, i & 0xff);
+        lru = reduce(std::move(lru), ApObserved{1000u + i, macBuf, "N", 6, -50, Encryption::Wpa2});
+    }
+    assert(lru.targets.size() == kMaxTargets);
+    assert(findTarget(lru, "02:00:00:00:00:00") == nullptr);  // earliest evicted
+    assert(findTarget(lru, "02:00:00:00:00:80") != nullptr);  // newer retained
+}
+
+void testBleAndSubGhzDefense() {
+    SecState s;
+    s = reduce(s, BleObserved{1000u, "7a:3c:91:04:88:12", "Tracker_Tag", -55, 0x004Cu, 0u, true});
+    assert(hasAlert(s, AlertKind::BleTrackerDetected, "7a:3c:91:04:88:12"));
+    assert(deriveSecMood(s, 1100u) == SecMood::Alarmed);  // RSSI >= -60 => Critical
+
+    s = reduce(s, BleObserved{2000u, "00:80:e1:42:13:37", "SubGHz_Tool", -68, 0u, 0x3082u, false});
+    assert(hasAlert(s, AlertKind::MultiToolDetected, "00:80:e1:42:13:37"));
+
+    s = reduce(s, SubGhzObserved{3000u, 433920u, -50, "OOK", 6u, false});
+    assert(hasAlert(s, AlertKind::SubGhzAnomaly));
+    s = reduce(s, SubGhzObserved{4000u, 915000u, -42, "FSK", 12u, true});
+    assert(countAlerts(s, AlertKind::SubGhzAnomaly) == 2u);
+
+    // .zds round-trip serialization for BLE & SUBGHZ events
+    const std::vector<SecEvent> evs = {
+        BleObserved{100u, "7a:3c:91:04:88:12", "Tracker_Tag", -55, 0x004Cu, 0u, true},
+        SubGhzObserved{200u, 433920u, -50, "OOK", 6u, false},
+    };
+    const auto encoded = encodeSecEvents(evs);
+    const auto decoded = decodeSecEvents(encoded);
+    assert(decoded.size() == 2u);
+    const SecState replayed = replaySecEvents(decoded);
+    assert(replayed.bleTargets.size() == 1u);
+    assert(replayed.subGhzCaptures.size() == 1u);
+    assert(hasAlert(replayed, AlertKind::BleTrackerDetected));
+    assert(hasAlert(replayed, AlertKind::SubGhzAnomaly));
 }
 
 }  // namespace
@@ -555,6 +630,7 @@ int main() {
     testCollectionRingCapsAndWeakProbes();
     testStationZeroTimestampAndClockSkew();
     testHardeningInvariants();
+    testBleAndSubGhzDefense();
     std::cout << "[secops] all security-engine tests passed\n";
     return 0;
 }

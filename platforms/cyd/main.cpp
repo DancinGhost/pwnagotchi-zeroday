@@ -266,6 +266,9 @@ public:
         // 3. Allocate banded RGB565 sprite in internal DRAM
         band_.setColorDepth(16);
         bandReady_ = band_.createSprite(lcd_.width(), kBandHeight);
+        if (!bandReady_) {
+            Serial.println("[DISPLAY] ERROR: band createSprite failed; screen output disabled");
+        }
     }
 
     void setBrightness(uint8_t level) {
@@ -334,32 +337,30 @@ bool gBootActive = false;
 bool gBootLongHandled = false;
 uint32_t gBootStartMs = 0;
 
-// XPT2046 resistive touchscreen state
-bool gTouchActive = false;
-bool gTouchLongHandled = false;
-uint32_t gTouchStartMs = 0;
-uint32_t gTouchLastSeenMs = 0;
-uint32_t gTouchCooldownUntilMs = 0;
-uint16_t gTouchStartX = 0;
-uint16_t gTouchStartY = 0;
+// XPT2046 resistive touchscreen gesture state
+zd::esp32_common::TouchZoneGesture gTouchGesture;
 
 void logSerialStatus(const char* eventTag) {
-    const zd::AppState& st = gSession.state();
-    const zd::FaceDescriptor face = zd::faceForMood(st.mood);
-    Serial.printf("[%s] %s %s> \"%s\" | APs:%u | BusiestCh:%d | Theme:%s\n",
-                  eventTag,
-                  face.asciiFace,
-                  st.petName.c_str(),
-                  st.phrase.c_str(),
-                  static_cast<unsigned>(st.latestScan.totalAps),
-                  static_cast<int>(st.latestScan.busiestChannel),
-                  zd::themeSpec(st.theme).key);
+    zd::esp32_common::printSerialStatus(gSession, eventTag);
+}
+
+bool parseStrictRangeInt(const char* raw, int minVal, int maxVal, int& out) {
+    if (raw == nullptr || *raw == '\0') {
+        return false;
+    }
+    char* end = nullptr;
+    const long v = std::strtol(raw, &end, 10);
+    if (end == raw || *end != '\0' || v < minVal || v > maxVal) {
+        return false;
+    }
+    out = static_cast<int>(v);
+    return true;
 }
 
 void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
         if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs).c_str());
+            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
             return;
         }
         if (line == "ldr") {
@@ -370,16 +371,23 @@ void pollSerialCli(uint32_t nowMs) {
                           raw,
                           static_cast<unsigned long>(mv));
         } else if (line.rfind("bl ", 0) == 0) {
-            const int val = std::atoi(line.c_str() + 3);
-            const uint8_t clamped = static_cast<uint8_t>((std::max)(10, (std::min)(255, val)));
-            gDisplay.setBrightness(clamped);
-            Serial.printf("Backlight set to %u/255\n", static_cast<unsigned>(clamped));
+            int val = 0;
+            if (!parseStrictRangeInt(line.c_str() + 3, 10, 255, val)) {
+                Serial.println("Invalid backlight value (expected integer 10..255)");
+                return;
+            }
+            gDisplay.setBrightness(static_cast<uint8_t>(val));
+            Serial.printf("Backlight set to %u/255\n", static_cast<unsigned>(val));
         } else if (line == "bl") {
             Serial.printf("Backlight: %u/255 (use 'bl <10-255>')\n",
                           static_cast<unsigned>(gDisplay.brightness()));
         } else if (line.rfind("rot ", 0) == 0) {
-            const int val = std::atoi(line.c_str() + 4);
-            const uint8_t r = (val == 3) ? 3 : 1;
+            int val = 0;
+            if (!parseStrictRangeInt(line.c_str() + 4, 1, 3, val) || (val != 1 && val != 3)) {
+                Serial.println("Invalid rotation (expected 1 or 3)");
+                return;
+            }
+            const uint8_t r = static_cast<uint8_t>(val);
             gDisplay.setLandscapeRotation(r);
             gSession.renderTo(gDisplay);
             gFramePacer.markRendered(nowMs);
@@ -423,60 +431,37 @@ void pollBootButton(uint32_t nowMs) {
 }
 
 void pollTouch(uint32_t nowMs, LGFX_CYD& lcd) {
-    if (gTouchCooldownUntilMs != 0u &&
-        static_cast<int32_t>(gTouchCooldownUntilMs - nowMs) > 0) {
-        return;
-    }
-
     uint16_t tx = 0;
     uint16_t ty = 0;
     const bool isTouched = lcd.getTouch(&tx, &ty);
-
-    if (isTouched) {
-        gTouchLastSeenMs = nowMs;
-        if (!gTouchActive) {
-            gTouchActive = true;
-            gTouchLongHandled = false;
-            gTouchStartMs = nowMs;
-            gTouchStartX = tx;
-            gTouchStartY = ty;
-        } else if (!gTouchLongHandled && gTouchStartY < 42 && (nowMs - gTouchStartMs) >= 600u) {
-            // Long-press top header bar -> previous theme
-            gTouchLongHandled = true;
-            gTouchCooldownUntilMs = nowMs + 250u;
+    using Act = zd::esp32_common::TouchZoneGesture::Action;
+    switch (gTouchGesture.update(isTouched, tx, ty, nowMs, 35u)) {
+        case Act::PrevTheme:
             gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
             logSerialStatus("TOUCH_THEME_PREV");
-        }
-        return;
-    }
-
-    // Resistive touch release debounce: wait 35ms after last contact before finalizing tap
-    if (gTouchActive && (nowMs - gTouchLastSeenMs) >= 35u) {
-        gTouchActive = false;
-        if (gTouchLongHandled) {
-            return;
-        }
-        const uint32_t duration = gTouchLastSeenMs - gTouchStartMs;
-        if (duration < 600u) {
-            gTouchCooldownUntilMs = nowMs + 150u;
-            if (gTouchStartY < 42) {
-                // Tapped top header bar -> next theme
-                gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
-                logSerialStatus("TOUCH_THEME");
-            } else if (gTouchStartX < 100) {
-                // Tapped left third -> previous view
-                gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
-                logSerialStatus("TOUCH_VIEW_PREV");
-            } else if (gTouchStartX > 220) {
-                // Tapped right third -> next view
-                gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
-                logSerialStatus("TOUCH_VIEW_NEXT");
-            } else {
-                // Tapped center area -> immediate WiFi scan / wake pet
-                gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
-                logSerialStatus("TOUCH_SCAN");
-            }
-        }
+            break;
+        case Act::NextTheme:
+            gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
+            logSerialStatus("TOUCH_THEME");
+            break;
+        case Act::PrevView:
+            gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
+            logSerialStatus("TOUCH_VIEW_PREV");
+            break;
+        case Act::NextView:
+            gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
+            logSerialStatus("TOUCH_VIEW_NEXT");
+            break;
+        case Act::Scan:
+            gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
+            logSerialStatus("TOUCH_SCAN");
+            break;
+        case Act::CycleMode:
+            gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
+            logSerialStatus("TOUCH_MODE");
+            break;
+        case Act::None:
+            break;
     }
 }
 
@@ -509,7 +494,8 @@ void loop() {
     pollSerialCli(nowMs);
 
     // 2. Step non-blocking radio scanner & periodic telemetry tick
-    if (const char* scanTag = gSession.stepRadio(nowMs, gRadio)) {
+    if (const char* scanTag = gSession.stepRadio(
+            nowMs, gRadio, zd::hal::PlatformSession::kDefaultScanTimeoutMs, &gThemeStore)) {
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);

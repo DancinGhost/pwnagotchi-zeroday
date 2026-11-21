@@ -3,10 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self';" />
   <title>pwnagotchi-zeroday // Web Hacker Toy</title>
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body data-shell="orange">
+  <a class="skip-link" href="#main-workbench">Skip to workbench</a>
   <div class="app-wrap">
     <!-- Top Workbench Header -->
     <header class="topbar">
@@ -50,6 +52,10 @@
           SFX: OFF
         </button>
 
+        <button id="btn-motion" class="tool-chip active" type="button" aria-pressed="true" title="Toggle Backdrop FX & Screen Motion">
+          MOTION: ON
+        </button>
+
         <button id="btn-snap-png" class="tool-chip" type="button" title="Download 4x Pixel-Art PNG Screenshot">
           Snap PNG
         </button>
@@ -61,7 +67,7 @@
     </header>
 
     <!-- Main Workbench Grid -->
-    <main class="workbench-grid">
+    <main id="main-workbench" class="workbench-grid" tabindex="-1">
       <!-- Left Column: Pocket Hardware Unit -->
       <section class="stage-column">
         <div class="panel-card hardware-stage">
@@ -93,10 +99,7 @@
                 id="screen-viewport"
                 class="screen-viewport"
                 data-fx="grid"
-                role="button"
-                tabindex="0"
-                aria-label="ZeroDay virtual pet screen — activate to boop pet"
-                title="Click or press Enter/Space to pet/boop ZeroDay!"
+                title="Click or use Boop ZeroDay button (K) to pet/boop ZeroDay"
               >
                 <canvas id="pwn-screen" width="960" height="540" role="img" aria-label="ZeroDay virtual pet display">
                   ZeroDay virtual pet display. Use the serial monitor log below for text telemetry.
@@ -118,7 +121,7 @@
                 id="hw-btn-a"
                 class="hw-front-btn"
                 type="button"
-                title="Button A: Cycle Views (Pet Face -> Radar -> Spectrum) & Wake Pet"
+                title="Button A: Cycle Views (Pet Face -> Radar -> Spectrum -> RF Guard) | Shift+Click: Previous View"
               >
                 <span class="m5-mark">ZD</span>
                 <span class="m5-sub">[A] VIEW</span>
@@ -135,6 +138,7 @@
               <button class="seg-btn active" aria-pressed="true" data-page="PetFace" type="button">Pet Face</button>
               <button class="seg-btn" aria-pressed="false" data-page="NearbyRadar" type="button">WiFi Radar</button>
               <button class="seg-btn" aria-pressed="false" data-page="ChannelSpectrum" type="button">Ch Spectrum</button>
+              <button class="seg-btn" aria-pressed="false" data-page="RfGuard" type="button">RF Guard</button>
             </div>
 
             <div class="theme-cycler" aria-label="Cycle Themes">
@@ -147,7 +151,7 @@
               >
                 &lsaquo;
               </button>
-              <span id="active-theme-label" class="active-theme-pill">Paper Ink &bull; 1/14</span>
+              <span id="active-theme-label" class="active-theme-pill">Paper Ink &bull; 1/6</span>
               <button
                 id="btn-theme-next"
                 class="theme-step-btn"
@@ -165,12 +169,16 @@
           <div class="hotkey-bar">
             Hotkeys:
             <kbd>A</kbd> View
+            <kbd>1-4</kbd> Page
             <kbd>B</kbd> Scan
             <kbd>T</kbd> / <kbd>Shift+T</kbd> Theme
+            <kbd>M</kbd> Mode
+            <kbd>G</kbd> Guard
+            <kbd>C</kbd> SubGHz
             <kbd>F</kbd> Feed Snack
             <kbd>H</kbd> Sim Handshake
             <kbd>P</kbd> Summon Peer
-            &bull; Click screen face to boop!
+            <kbd>K</kbd> Boop Pet
           </div>
         </div>
       </section>
@@ -181,12 +189,13 @@
         <div class="panel-card">
           <div class="card-header">
             <h2 class="card-title">Virtual Pet // Hacker Deck</h2>
+            <span id="hiscore-pill" class="level-pill">HI: 0</span>
             <span id="rank-pill" class="level-pill">Lv.1 Packet Sprout</span>
           </div>
 
           <div class="identity-row">
             <div class="name-edit-group">
-              <span class="prompt-prefix">HANDLE:</span>
+              <label class="prompt-prefix" for="input-pet-name">HANDLE:</label>
               <input
                 id="input-pet-name"
                 class="pet-name-input"
@@ -200,7 +209,7 @@
             <span id="xp-label" class="card-sub">0 / 40 XP</span>
           </div>
 
-          <div class="xp-track" title="Playful Hacker Toy XP">
+          <div id="xp-track" class="xp-track" role="progressbar" aria-label="Hacker Toy XP Progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" title="Playful Hacker Toy XP">
             <div id="xp-fill" class="xp-fill"></div>
           </div>
 
@@ -237,8 +246,24 @@
               <span class="kbd-hint">P</span>
             </button>
             <button id="act-scan" class="toy-btn" type="button">
-              <span>Sweep 2.4GHz Now</span>
+              <span>Sweep WiFi+BLE Now</span>
               <span class="kbd-hint">B</span>
+            </button>
+            <button id="act-mode" class="toy-btn" type="button">
+              <span id="act-mode-lbl">Mode: RECON</span>
+              <span class="kbd-hint">M</span>
+            </button>
+            <button id="act-guard" class="toy-btn" type="button">
+              <span>Sim BLE/SubGHz Alert</span>
+              <span class="kbd-hint">G</span>
+            </button>
+            <button id="act-subghz" class="toy-btn" type="button">
+              <span id="act-subghz-lbl">SubGHz: 433.92MHz</span>
+              <span class="kbd-hint">C</span>
+            </button>
+            <button id="act-boop" class="toy-btn" type="button">
+              <span>Boop ZeroDay</span>
+              <span class="kbd-hint">K</span>
             </button>
           </div>
         </div>
@@ -283,7 +308,7 @@
               <input id="input-battery" type="range" min="5" max="100" value="96" />
               <span id="battery-val">96%</span>
             </div>
-            <label style="cursor: pointer; display: inline-flex; align-items: center; gap: 5px;">
+            <label class="charging-toggle">
               <input id="input-charging" type="checkbox" checked />
               <span>USB Charging (+)</span>
             </label>
@@ -294,7 +319,7 @@
         <div class="panel-card">
           <div class="card-header">
             <h2 class="card-title">Fake Beacon Broadcaster</h2>
-            <button id="btn-clear-aps" class="mini-btn" type="button" style="padding: 2px 7px; font-size: 10px;">
+            <button id="btn-clear-aps" class="mini-btn mini-btn-compact" type="button">
               Clear Custom
             </button>
           </div>
@@ -314,24 +339,31 @@
               </button>
             </div>
 
-            <div class="beacon-row" style="align-items: center; justify-content: space-between;">
-              <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+            <div class="beacon-row beacon-row-split">
+              <div class="beacon-controls-group">
                 <select id="input-ap-ch" class="tool-select" aria-label="WiFi Channel">
                   <option value="1">CH 01</option>
+                  <option value="2">CH 02</option>
                   <option value="3">CH 03</option>
+                  <option value="4">CH 04</option>
+                  <option value="5">CH 05</option>
                   <option value="6" selected>CH 06</option>
+                  <option value="7">CH 07</option>
+                  <option value="8">CH 08</option>
                   <option value="9">CH 09</option>
+                  <option value="10">CH 10</option>
                   <option value="11">CH 11</option>
+                  <option value="12">CH 12</option>
                   <option value="13">CH 13</option>
                 </select>
 
-                <label style="font-size: 11px; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px;">
+                <label class="beacon-control-label">
                   <span class="sr-only">Signal Strength RSSI</span>
-                  <input id="input-ap-rssi" type="range" min="-92" max="-32" value="-44" aria-label="Custom Beacon Signal Strength in dBm" style="width: 78px;" />
+                  <input id="input-ap-rssi" class="rssi-slider" type="range" min="-92" max="-32" value="-44" aria-label="Custom Beacon Signal Strength in dBm" />
                   <span id="ap-rssi-label">-44dB</span>
                 </label>
 
-                <label style="font-size: 11px; color: var(--text-muted); cursor: pointer;">
+                <label class="beacon-control-label beacon-sec-label">
                   <input id="input-ap-sec" type="checkbox" checked />
                   WPA2*
                 </label>
@@ -350,17 +382,17 @@
     <section class="terminal-card" aria-label="Serial Monitor Console">
       <div class="terminal-topbar">
         <div class="term-dots">
-          <i style="background: #ff5f56;"></i>
-          <i style="background: #ffbd2e;"></i>
-          <i style="background: #27c93f;"></i>
-          <span style="margin-left: 6px;">/dev/ttyACM0 @ 115200 &mdash; Interactive ZeroDay Shell (type <strong>help</strong>)</span>
+          <i class="term-dot term-dot-red" aria-hidden="true"></i>
+          <i class="term-dot term-dot-amber" aria-hidden="true"></i>
+          <i class="term-dot term-dot-green" aria-hidden="true"></i>
+          <span class="term-title">/dev/ttyACM0 @ 115200 &mdash; Interactive ZeroDay Shell (type <strong>help</strong>)</span>
         </div>
-        <button id="btn-term-ascii" class="mini-btn" type="button" style="padding: 2px 8px; font-size: 10px;">
+        <button id="btn-term-ascii" class="mini-btn mini-btn-compact" type="button">
           Print ASCII Frame
         </button>
       </div>
 
-      <div id="term-log" class="term-log" role="log" aria-live="polite" aria-label="Serial monitor output"></div>
+      <div id="term-log" class="term-log" role="log" aria-live="off" aria-label="Serial monitor output"></div>
 
       <form id="form-terminal" class="terminal-input-row">
         <label id="term-prompt-label" class="term-prompt" for="input-terminal">zeroday@ttyACM0:~$</label>

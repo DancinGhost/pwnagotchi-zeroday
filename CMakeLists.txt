@@ -16,14 +16,25 @@ target_link_libraries(zd_render INTERFACE zd_core)
 
 if(MSVC)
     set(ZD_WARN_FLAGS /W4 /WX)
+    set(ZD_HARDEN_COMPILE_FLAGS)
+    set(ZD_HARDEN_LINK_FLAGS)
 else()
     set(ZD_WARN_FLAGS -Wall -Wextra -Werror)
+    set(ZD_HARDEN_COMPILE_FLAGS
+        -fstack-protector-strong
+        -fstack-clash-protection
+        -Wformat
+        -Wformat-security
+        -fPIE
+        $<$<CONFIG:Release,RelWithDebInfo,MinSizeRel>:-D_FORTIFY_SOURCE=2>)
+    set(ZD_HARDEN_LINK_FLAGS -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack)
 endif()
 
 # Native desktop / Linux SBC terminal simulator
 add_executable(zd_sim platforms/native/main.cpp)
 target_link_libraries(zd_sim PRIVATE zd_render)
-target_compile_options(zd_sim PRIVATE ${ZD_WARN_FLAGS})
+target_compile_options(zd_sim PRIVATE ${ZD_WARN_FLAGS} ${ZD_HARDEN_COMPILE_FLAGS})
+target_link_options(zd_sim PRIVATE ${ZD_HARDEN_LINK_FLAGS})
 
 # ----------------------------------------------------------------------------------------
 # Linux desktop targets (CLI/TUI + Qt6 GUI) with hybrid WiFi backend.
@@ -53,7 +64,8 @@ if(UNIX AND NOT APPLE)
         add_executable(zd-linux platforms/linux/cli/main.cpp)
         target_include_directories(zd-linux PRIVATE ${ZD_LINUX_INCLUDES} ${CURSES_INCLUDE_DIRS})
         target_link_libraries(zd-linux PRIVATE ${CURSES_LIBRARIES} pthread)
-        target_compile_options(zd-linux PRIVATE ${ZD_WARN_FLAGS})
+        target_compile_options(zd-linux PRIVATE ${ZD_WARN_FLAGS} ${ZD_HARDEN_COMPILE_FLAGS})
+        target_link_options(zd-linux PRIVATE ${ZD_HARDEN_LINK_FLAGS})
         if(LIBPCAP_FOUND)
             target_compile_definitions(zd-linux PRIVATE ZD_WITH_LIBPCAP)
             target_link_libraries(zd-linux PRIVATE PkgConfig::LIBPCAP)
@@ -80,7 +92,8 @@ if(UNIX AND NOT APPLE)
         set_target_properties(zd-gui PROPERTIES AUTOMOC ON)
         target_include_directories(zd-gui PRIVATE ${ZD_LINUX_INCLUDES})
         target_link_libraries(zd-gui PRIVATE Qt6::Widgets pthread)
-        target_compile_options(zd-gui PRIVATE ${ZD_WARN_FLAGS})
+        target_compile_options(zd-gui PRIVATE ${ZD_WARN_FLAGS} ${ZD_HARDEN_COMPILE_FLAGS})
+        target_link_options(zd-gui PRIVATE ${ZD_HARDEN_LINK_FLAGS})
         if(LIBPCAP_FOUND)
             target_compile_definitions(zd-gui PRIVATE ZD_WITH_LIBPCAP)
             target_link_libraries(zd-gui PRIVATE PkgConfig::LIBPCAP)
@@ -124,12 +137,22 @@ target_link_libraries(test_dot11_frames PRIVATE zd_core)
 target_compile_options(test_dot11_frames PRIVATE ${ZD_WARN_FLAGS})
 add_test(NAME dot11_frame_builder_tests COMMAND test_dot11_frames)
 
+add_executable(test_esp32_common tests/core/test_esp32_common.cpp)
+target_link_libraries(test_esp32_common PRIVATE zd_core)
+target_include_directories(test_esp32_common PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/platforms/common")
+target_compile_options(test_esp32_common PRIVATE ${ZD_WARN_FLAGS})
+if(NOT MSVC AND NOT CMAKE_CXX_FLAGS MATCHES "fsanitize")
+    target_compile_options(test_esp32_common PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME esp32_common_tests COMMAND test_esp32_common)
+
 set(ZD_TEST_TARGETS
     test_functional_core
     test_painter
     test_secops
     test_linux_parsers
-    test_dot11_frames)
+    test_dot11_frames
+    test_esp32_common)
 
 if(UNIX AND NOT APPLE)
     add_executable(test_linux_shell tests/core/test_linux_shell.cpp)
@@ -138,6 +161,32 @@ if(UNIX AND NOT APPLE)
     target_compile_options(test_linux_shell PRIVATE ${ZD_WARN_FLAGS})
     add_test(NAME linux_shell_tests COMMAND test_linux_shell)
     list(APPEND ZD_TEST_TARGETS test_linux_shell)
+
+    if(Qt6_FOUND)
+        find_package(Qt6 QUIET COMPONENTS Test)
+        if(Qt6Test_FOUND)
+            add_executable(test_gui
+                tests/gui/test_gui.cpp
+                platforms/linux/gui/main_window.cpp
+                platforms/linux/gui/main_window.hpp
+                platforms/linux/gui/pet_widget.hpp)
+            set_target_properties(test_gui PROPERTIES AUTOMOC ON)
+            target_include_directories(test_gui PRIVATE ${ZD_LINUX_INCLUDES} "${CMAKE_CURRENT_SOURCE_DIR}/platforms/linux/gui")
+            target_link_libraries(test_gui PRIVATE Qt6::Widgets Qt6::Test pthread)
+            target_compile_options(test_gui PRIVATE ${ZD_WARN_FLAGS})
+            if(LIBPCAP_FOUND)
+                target_compile_definitions(test_gui PRIVATE ZD_WITH_LIBPCAP)
+                target_link_libraries(test_gui PRIVATE PkgConfig::LIBPCAP)
+            elseif(PCAP_LIB)
+                target_compile_definitions(test_gui PRIVATE ZD_WITH_LIBPCAP)
+                target_include_directories(test_gui PRIVATE ${PCAP_INC})
+                target_link_libraries(test_gui PRIVATE ${PCAP_LIB})
+            endif()
+            add_test(NAME linux_gui_tests COMMAND test_gui)
+            set_tests_properties(linux_gui_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+            list(APPEND ZD_TEST_TARGETS test_gui)
+        endif()
+    endif()
 endif()
 
 # The tests rely on assert(). Release builds define NDEBUG, which would compile every
@@ -157,6 +206,14 @@ if(PYTHON3_EXECUTABLE)
         NAME flasher_script_tests
         COMMAND "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_flasher.py"
     )
+    if(TARGET zd-linux AND TARGET zd_sim)
+        add_test(
+            NAME linux_cli_tests
+            COMMAND "${PYTHON3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/test_linux_cli.py"
+                    --zd-linux "$<TARGET_FILE:zd-linux>"
+                    --zd-sim "$<TARGET_FILE:zd_sim>"
+        )
+    endif()
 endif()
 
 find_program(NODE_EXECUTABLE node)

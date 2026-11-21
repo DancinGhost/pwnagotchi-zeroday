@@ -5,9 +5,12 @@ Cross-platform tool to flash precompiled factory binaries to ESP32 / ESP32-S3 bo
 """
 
 import glob
+import hashlib
+import hmac
 import os
 import subprocess
 import sys
+import venv
 
 
 def get_serial_ports():
@@ -63,44 +66,102 @@ def locate_factory_binary(search_dir="."):
     return None
 
 
-def ensure_esptool():
-    """Ensure esptool is installed and accessible."""
-    try:
-        subprocess.run(
-            ["esptool.py", "version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-        return ["esptool.py"]
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
+def flasher_venv_python():
+    """Path to the isolated esptool venv interpreter (avoids PEP 668 system pip blocks)."""
+    venv_dir = os.path.join(os.path.expanduser("~"), ".cache", "pwnagotchi-zd-flasher-venv")
+    if sys.platform.startswith("win"):
+        return os.path.join(venv_dir, "Scripts", "python.exe"), venv_dir
+    return os.path.join(venv_dir, "bin", "python"), venv_dir
 
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "esptool", "version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-        return [sys.executable, "-m", "esptool"]
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
+
+def verify_sha256(factory_bin):
+    """Verify `factory_bin` against an adjacent `.sha256` or `SHA256SUMS*` manifest if present.
+
+    Returns (ok: bool, message: str). If a checksum file is present and the digest mismatches
+    or the file is missing from that manifest, returns False so callers abort before flashing.
+    """
+    search_dir = os.path.dirname(os.path.abspath(factory_bin)) or "."
+    target_name = os.path.basename(factory_bin)
+    candidates = [
+        factory_bin + ".sha256",
+        os.path.join(search_dir, target_name + ".sha256"),
+        os.path.join(search_dir, "SHA256SUMS.txt"),
+        os.path.join(search_dir, "SHA256SUMS"),
+    ]
+    manifest = next((p for p in candidates if os.path.isfile(p)), None)
+    if manifest is None:
+        return True, "no local SHA-256 manifest found; skipping offline checksum check"
+
+    expected = None
+    with open(manifest, "r", encoding="utf-8", errors="replace") as fh:
+        for raw_line in fh:
+            parts = raw_line.strip().split()
+            if not parts:
+                continue
+            digest = parts[0].lower()
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                continue
+            if len(parts) == 1 and manifest.endswith(".sha256"):
+                expected = digest
+                break
+            entry_name = parts[-1].lstrip("*")
+            if os.path.basename(entry_name) == target_name:
+                expected = digest
+                break
+
+    if expected is None:
+        return False, f"{target_name} missing from checksum file {os.path.basename(manifest)}"
+
+    h = hashlib.sha256()
+    with open(factory_bin, "rb") as fh:
+        while True:
+            chunk = fh.read(65536)
+            if not chunk:
+                break
+            h.update(chunk)
+    actual = h.hexdigest().lower()
+    if not hmac.compare_digest(actual, expected):
+        return False, f"SHA-256 mismatch (expected {expected[:16]}..., got {actual[:16]}...)"
+    return True, f"SHA-256 verified ({actual[:16]}... via {os.path.basename(manifest)})"
+
+
+def ensure_esptool():
+    """Ensure esptool is installed and accessible (prefer current Python or an isolated venv)."""
+    venv_py, venv_dir = flasher_venv_python()
+    candidates = [
+        [sys.executable, "-m", "esptool"],
+        ["esptool.py"],
+        [venv_py, "-m", "esptool"],
+    ]
+    for base_cmd in candidates:
+        if base_cmd[0] == venv_py and not os.path.isfile(venv_py):
+            continue
+        try:
+            subprocess.run(
+                base_cmd + ["version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            return base_cmd
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
 
     print("[*] esptool not detected.")
     if not sys.stdin.isatty():
-        print("[!] Please install esptool manually: python3 -m pip install 'esptool==4.8.1'")
+        print("[!] Please install esptool in a venv or via pipx: pipx install 'esptool==4.8.1'")
         sys.exit(1)
-    ans = input("    Install esptool==4.8.1 via pip now? [y/N]: ").strip().lower()
+    ans = input(f"    Create isolated venv at {venv_dir} and install esptool==4.8.1? [y/N]: ").strip().lower()
     if ans != "y":
-        print("[!] Aborted. Install esptool manually: python3 -m pip install 'esptool==4.8.1'")
+        print("[!] Aborted. Install esptool manually: pipx install 'esptool==4.8.1'")
         sys.exit(1)
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "esptool==4.8.1"])
-        return [sys.executable, "-m", "esptool"]
+        venv.create(venv_dir, with_pip=True)
+        subprocess.check_call([venv_py, "-m", "pip", "install", "esptool==4.8.1"])
+        return [venv_py, "-m", "esptool"]
     except Exception as err:
         print(f"[!] Failed to install esptool: {err}")
-        print("    Please install esptool manually: python3 -m pip install 'esptool==4.8.1'")
+        print("    Please install esptool manually: pipx install 'esptool==4.8.1'")
         sys.exit(1)
 
 
@@ -119,6 +180,12 @@ def main():
 
     display_bin = os.path.basename(factory_bin)
     print(f"[*] Target Firmware: {display_bin}")
+
+    sha_ok, sha_msg = verify_sha256(factory_bin)
+    if not sha_ok:
+        print(f"[!] Firmware integrity check FAILED: {sha_msg}")
+        sys.exit(1)
+    print(f"[*] Integrity check: {sha_msg}")
 
     # Determine chip family from filename
     chip_arg = []
@@ -153,11 +220,15 @@ def main():
         print("[*] Multiple USB ports detected:")
         for idx, p in enumerate(ports, 1):
             print(f"    [{idx}] {p}")
-        choice = input(f"Select port [1-{len(ports)}] (default 1): ").strip()
-        if choice.isdigit() and 1 <= int(choice) <= len(ports):
-            selected_port = ports[int(choice) - 1]
-        else:
-            selected_port = ports[0]
+        while True:
+            choice = input(f"Select port [1-{len(ports)}] (or 'q' to abort): ").strip()
+            if choice.lower() in ("q", "quit"):
+                print("[*] Aborted by user.")
+                sys.exit(0)
+            if choice.isdigit() and 1 <= int(choice) <= len(ports):
+                selected_port = ports[int(choice) - 1]
+                break
+            print(f"[!] Please enter a number from 1 to {len(ports)} (or 'q' to abort).")
         print(f"[*] Selected port: {selected_port}")
 
     # 3. Ensure esptool is ready

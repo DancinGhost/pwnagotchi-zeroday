@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include "zd/ui_model.hpp"
@@ -44,6 +45,7 @@ void drawSingleEye(Gfx& gfx,
                    zd::EyeGlyph style,
                    const zd::ColorPalette& pal,
                    bool compact,
+                   uint32_t animTick,
                    bool isRightEye = false) {
     const int16_t stroke = compact ? 2 : 3;
 
@@ -104,6 +106,65 @@ void drawSingleEye(Gfx& gfx,
             gfx.fillArc(cx, cy - (r / 3), r, r - stroke, 25.0f, 155.0f, pal.fg);
             break;
         }
+        case zd::EyeGlyph::CyberWink: {
+            if (!isRightEye) {
+                const int16_t span = (std::max)(static_cast<int16_t>(2), static_cast<int16_t>(r - 1));
+                gfx.drawLine(cx - span, cy - span, cx + span - 1, cy, pal.fg);
+                gfx.drawLine(cx - span, cy + span, cx + span - 1, cy, pal.fg);
+                if (stroke > 1) {
+                    gfx.drawLine(cx - span, cy - span + 1, cx + span - 2, cy, pal.fg);
+                    gfx.drawLine(cx - span, cy + span - 1, cx + span - 2, cy, pal.fg);
+                }
+            } else {
+                gfx.fillCircle(cx, cy, r, pal.fg);
+                gfx.fillCircle(cx, cy, (std::max)(1, r - stroke), pal.bg);
+                gfx.fillCircle(cx, cy, (std::max)(1, r / 3), pal.highlight);
+            }
+            break;
+        }
+        case zd::EyeGlyph::LaserVisor: {
+            const int16_t vw = static_cast<int16_t>(r * 2 + 1);
+            const int16_t vh = static_cast<int16_t>((std::max)(4, static_cast<int>(r)));
+            const int16_t vx = static_cast<int16_t>(cx - r);
+            const int16_t vy = static_cast<int16_t>(cy - vh / 2);
+            gfx.fillRoundRect(vx, vy, vw, vh, 1, pal.fg);
+            const int16_t gw = static_cast<int16_t>((std::max)(2, static_cast<int>(r / 2)));
+            const int16_t travel = static_cast<int16_t>((std::max)(1, static_cast<int>(vw - gw - 2)));
+            const int16_t gx = static_cast<int16_t>(vx + 1 + static_cast<int16_t>((animTick * 2u) % static_cast<uint32_t>(travel)));
+            gfx.fillRect(gx, cy - 1, gw, 2, pal.highlight);
+            break;
+        }
+        case zd::EyeGlyph::ShieldVisor: {
+            const int16_t vw = static_cast<int16_t>(r * 2);
+            const int16_t vh = static_cast<int16_t>((std::max)(4, static_cast<int>(r * 2 - 1)));
+            const int16_t vx = static_cast<int16_t>(cx - r);
+            const int16_t vy = static_cast<int16_t>(cy - r + 1);
+            gfx.fillRoundRect(vx, vy, vw, vh, 2, pal.fg);
+            if (vw > 4 && vh > 4) {
+                gfx.fillRoundRect(vx + 2, vy + 2, vw - 4, vh - 4, 1, pal.bg);
+            }
+            gfx.fillRect(cx - 1, cy - 1, 2, 2, pal.accent);
+            break;
+        }
+        case zd::EyeGlyph::StarEyes: {
+            const int16_t sr = (std::max)(static_cast<int16_t>(2), r);
+            gfx.drawLine(cx, cy - sr, cx, cy + sr, pal.fg);
+            gfx.drawLine(cx - sr, cy, cx + sr, cy, pal.fg);
+            gfx.drawLine(cx - (sr / 2), cy - (sr / 2), cx + (sr / 2), cy + (sr / 2), pal.fg);
+            gfx.drawLine(cx - (sr / 2), cy + (sr / 2), cx + (sr / 2), cy - (sr / 2), pal.fg);
+            gfx.fillCircle(cx, cy, (std::max)(1, r / 3), pal.highlight);
+            break;
+        }
+        case zd::EyeGlyph::AlertRing: {
+            gfx.fillCircle(cx, cy, r, pal.highlight);
+            gfx.fillCircle(cx, cy, (std::max)(1, r - stroke), pal.bg);
+            if ((animTick & 1u) == 0u) {
+                gfx.fillRect(cx - 1, cy - (std::max)(1, r / 2), 2, (std::max)(2, r - 1), pal.fg);
+            } else {
+                gfx.fillCircle(cx, cy, (std::max)(1, r / 3), pal.highlight);
+            }
+            break;
+        }
     }
 }
 
@@ -138,6 +199,13 @@ void drawMouth(Gfx& gfx, const zd::FaceGeometry& g, zd::MouthGlyph mouth, const 
             gfx.fillArc(g.centerX, g.mouthY + r, r + 1, r + 1 - stroke, 205.0f, 335.0f, pal.fg);
             break;
         }
+        case zd::MouthGlyph::Fangs: {
+            gfx.fillRect(g.centerX - r, g.mouthY, r * 2, stroke, pal.fg);
+            const int16_t fh = compact ? 2 : 3;
+            gfx.fillRect(g.centerX - r + 1, g.mouthY + stroke, 2, fh, pal.fg);
+            gfx.fillRect(g.centerX + r - 3, g.mouthY + stroke, 2, fh, pal.fg);
+            break;
+        }
     }
 }
 
@@ -152,8 +220,8 @@ void drawPwnagotchiFace(Gfx& gfx, const zd::UiFrame& frame) {
     const int16_t leftEyeX = static_cast<int16_t>(g.centerX - g.eyeOffsetX);
     const int16_t rightEyeX = static_cast<int16_t>(g.centerX + g.eyeOffsetX);
 
-    drawSingleEye(gfx, leftEyeX, g.eyeY, g.eyeRadius, f.eyes, pal, frame.compact, false);
-    drawSingleEye(gfx, rightEyeX, g.eyeY, g.eyeRadius, f.eyes, pal, frame.compact, true);
+    drawSingleEye(gfx, leftEyeX, g.eyeY, g.eyeRadius, f.eyes, pal, frame.compact, frame.animTick, false);
+    drawSingleEye(gfx, rightEyeX, g.eyeY, g.eyeRadius, f.eyes, pal, frame.compact, frame.animTick, true);
 
     // Connect sunglasses bridge and temple arm
     if (f.eyes == zd::EyeGlyph::Sunglasses) {
@@ -181,10 +249,11 @@ void drawPwnagotchiFace(Gfx& gfx, const zd::UiFrame& frame) {
     drawMouth(gfx, g, f.mouth, pal, frame.compact);
 
     // Centered mood tag beneath the face
-    const std::string badge = "[" + std::string(f.moodLabel) + "]";
-    const int16_t badgeW = static_cast<int16_t>(badge.size() * 6);
-    gfx.setTextColor(pal.muted, pal.bg);
-    gfx.drawString(badge.c_str(), (std::max)(2, g.centerX - (badgeW / 2)), g.moodBadgeY);
+    char badge[24];
+    std::snprintf(badge, sizeof(badge), "[%s]", f.moodLabel);
+    const int16_t badgeW = static_cast<int16_t>(std::char_traits<char>::length(badge) * 6);
+    gfx.setTextColor(pal.accent, pal.bg);
+    gfx.drawString(badge, (std::max)(2, g.centerX - (badgeW / 2)), g.moodBadgeY);
 }
 
 template <typename Gfx>
@@ -204,8 +273,118 @@ void drawSignalMeter(Gfx& gfx, int16_t x, int16_t bottomY, int bars, const zd::C
 }
 
 template <typename Gfx>
+void drawPixelArtDish(Gfx& gfx, int16_t sx, int16_t sy, int16_t sw, int16_t sh,
+                      const zd::ColorPalette& pal, uint32_t animTick) {
+    const int16_t bx = static_cast<int16_t>(sx + 4);
+    const int16_t by = static_cast<int16_t>(sy + sh - 1);
+    // Tripod base
+    gfx.drawLine(bx, by - 3, bx - 2, by, pal.accent);
+    gfx.drawLine(bx, by - 3, bx + 2, by, pal.accent);
+    // Tilted dish bowl
+    const int16_t tilt = static_cast<int16_t>((animTick % 3u) == 1u ? 1 : 0);
+    const int16_t dr = static_cast<int16_t>((std::min)(5, static_cast<int>(sh / 2 - 1)));
+    const int16_t dcx = static_cast<int16_t>(sx + 5);
+    const int16_t dcy = static_cast<int16_t>(sy + sh - 4);
+    gfx.fillArc(dcx, dcy, dr, (std::max)(1, dr - 2), 115.0f + tilt * 10.0f, 225.0f + tilt * 10.0f, pal.fg);
+    // Feedhorn
+    const int16_t fx = static_cast<int16_t>(dcx + 2);
+    const int16_t fy = static_cast<int16_t>(dcy - 2 - tilt);
+    gfx.drawLine(dcx, dcy, fx, fy, pal.accent);
+    gfx.fillRect(fx, fy, 2, 2, pal.highlight);
+    // Animated concentric radio wave pips radiating top-right
+    const int16_t maxRx = static_cast<int16_t>(sx + sw - 2 - fx);
+    const int16_t maxRy = static_cast<int16_t>(fy - sy);
+    const int16_t maxWr = (std::min)(maxRx, maxRy);
+    const uint32_t phase = animTick % 3u;
+    for (int16_t step = 0; step < 3; ++step) {
+        const int16_t wr = static_cast<int16_t>(3 + step * 3);
+        if (wr > maxWr || wr <= 1) {
+            continue;
+        }
+        const uint16_t wcol = (static_cast<uint32_t>(step) == phase) ? pal.highlight : pal.accent;
+        gfx.fillArc(fx, fy, wr, wr - 1, 290.0f, 355.0f, wcol);
+    }
+}
+
+template <typename Gfx>
+void drawPixelArtSatellite(Gfx& gfx, int16_t sx, int16_t sy, int16_t sw, int16_t sh,
+                           const zd::ColorPalette& pal, uint32_t animTick) {
+    const int16_t ey = static_cast<int16_t>(sy + sh - 1);
+    // Earth horizon arc/band at bottom of widget
+    gfx.fillRect(sx + 2, ey - 1, (std::max)(4, sw - 4), 2, pal.accent);
+    if (sw >= 18) {
+        gfx.fillRect(sx + 5, ey - 2, sw - 10, 1, pal.accent);
+    }
+    // Orbiting satellite at top
+    const int16_t drift = static_cast<int16_t>((animTick % 4u == 1u) ? 1 : ((animTick % 4u == 3u) ? -1 : 0));
+    const int16_t satX = static_cast<int16_t>(sx + sw / 2 + drift);
+    const int16_t satY = static_cast<int16_t>(sy + 2);
+    const int16_t wingW = (sw >= 24) ? 5 : 2;
+    gfx.fillRect(satX - 1, satY - 1, 3, 3, pal.fg);
+    gfx.fillRect(satX - 2 - wingW, satY, wingW, 2, pal.accent);
+    gfx.fillRect(satX + 3, satY, wingW, 2, pal.accent);
+    // Orbital beam shooting down to Earth + traveling energy pulse
+    const int16_t beamTop = static_cast<int16_t>(satY + 2);
+    const int16_t beamBot = static_cast<int16_t>(ey - 2);
+    if (beamBot > beamTop) {
+        gfx.drawLine(satX, beamTop, satX, beamBot, pal.muted);
+        const int16_t span = static_cast<int16_t>(beamBot - beamTop);
+        const int16_t py = static_cast<int16_t>(beamTop + static_cast<int16_t>((animTick * 2u) % static_cast<uint32_t>(span)));
+        gfx.fillRect(satX, py, 1, (std::min)(2, static_cast<int>(beamBot - py + 1)), pal.highlight);
+    }
+    if ((animTick & 1u) == 0u) {
+        gfx.fillRect(satX - 2, ey - 2, 5, 1, pal.highlight);
+    }
+}
+
+template <typename Gfx>
+void drawPixelArtShield(Gfx& gfx, int16_t sx, int16_t sy, int16_t sw, int16_t sh,
+                        const zd::ColorPalette& pal, uint32_t animTick, bool alertActive) {
+    const int16_t cx = static_cast<int16_t>(sx + sw / 2);
+    const int16_t cy = static_cast<int16_t>(sy + sh / 2);
+    const int16_t sr = static_cast<int16_t>((std::max)(3, (std::min)(static_cast<int>(sw), static_cast<int>(sh)) / 2 - 1));
+    const uint16_t col = alertActive ? pal.highlight : pal.accent;
+    gfx.fillRoundRect(cx - sr, cy - sr, sr * 2, sr * 2, 2, col);
+    if (sr > 2) {
+        gfx.fillRoundRect(cx - sr + 2, cy - sr + 2, sr * 2 - 4, sr * 2 - 4, 1, pal.bg);
+    }
+    // Radar sweep dot inside shield
+    const int16_t ox = static_cast<int16_t>((animTick % 4u == 0u || animTick % 4u == 3u) ? -1 : 1);
+    const int16_t oy = static_cast<int16_t>((animTick % 4u < 2u) ? -1 : 1);
+    gfx.fillRect(cx + ox - 1, cy + oy - 1, 2, 2, alertActive ? pal.highlight : pal.fg);
+}
+
+template <typename Gfx>
+void drawActivitySceneWidget(Gfx& gfx, const zd::UiFrame& frame) {
+    if (frame.scene == zd::ActivityScene::None) {
+        return;
+    }
+    const bool micro = (frame.dims.width < 150 || frame.dims.height < 72);
+    const int16_t sw = micro ? 14 : (frame.compact ? 20 : (frame.dims.width >= 300 ? 36 : 28));
+    const int16_t sh = micro ? 10 : (frame.compact ? 12 : (frame.dims.width >= 300 ? 18 : 16));
+    const int16_t sx = static_cast<int16_t>(frame.dims.width - sw - (micro || frame.compact ? 3 : 4));
+    const int16_t sy = static_cast<int16_t>(frame.headerDividerY + (micro || frame.compact ? 2 : 3));
+
+    switch (frame.scene) {
+        case zd::ActivityScene::RadarDish:
+            drawPixelArtDish(gfx, sx, sy, sw, sh, frame.palette, frame.animTick);
+            break;
+        case zd::ActivityScene::SatelliteBeam:
+            drawPixelArtSatellite(gfx, sx, sy, sw, sh, frame.palette, frame.animTick);
+            break;
+        case zd::ActivityScene::ThreatShield:
+            drawPixelArtShield(gfx, sx, sy, sw, sh, frame.palette, frame.animTick,
+                               !frame.threatBanner.empty());
+            break;
+        case zd::ActivityScene::None:
+            break;
+    }
+}
+
+template <typename Gfx>
 void drawPetFacePage(Gfx& gfx, const zd::UiFrame& frame) {
     drawPwnagotchiFace(gfx, frame);
+    drawActivitySceneWidget(gfx, frame);
 
     // Subtle vertical divider between face and speech column on full-size displays
     if (!frame.compact) {
@@ -225,17 +404,34 @@ void drawPetFacePage(Gfx& gfx, const zd::UiFrame& frame) {
         y = static_cast<int16_t>(y + frame.lineStepY);
     }
 
-    // Strongest nearby SSID ticker at bottom of speech column (240x135)
+    // Rank / Highscore + mini XP bar above bottom spotlight (full-size displays)
+    if (!frame.compact && !frame.rankLine.empty()) {
+        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+        gfx.drawString(frame.rankLine.c_str(), frame.speechX, frame.footerDividerY - 21);
+        const int16_t barW = 28;
+        const int16_t barX = static_cast<int16_t>(frame.dims.width - barW - 4);
+        const int16_t barY = static_cast<int16_t>(frame.footerDividerY - 19);
+        if (barX > frame.speechX + static_cast<int16_t>(frame.rankLine.size() * 6) + 2) {
+            gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
+            const int16_t fillW = static_cast<int16_t>((static_cast<int32_t>(barW) * frame.xpProgressPct) / 100);
+            if (fillW > 0) {
+                gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
+            }
+        }
+    }
+
+    // Strongest nearby SSID or Threat Alert ticker at bottom of speech column
     if (!frame.spotlightLabel.empty()) {
-        gfx.setTextColor(frame.palette.muted, frame.palette.bg);
-        gfx.drawString(frame.spotlightLabel.c_str(), frame.speechX, frame.footerDividerY - 12);
+        const uint16_t spotCol = !frame.threatBanner.empty() ? frame.palette.highlight : frame.palette.accent;
+        gfx.setTextColor(spotCol, frame.palette.bg);
+        gfx.drawString(frame.spotlightLabel.c_str(), frame.speechX, frame.footerDividerY - 11);
     }
 }
 
 template <typename Gfx>
 void drawRadarPage(Gfx& gfx, const zd::UiFrame& frame) {
     if (frame.radarRows.empty()) {
-        gfx.setTextColor(frame.palette.muted, frame.palette.bg);
+        gfx.setTextColor(frame.palette.fg, frame.palette.bg);
         const int16_t textW = static_cast<int16_t>(frame.radarEmptyHint.size() * 6);
         const int16_t cx = (std::max)(4, (frame.dims.width - textW) / 2);
         const int16_t cy = static_cast<int16_t>((frame.headerDividerY + frame.footerDividerY) / 2 - 4);
@@ -250,9 +446,10 @@ void drawRadarPage(Gfx& gfx, const zd::UiFrame& frame) {
         drawSignalMeter(gfx, 4, y + (frame.compact ? 8 : 9), row.bars, frame.palette, frame.compact);
 
         const int16_t textX = frame.compact ? 19 : 24;
-        const std::string prefix = row.secure ? "*" : " ";
+        char ssidLine[64];
+        std::snprintf(ssidLine, sizeof(ssidLine), "%c%s", row.secure ? '*' : ' ', row.ssid.c_str());
         gfx.setTextColor(frame.palette.fg, frame.palette.bg);
-        gfx.drawString((prefix + row.ssid).c_str(), textX, y);
+        gfx.drawString(ssidLine, textX, y);
 
         const int16_t detailW = static_cast<int16_t>(row.details.size() * 6);
         gfx.setTextColor(frame.palette.accent, frame.palette.bg);
@@ -285,10 +482,47 @@ void drawSpectrumPage(Gfx& gfx, const zd::UiFrame& frame) {
                                    ? (bar.channel == 1 || bar.channel == 6 || bar.channel == 11 || bar.channel == 13)
                                    : ((bar.channel % 2) == 1);
         if (showLabel) {
-            gfx.setTextColor(frame.palette.muted, frame.palette.bg);
-            gfx.drawString(std::to_string(bar.channel).c_str(), bx,
-                           frame.chartBaseY + (frame.dims.height < 72 ? 1 : 2));
+            char chLbl[16];
+            std::snprintf(chLbl, sizeof(chLbl), "%d", static_cast<int>(bar.channel));
+            gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+            gfx.drawString(chLbl, bx, frame.chartBaseY + (frame.dims.height < 72 ? 1 : 2));
         }
+    }
+}
+
+template <typename Gfx>
+void drawRfGuardPage(Gfx& gfx, const zd::UiFrame& frame) {
+    gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+    gfx.drawString(frame.rfGuardSummary.c_str(), 4, frame.headerDividerY + (frame.compact ? 2 : 4));
+
+    if (frame.rfGuardRows.empty()) {
+        gfx.setTextColor(frame.palette.fg, frame.palette.bg);
+        const int16_t textW = static_cast<int16_t>(frame.rfGuardEmptyHint.size() * 6);
+        const int16_t cx = (std::max)(4, (frame.dims.width - textW) / 2);
+        const int16_t cy = static_cast<int16_t>((frame.headerDividerY + frame.footerDividerY) / 2 - 2);
+        gfx.drawString(frame.rfGuardEmptyHint.c_str(), cx, cy);
+        return;
+    }
+
+    const int16_t rowStep = frame.compact ? 11 : 14;
+    int16_t y = static_cast<int16_t>(frame.headerDividerY + (frame.compact ? 12 : 16));
+    for (const auto& row : frame.rfGuardRows) {
+        if (y + 9 >= frame.footerDividerY) {
+            break;
+        }
+        drawSignalMeter(gfx, 4, y + (frame.compact ? 7 : 8), row.bars, frame.palette, frame.compact);
+
+        const int16_t textX = frame.compact ? 19 : 24;
+        char lineBuf[64];
+        std::snprintf(lineBuf, sizeof(lineBuf), "%c%s", row.secure ? '!' : ' ', row.ssid.c_str());
+        gfx.setTextColor(row.secure ? frame.palette.highlight : frame.palette.fg, frame.palette.bg);
+        gfx.drawString(lineBuf, textX, y);
+
+        const int16_t detailW = static_cast<int16_t>(row.details.size() * 6);
+        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+        gfx.drawString(row.details.c_str(), frame.dims.width - detailW - 4, y);
+
+        y = static_cast<int16_t>(y + rowStep);
     }
 }
 
@@ -393,6 +627,88 @@ void drawTacticalHudBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
 }
 
 template <typename Gfx>
+void drawLightningStormBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    drawDigitalRainBackdrop(gfx, frame);
+    const int16_t top = static_cast<int16_t>(frame.headerDividerY + 2);
+    const int16_t bottom = static_cast<int16_t>(frame.footerDividerY - 2);
+    if ((bottom - top) < 12 || frame.dims.width < 96) {
+        return;
+    }
+
+    // Slanted falling rain streaks in background columns
+    const int16_t stepX = frame.compact ? 24 : 20;
+    const int16_t spanY = static_cast<int16_t>((std::max)(8, static_cast<int>(bottom - top - 5)));
+    for (int16_t rx = 8; rx + 3 < frame.dims.width - 2; rx = static_cast<int16_t>(rx + stepX)) {
+        const uint32_t h = static_cast<uint32_t>(rx) * 2654435761u;
+        const int16_t ry = static_cast<int16_t>(
+            top + static_cast<int16_t>(((frame.animTick * 3u) + (h >> 8u)) % static_cast<uint32_t>(spanY)));
+        if (frame.page == zd::ScreenPage::PetFace) {
+            const auto& g = frame.faceGeom;
+            const int16_t fL = static_cast<int16_t>(g.centerX - g.bracketOffsetX - 6);
+            const int16_t fR = static_cast<int16_t>(g.centerX + g.bracketOffsetX + 6);
+            if (rx >= fL && (rx - 2) <= fR) {
+                continue;
+            }
+        }
+        gfx.drawLine(rx, ry, rx - 2, ry + 4, frame.palette.muted);
+    }
+
+    // Periodic forked lightning bolt strike (2 frames every 12 ticks)
+    if ((frame.animTick % 12u) < 2u) {
+        const int16_t bx = static_cast<int16_t>(frame.dims.width - (frame.compact ? 12 : 20));
+        const int16_t midY = static_cast<int16_t>((top + bottom) / 2);
+        gfx.drawLine(bx, top, bx - 4, midY, frame.palette.highlight);
+        gfx.drawLine(bx - 4, midY, bx + 2, midY, frame.palette.highlight);
+        gfx.drawLine(bx + 2, midY, bx - 3, bottom, frame.palette.fg);
+        // Side fork
+        const int16_t forkY = static_cast<int16_t>(midY + (bottom - midY) / 2);
+        if (bx >= 10 && forkY <= bottom) {
+            gfx.drawLine(bx - 4, midY, bx - 8, forkY, frame.palette.accent);
+        }
+        // Ground splash spark
+        if (bx >= 6 && bx + 1 < frame.dims.width) {
+            gfx.fillRect(bx - 5, bottom - 1, 5, 1, frame.palette.highlight);
+        }
+    }
+}
+
+template <typename Gfx>
+void drawRadarDishBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    const int16_t top = static_cast<int16_t>(frame.headerDividerY + 2);
+    const int16_t bottom = static_cast<int16_t>(frame.footerDividerY - 2);
+    if ((bottom - top) < 16 || frame.dims.width < 96) {
+        return;
+    }
+    const int16_t ox = static_cast<int16_t>(frame.dims.width - 6);
+    const int16_t oy = static_cast<int16_t>(bottom - 2);
+    const int16_t maxR = static_cast<int16_t>((std::min)(frame.compact ? 18 : 30, static_cast<int>(oy - top - 1)));
+    const uint32_t phase = frame.animTick % 3u;
+    for (uint32_t k = 0; k < 3u; ++k) {
+        const int16_t r = static_cast<int16_t>(6 + static_cast<int16_t>(k) * (frame.compact ? 5 : 9));
+        if (r > maxR || (ox - r) < 2) {
+            continue;
+        }
+        const uint16_t col = (k == phase) ? frame.palette.accent : frame.palette.muted;
+        gfx.fillArc(ox, oy, r, r - 1, 185.0f, 260.0f, col);
+    }
+}
+
+template <typename Gfx>
+void drawSatelliteBeamBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
+    drawTacticalHudBackdrop(gfx, frame);
+    const int16_t top = static_cast<int16_t>(frame.headerDividerY + 3);
+    const int16_t bottom = static_cast<int16_t>(frame.footerDividerY - 3);
+    if ((bottom - top) < 12) {
+        return;
+    }
+    const int16_t bx = static_cast<int16_t>(frame.dims.width - 5);
+    gfx.drawLine(bx, top, bx, bottom, frame.palette.muted);
+    const int16_t span = static_cast<int16_t>(bottom - top);
+    const int16_t py = static_cast<int16_t>(top + static_cast<int16_t>((frame.animTick * 3u) % static_cast<uint32_t>(span)));
+    gfx.fillRect(bx - 1, py, 3, (std::min)(3, static_cast<int>(bottom - py + 1)), frame.palette.highlight);
+}
+
+template <typename Gfx>
 void drawThemeBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
     switch (frame.themeEffect) {
         case zd::ThemeEffect::None:
@@ -403,12 +719,22 @@ void drawThemeBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
         case zd::ThemeEffect::TacticalHud:
             drawTacticalHudBackdrop(gfx, frame);
             break;
+        case zd::ThemeEffect::LightningStorm:
+            drawLightningStormBackdrop(gfx, frame);
+            break;
+        case zd::ThemeEffect::RadarDish:
+            drawRadarDishBackdrop(gfx, frame);
+            break;
+        case zd::ThemeEffect::SatelliteBeam:
+            drawSatelliteBeamBackdrop(gfx, frame);
+            break;
     }
 }
 
 template <typename Gfx>
 void drawThemeDividerAccent(Gfx& gfx, const zd::UiFrame& frame) {
-    if (frame.themeEffect != zd::ThemeEffect::TacticalHud) {
+    if (frame.themeEffect != zd::ThemeEffect::TacticalHud &&
+        frame.themeEffect != zd::ThemeEffect::SatelliteBeam) {
         return;
     }
     const int16_t pipW = frame.compact ? 6 : 10;
@@ -445,9 +771,27 @@ void paintUiFrame(Gfx& gfx, const zd::UiFrame& frame) {
     // Optional zero-RAM procedural theme backdrop (drawn behind all UI chrome)
     drawThemeBackdrop(gfx, frame);
 
-    // Top telemetry bar
+    // Top telemetry bar + active ops mode badge
     gfx.setTextColor(frame.palette.fg, frame.palette.bg);
     gfx.drawString(frame.headerLine.c_str(), 4, frame.headerTextY);
+    if (!frame.modeBadge.empty()) {
+        const int16_t bw = static_cast<int16_t>(frame.modeBadge.size() * 6);
+        const int16_t bx = static_cast<int16_t>(frame.dims.width - bw - 2);
+        const int16_t by = static_cast<int16_t>((std::max)(0, static_cast<int>(frame.headerTextY) - 1));
+        const int16_t bh = static_cast<int16_t>((std::min)(10, static_cast<int>(frame.headerDividerY) - by));
+        const bool isOff = frame.offensiveArmed || frame.opsMode == zd::OpsMode::Offensive;
+        const bool isDef = frame.opsMode == zd::OpsMode::Defensive;
+        if (isOff || isDef) {
+            const uint16_t badgeBg = isOff ? frame.palette.highlight : frame.palette.accent;
+            if (bh > 0 && bx >= 1) {
+                gfx.fillRect(bx - 1, by, bw + 2, bh, badgeBg);
+            }
+            gfx.setTextColor(frame.palette.bg, badgeBg);
+        } else {
+            gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+        }
+        gfx.drawString(frame.modeBadge.c_str(), bx, frame.headerTextY);
+    }
     gfx.drawLine(0, frame.headerDividerY, frame.dims.width - 1, frame.headerDividerY, frame.palette.muted);
     drawThemeDividerAccent(gfx, frame);
 
@@ -461,6 +805,9 @@ void paintUiFrame(Gfx& gfx, const zd::UiFrame& frame) {
             break;
         case zd::ScreenPage::ChannelSpectrum:
             drawSpectrumPage(gfx, frame);
+            break;
+        case zd::ScreenPage::RfGuard:
+            drawRfGuardPage(gfx, frame);
             break;
     }
 

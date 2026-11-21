@@ -1,4 +1,4 @@
-// Pure functional combinators & stateless xorshift32 PRNG (ported from include/fp.hpp).
+// Pure functional combinators & stateless xorshift32 PRNG (ported from core/include/zd/fp.hpp).
 (function (root) {
   'use strict';
 

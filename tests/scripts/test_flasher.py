@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import io
 import os
 import sys
 import tempfile
@@ -43,6 +45,54 @@ class TestFlasherScript(unittest.TestCase):
             with mock.patch.dict(sys.modules, {"serial": None, "serial.tools": None, "serial.tools.list_ports": None}):
                 ports = flasher.get_serial_ports()
                 self.assertEqual(ports, [])
+
+    def test_verify_sha256_manifest_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fw = os.path.join(tmp, "pwnagotchi-zd-m5stick-c-factory.bin")
+            payload = b"factory-image-test-bytes"
+            with open(fw, "wb") as fh:
+                fh.write(payload)
+            digest = hashlib.sha256(payload).hexdigest()
+
+            # Without a manifest present locally, returns True with skip note.
+            ok_none, _ = flasher.verify_sha256(fw)
+            self.assertTrue(ok_none)
+
+            # Matching .sha256 passes.
+            sha_file = fw + ".sha256"
+            with open(sha_file, "w", encoding="utf-8") as fh:
+                fh.write(f"{digest}  pwnagotchi-zd-m5stick-c-factory.bin\n")
+            ok_match, msg_match = flasher.verify_sha256(fw)
+            self.assertTrue(ok_match, msg_match)
+
+            # Mismatched .sha256 fails closed.
+            with open(sha_file, "w", encoding="utf-8") as fh:
+                fh.write(("0" * 64) + "  pwnagotchi-zd-m5stick-c-factory.bin\n")
+            ok_bad, _ = flasher.verify_sha256(fw)
+            self.assertFalse(ok_bad)
+
+            # SHA256SUMS.txt missing the target filename fails closed.
+            os.remove(sha_file)
+            with open(os.path.join(tmp, "SHA256SUMS.txt"), "w", encoding="utf-8") as fh:
+                fh.write(f"{digest}  other-board-factory.bin\n")
+            ok_missing, _ = flasher.verify_sha256(fw)
+            self.assertFalse(ok_missing)
+
+    def test_main_multiport_abort_does_not_default_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fw = os.path.join(tmp, "pwnagotchi-zd-m5stick-c-factory.bin")
+            open(fw, "wb").close()
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                with mock.patch.object(flasher, "get_serial_ports", return_value=["/dev/ttyUSB0", "/dev/ttyUSB1"]):
+                    with mock.patch("builtins.input", side_effect=["invalid", "q"]):
+                        with mock.patch("sys.stdout", new_callable=io.StringIO):
+                            with self.assertRaises(SystemExit) as cm:
+                                flasher.main()
+                            self.assertEqual(cm.exception.code, 0)
+            finally:
+                os.chdir(cwd)
 
 
 if __name__ == "__main__":

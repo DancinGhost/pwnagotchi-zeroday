@@ -123,7 +123,7 @@ void testStateReducerAndMoods() {
 
     // Theme & Manual Scan via Button B
     const zd::AppState sThemed = zd::reduce(sWoken, zd::ButtonBLongPressedEvent{96500u});
-    assert(sThemed.theme == zd::ThemeId::DarkInk);
+    assert(sThemed.theme == zd::ThemeId::ZeroDayCyan);
 
     const zd::AppState sManual = zd::reduce(sThemed, zd::ButtonBPressedEvent{97000u});
     assert(sManual.manualScanRequested);
@@ -206,7 +206,7 @@ double contrastRatio(zd::Rgb888 a, zd::Rgb888 b) {
 void testThemeCatalog() {
     // Catalog shape: one row per ThemeId, in order, unique keys
     static_assert(zd::kThemeCatalog.size() == zd::kThemeCount, "catalog size");
-    assert(zd::kThemeCount >= 9u);
+    assert(zd::kThemeCount == 6u);
     std::set<std::string> keys;
     for (std::size_t i = 0; i < zd::kThemeCount; ++i) {
         const zd::ThemeSpec& t = zd::kThemeCatalog[i];
@@ -233,24 +233,27 @@ void testThemeCatalog() {
     }
     assert(!zd::themeFromKey("not-a-theme").has_value());
     assert(!zd::themeFromKey("").has_value());
-    assert(zd::themeFromKey("neon") == zd::ThemeId::NeonNoir);
-    assert(zd::themeFromKey("volt") == zd::ThemeId::NeonVolt);
-    assert(zd::themeFromKey("operator") == zd::ThemeId::OperatorBlue);
+    assert(zd::themeFromKey("cyan") == zd::ThemeId::ZeroDayCyan);
     assert(zd::themeFromKey("rain") == zd::ThemeId::CodeRain);
-    assert(zd::themeFromKey("crimson") == zd::ThemeId::CrimsonOps);
-    assert(zd::themeFromKey("redrain") == zd::ThemeId::RedRain);
+    assert(zd::themeFromKey("amber") == zd::ThemeId::AmberCrt);
+    assert(zd::themeFromKey("redteam") == zd::ThemeId::RedTeam);
     assert(zd::themeFromKey("blueteam") == zd::ThemeId::BlueTeam);
-    assert(zd::themeSpec(zd::ThemeId::CodeRain).effect == zd::ThemeEffect::DigitalRain);
-    assert(zd::themeSpec(zd::ThemeId::RedRain).effect == zd::ThemeEffect::DigitalRain);
-    assert(zd::themeSpec(zd::ThemeId::CrimsonOps).effect == zd::ThemeEffect::TacticalHud);
+    // Legacy aliases remain valid for persisted config migration
+    assert(zd::themeFromKey("neon") == zd::ThemeId::ZeroDayCyan);
+    assert(zd::themeFromKey("volt") == zd::ThemeId::ZeroDayCyan);
+    assert(zd::themeFromKey("operator") == zd::ThemeId::BlueTeam);
+    assert(zd::themeFromKey("crimson") == zd::ThemeId::RedTeam);
+    assert(zd::themeFromKey("redrain") == zd::ThemeId::RedTeam);
+    assert(zd::themeSpec(zd::ThemeId::ZeroDayCyan).effect == zd::ThemeEffect::RadarDish);
+    assert(zd::themeSpec(zd::ThemeId::CodeRain).effect == zd::ThemeEffect::LightningStorm);
+    assert(zd::themeSpec(zd::ThemeId::RedTeam).effect == zd::ThemeEffect::SatelliteBeam);
     assert(zd::themeSpec(zd::ThemeId::BlueTeam).effect == zd::ThemeEffect::TacticalHud);
-    assert(zd::themeLabel(zd::ThemeId::NeonNoir) == "NEON NOIR");
-    assert(zd::themeLabel(zd::ThemeId::CodeRain) == "CODE RAIN");
-    assert(zd::themeLabel(zd::ThemeId::CrimsonOps) == "CRIMSON OPS");
+    assert(zd::themeLabel(zd::ThemeId::CodeRain) == "STORM RAIN");
+    assert(zd::themeLabel(zd::ThemeId::AmberCrt) == "AMBER PULSE");
     assert(zd::toRgb888Packed({0x12, 0x34, 0x56}) == 0x123456u);
 
     // Cycling wraps both directions and visits every theme exactly once
-    static_assert(zd::nextTheme(zd::ThemeId::PaperInk) == zd::ThemeId::DarkInk, "next");
+    static_assert(zd::nextTheme(zd::ThemeId::PaperInk) == zd::ThemeId::ZeroDayCyan, "next");
     static_assert(zd::prevTheme(zd::ThemeId::PaperInk) == zd::ThemeId::BlueTeam, "prev wrap");
     static_assert(zd::nextTheme(zd::ThemeId::BlueTeam) == zd::ThemeId::PaperInk, "next wrap");
     static_assert(zd::cycleTheme(zd::ThemeId::PaperInk,
@@ -283,9 +286,9 @@ void testThemeEventsAndToast() {
 
     // Cycle forward / backward via semantic events
     const zd::AppState sNext = zd::reduce(s0, zd::CycleThemeEvent{5000u, +1});
-    assert(sNext.theme == zd::ThemeId::DarkInk);
+    assert(sNext.theme == zd::ThemeId::ZeroDayCyan);
     assert(sNext.themeToastUntilMs == 5000u + zd::kThemeToastMs);
-    assert(sNext.phrase.find("Dark Ink") != std::string::npos);  // pet comments on new look
+    assert(sNext.phrase.find("ZeroDay") != std::string::npos);  // pet comments on new look
     assert(s0.theme == zd::ThemeId::PaperInk);                   // s0 untouched
 
     const zd::AppState sPrev = zd::reduce(s0, zd::CycleThemeEvent{5000u, -1});
@@ -293,25 +296,25 @@ void testThemeEventsAndToast() {
 
     // Direct set (e.g. restored from flash) can be silent
     const zd::AppState sSilent =
-        zd::reduce(s0, zd::SetThemeEvent{10u, zd::ThemeId::NeonNoir, false});
-    assert(sSilent.theme == zd::ThemeId::NeonNoir);
+        zd::reduce(s0, zd::SetThemeEvent{10u, zd::ThemeId::CodeRain, false});
+    assert(sSilent.theme == zd::ThemeId::CodeRain);
     assert(sSilent.themeToastUntilMs == 0u);
     assert(sSilent.phrase == s0.phrase);
 
     // Invalid set is ignored
     const zd::AppState sBad = zd::reduce(sSilent, zd::SetThemeEvent{20u, static_cast<zd::ThemeId>(99)});
-    assert(sBad.theme == zd::ThemeId::NeonNoir);
+    assert(sBad.theme == zd::ThemeId::CodeRain);
 
     // Toast appears in the UI frame, centered and on-screen, then expires
-    const zd::AppState sToast = zd::reduce(s0, zd::SetThemeEvent{8000u, zd::ThemeId::OperatorBlue});
+    const zd::AppState sToast = zd::reduce(s0, zd::SetThemeEvent{8000u, zd::ThemeId::BlueTeam});
     for (const zd::ScreenDimensions dims : {zd::ScreenDimensions{240, 135}, zd::ScreenDimensions{160, 80}}) {
         const zd::UiFrame f = zd::buildUiFrame(sToast, dims);
         assert(f.toast.visible);
-        assert(f.toast.text.find("OPERATOR") != std::string::npos);
+        assert(f.toast.text.find("BLUE TEAM") != std::string::npos);
         assert(f.toast.x >= 0 && f.toast.y > f.headerDividerY);
         assert(f.toast.x + f.toast.w <= dims.width);
         assert(f.toast.y + f.toast.h < f.footerDividerY);
-        assert(zd::renderAsciiPreview(f).find("OPERATOR") != std::string::npos);
+        assert(zd::renderAsciiPreview(f).find("BLUE TEAM") != std::string::npos);
     }
     const zd::AppState sLater = zd::reduce(sToast, zd::TickEvent{8000u + zd::kThemeToastMs, 90, false});
     assert(!zd::buildUiFrame(sLater, {240, 135}).toast.visible);
@@ -328,9 +331,9 @@ void testThemeEventsAndToast() {
         }
     }
 
-    // Semantic page cycling (forward & backward)
+    // Semantic page cycling (forward & backward across 4 pages including RfGuard)
     const zd::AppState sPrevPage = zd::reduce(s0, zd::CyclePageEvent{200u, -1});
-    assert(sPrevPage.page == zd::ScreenPage::ChannelSpectrum);
+    assert(sPrevPage.page == zd::ScreenPage::RfGuard);
     const zd::AppState sDirectPage =
         zd::reduce(sPrevPage, zd::SetPageEvent{250u, zd::ScreenPage::NearbyRadar});
     assert(sDirectPage.page == zd::ScreenPage::NearbyRadar);
@@ -339,7 +342,81 @@ void testThemeEventsAndToast() {
     const zd::AppState scanning = zd::reduce(s0, zd::ScanStartedEvent{1600u});
     const zd::AppState themedWhileScanning = zd::reduce(scanning, zd::ButtonBLongPressedEvent{1700u});
     assert(themedWhileScanning.phrase == scanning.phrase);
-    assert(themedWhileScanning.theme == zd::ThemeId::DarkInk);
+    assert(themedWhileScanning.theme == zd::ThemeId::ZeroDayCyan);
+
+    // Offensive arming event & tiny toast dimension clamping (no size_t underflow)
+    const zd::AppState armed = zd::reduce(s0, zd::SetOffensiveArmedEvent{1800u, true});
+    assert(armed.offensiveArmed);
+    assert(armed.opsMode == zd::OpsMode::Offensive);
+    assert(armed.mood == zd::Mood::CyberAttack);
+    const zd::UiFrame fArmed = zd::buildUiFrame(armed, {128, 64});
+    assert(fArmed.offensiveArmed);
+    assert(fArmed.scene == zd::ActivityScene::SatelliteBeam);
+    const zd::AppState toastOnTiny = zd::reduce(armed, zd::SetThemeEvent{1900u, zd::ThemeId::RedTeam});
+    const auto tinyToast = zd::buildThemeToast(toastOnTiny, {10, 40}, true, 0, 40);
+    assert(tinyToast.visible);
+    assert(tinyToast.text.size() == 8u);
+    assert(tinyToast.w > 0);
+
+    // Zero-AP phrase safety: Excited & Cool never fabricate "0 APs" empty-target templates
+    const zd::ScanSummary emptyScan{};
+    for (uint32_t seed = 1u; seed <= 12u; ++seed) {
+        const std::string ex = zd::selectPhrase(zd::Mood::Excited, emptyScan, seed).value;
+        const std::string co = zd::selectPhrase(zd::Mood::Cool, emptyScan, seed).value;
+        assert(ex.find("0 nearby") == std::string::npos);
+        assert(co.find("Strongest scan: ...") == std::string::npos);
+    }
+
+    // Large-list AP deduplication (> 32 entries) exercises O(N) hash-set path equivalently
+    std::vector<zd::AccessPoint> manyAps;
+    for (int i = 0; i < 48; ++i) {
+        manyAps.push_back({"ap_" + std::to_string(i % 24), -40 - i, (i % 11) + 1, (i % 2) == 0});
+    }
+    const auto dedupedAll = zd::deduplicateSortedAps(manyAps, 0u);
+    assert(dedupedAll.size() == 24u);
+}
+
+void testExpandedLevelsHighscoreAndMultiRadio() {
+    assert(zd::deriveLevelInfo(0u).level == 1u);
+    assert(zd::deriveLevelInfo(40u).level == 2u);
+    assert(zd::deriveLevelInfo(2500u).level == 10u);
+
+    // BLE tracker & multi-tool signatures
+    assert(zd::classifyBleDevice("7a:3c:91:04:88:12", "", 0x004Cu, 0u, true) ==
+           zd::BleThreatKind::AirTagTracker);
+    assert(zd::classifyBleDevice("aa:bb:cc:dd:ee:01", "Ble_Tag2", 0x0075u, 0u, true) ==
+           zd::BleThreatKind::SmartTagTracker);
+    assert(zd::classifyBleDevice("aa:bb:cc:dd:ee:02", "", 0u, 0xFEEDu, false) ==
+           zd::BleThreatKind::TileTracker);
+    assert(zd::classifyBleDevice("00:80:e1:42:13:37", "Unknown", 0u, 0x3082u, false) ==
+           zd::BleThreatKind::MultiToolBle);
+
+    zd::AppState s = zd::initialState(11u);
+    s = zd::reduce(s, zd::CycleOpsModeEvent{100u});
+    assert(s.opsMode == zd::OpsMode::Defensive);
+    assert(s.mood == zd::Mood::ShieldGuard);
+
+    s = zd::reduce(s, zd::BleScanCompletedEvent{
+                          200u,
+                          {
+                              {"44:12:aa:bb:10:01", "Watch", -70, 0u, 0x180du, false, zd::BleThreatKind::None},
+                              {"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0u, true, zd::BleThreatKind::None},
+                          }});
+    assert(s.threatsDetected == 1u);
+    assert(s.mood == zd::Mood::ThreatAlert);
+    assert(s.xp == 25u && s.highScore == 25u);
+
+    s = zd::reduce(s, zd::SetSubGhzFreqEvent{300u, 915000u});
+    assert(s.subGhzFreqKhz == 915000u);
+    s = zd::reduce(s, zd::SubGhzObservedEvent{
+                          400u,
+                          zd::SubGhzSignal{915000u, -48, "OOK", 6u, zd::SubGhzAnomaly::ReplayBurst}});
+    assert(s.threatsDetected == 2u);
+    assert(s.xp == 50u && s.highScore == 50u && s.level == 2u);
+    assert(s.levelUpUntilMs != 0u);
+
+    const zd::AppState sLvlTick = zd::reduce(s, zd::TickEvent{500u, 95, false});
+    assert(sLvlTick.mood == zd::Mood::LevelUp);
 }
 
 }  // namespace
@@ -351,6 +428,7 @@ int main() {
     testResponsiveUiModels();
     testThemeCatalog();
     testThemeEventsAndToast();
+    testExpandedLevelsHighscoreAndMultiRadio();
     std::cout << "All pure functional core & UI layout tests PASSED!\n";
     return 0;
 }

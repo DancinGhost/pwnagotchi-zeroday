@@ -9,8 +9,10 @@
 // the pure reducer, and enforces the authorization gate on every transmit.
 
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "secops.hpp"
@@ -40,6 +42,9 @@ struct CapturedFrame {
     int32_t rssi = -100;
     Encryption enc = Encryption::Unknown;
     bool wps = false;             // WPS vendor IE (00:50:F2:04) present in beacon/probe-resp
+    uint8_t eapolMsg = 0u;        // 0 = synthetic/pre-validated; 1..4 = EAPOL M1..M4; 255 = ignore
+    bool hasStation = false;      // true when decoded Data/EAPOL provides `station` explicitly
+    std::string station{};        // wireless STA MAC (empty for WDS 4-address frames)
 };
 
 // --- Adapter interfaces --------------------------------------------------------------
@@ -104,6 +109,7 @@ public:
 // --- Coordinator ---------------------------------------------------------------------
 
 constexpr std::size_t kMaxRecordedEvents = 10000u;
+constexpr std::size_t kMaxEapolTrackers = 512u;
 
 class SecSession {
 public:
@@ -113,7 +119,7 @@ public:
     Authorization& authorization() { return auth_; }
     const Authorization& authorization() const { return auth_; }
 
-    const std::vector<SecEvent>& events() const { return events_; }
+    const std::deque<SecEvent>& events() const { return events_; }
 
     void setRecorder(ISessionRecorder* rec) { recorder_ = rec; }
 
@@ -123,26 +129,25 @@ public:
         maxRecordedEvents_ = cap;
         if (maxRecordedEvents_ == 0u) {
             events_.clear();
-            events_.shrink_to_fit();
-        } else if (events_.size() > maxRecordedEvents_) {
-            events_.erase(events_.begin(),
-                          events_.begin() +
-                              static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_));
+        } else {
+            while (events_.size() > maxRecordedEvents_) {
+                events_.pop_front();
+            }
         }
     }
 
     // Replace current state by replaying a sequence of recorded events through reduce().
     void loadEvents(const std::vector<SecEvent>& recorded) {
         state_ = replaySecEvents(recorded);
+        eapolState_.clear();
+        events_.clear();
         if (maxRecordedEvents_ == 0u) {
-            events_.clear();
             return;
         }
-        events_ = recorded;
-        if (events_.size() > maxRecordedEvents_) {
-            events_.erase(events_.begin(),
-                          events_.begin() +
-                              static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_));
+        const std::size_t start =
+            (recorded.size() > maxRecordedEvents_) ? (recorded.size() - maxRecordedEvents_) : 0u;
+        for (std::size_t i = start; i < recorded.size(); ++i) {
+            events_.push_back(recorded[i]);
         }
     }
 
@@ -163,20 +168,54 @@ public:
                     dispatch(ProbeRequestObserved{f.nowMs, f.source, f.ssid});
                 }
                 break;
-            case FrameKind::Data:
+            case FrameKind::Data: {
                 dispatch(DataFrameObserved{f.nowMs, f.bssid});
-                if (!f.source.empty() && !isBroadcastMac(f.source) &&
-                    normalizeMac(f.source) != normalizeMac(f.bssid)) {
-                    dispatch(ClientObserved{f.nowMs, f.bssid, f.source});
+                const std::string& sta = f.hasStation ? f.station : f.source;
+                if (!sta.empty() && !isBroadcastMac(sta) &&
+                    normalizeMac(sta) != normalizeMac(f.bssid)) {
+                    dispatch(ClientObserved{f.nowMs, f.bssid, sta});
                 }
                 break;
+            }
             case FrameKind::Deauth:
             case FrameKind::Disassoc:
                 dispatch(DeauthObserved{f.nowMs, f.bssid, f.source, f.dest});
                 break;
-            case FrameKind::Eapol:
-                dispatch(HandshakeObserved{f.nowMs, f.bssid});
+            case FrameKind::Eapol: {
+                if (f.eapolMsg == 0u) {
+                    dispatch(HandshakeObserved{f.nowMs, f.bssid});
+                    break;
+                }
+                if (f.eapolMsg < 1u || f.eapolMsg > 4u) {
+                    break;
+                }
+                const std::string bssid = normalizeMac(f.bssid);
+                std::string rawSta;
+                if (f.hasStation) {
+                    rawSta = f.station;
+                } else if (!f.source.empty() && normalizeMac(f.source) != bssid) {
+                    rawSta = f.source;
+                } else {
+                    rawSta = f.dest;
+                }
+                const std::string sta = normalizeMac(rawSta);
+                if (bssid.empty() || sta.empty() || isBroadcastMac(sta) || isMulticastMac(sta) ||
+                    sta == bssid) {
+                    break;
+                }
+                const std::string key = bssid + "|" + sta;
+                if (eapolState_.size() >= kMaxEapolTrackers &&
+                    eapolState_.find(key) == eapolState_.end()) {
+                    eapolState_.clear();
+                }
+                uint8_t& mask = eapolState_[key];
+                mask = static_cast<uint8_t>(mask | static_cast<uint8_t>(1u << (f.eapolMsg - 1u)));
+                // Require at least an observed M1+M2 or M2+M3 exchange for a valid handshake.
+                if ((mask & 0x03u) == 0x03u || (mask & 0x06u) == 0x06u) {
+                    dispatch(HandshakeObserved{f.nowMs, f.bssid});
+                }
                 break;
+            }
             case FrameKind::Pmkid:
                 dispatch(PmkidObserved{f.nowMs, f.bssid});
                 break;
@@ -186,12 +225,8 @@ public:
     void dispatch(const SecEvent& ev) {
         state_ = reduce(std::move(state_), ev);
         if (maxRecordedEvents_ > 0u) {
-            const std::size_t slack = maxRecordedEvents_ / 10u;
-            if (events_.size() >= maxRecordedEvents_ + slack) {
-                events_.erase(
-                    events_.begin(),
-                    events_.begin() +
-                        static_cast<std::ptrdiff_t>(events_.size() - maxRecordedEvents_ + 1u));
+            while (events_.size() >= maxRecordedEvents_) {
+                events_.pop_front();
             }
             events_.push_back(ev);
         }
@@ -206,6 +241,9 @@ public:
     AuthDecision beginDeauth(const std::string& bssid, const std::string& client, uint32_t count,
                              uint32_t nowMs, IAuditLog* audit = nullptr) {
         AuthDecision decision = authorize(auth_, bssid);
+        if (decision == AuthDecision::Allowed && !isValidClientTarget(client)) {
+            decision = AuthDecision::BlockedNotAllowlisted;
+        }
         const std::string normBssid = normalizeMac(bssid);
         const std::string normClient =
             (client.empty() || isBroadcastMac(normalizeMac(client))) ? std::string{}
@@ -252,7 +290,8 @@ public:
 private:
     SecState state_{};
     Authorization auth_{};
-    std::vector<SecEvent> events_{};
+    std::deque<SecEvent> events_{};
+    std::unordered_map<std::string, uint8_t> eapolState_{};
     std::size_t maxRecordedEvents_ = kMaxRecordedEvents;
     ISessionRecorder* recorder_ = nullptr;
 };

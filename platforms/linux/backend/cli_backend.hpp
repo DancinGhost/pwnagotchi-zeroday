@@ -13,6 +13,7 @@
 // This is the always-available fallback half of the hybrid backend; the native
 // libpcap/libnl half (native_backend.hpp) is preferred when compiled in.
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -27,9 +28,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include <sys/stat.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "zd/hal.hpp"
@@ -42,14 +44,40 @@
 namespace zd {
 namespace linux_backend {
 
-inline std::string readFileToString(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+inline std::string readFileToString(const std::string& path,
+                                    std::size_t maxBytes = 4u * 1024u * 1024u) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
         return {};
     }
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        return {};
+    }
+    std::string out;
+    if (st.st_size > 0) {
+        const std::size_t cap = static_cast<std::size_t>(st.st_size);
+        out.reserve(cap < maxBytes ? cap : maxBytes);
+    }
+    char buf[4096];
+    while (out.size() < maxBytes) {
+        const std::size_t want =
+            (maxBytes - out.size() < sizeof(buf)) ? (maxBytes - out.size()) : sizeof(buf);
+        const ssize_t n = ::read(fd, buf, want);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+        out.append(buf, static_cast<std::size_t>(n));
+    }
+    ::close(fd);
+    return out;
 }
 
 inline bool writeAllFd(int fd, const char* data, std::size_t len) {
@@ -87,19 +115,78 @@ inline std::string homeDir() {
     return "/root";
 }
 
-// Create `dir` and any missing parents (POSIX `mkdir -p`, without spawning a subprocess).
-// Defaults to mode 0700 (owner-only access) for secure storage of config & audit files.
-inline void makeDirRecursive(const std::string& dir, mode_t mode = 0700) {
+// Create `dir` and any missing parents (POSIX `mkdir -p`, without spawning a subprocess),
+// verifying each traversed component is a real directory (not a symlink).
+inline bool makeDirRecursive(const std::string& dir, mode_t mode = 0700) {
+    if (dir.empty()) {
+        return false;
+    }
     std::string partial;
     partial.reserve(dir.size());
+    const uid_t euid = ::geteuid();
     for (std::size_t i = 0; i < dir.size(); ++i) {
-        partial.push_back(dir[i]);
-        if (dir[i] == '/' || i + 1u == dir.size()) {
-            if (!partial.empty()) {
-                ::mkdir(partial.c_str(), mode);  // ignore EEXIST and any other failure here;
-            }                                    // the subsequent file open() surfaces real errors.
+        if (dir[i] == '/') {
+            if (partial.empty()) {
+                partial.push_back('/');
+                continue;
+            }
+            if (partial.back() == '/') {
+                continue;
+            }
+        } else {
+            partial.push_back(dir[i]);
+            if (i + 1u < dir.size()) {
+                continue;
+            }
+        }
+        struct stat st {};
+        if (::lstat(partial.c_str(), &st) != 0) {
+            if (errno != ENOENT) {
+                return false;
+            }
+            if (::mkdir(partial.c_str(), mode) != 0 && errno != EEXIST) {
+                return false;
+            }
+            if (::lstat(partial.c_str(), &st) != 0) {
+                return false;
+            }
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            return false;
+        }
+        if (euid == 0 && st.st_uid != 0) {
+            return false;
+        }
+        if (dir[i] == '/') {
+            partial.push_back('/');
         }
     }
+    return true;
+}
+
+// Safely open a regular file for writing/appending without following symlinks or blocking on FIFOs.
+inline int openSecureWriteRegular(const std::string& path, bool append) {
+    const int flags = O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
+                      (append ? O_APPEND : 0);
+    const int fd = ::open(path.c_str(), flags, 0600);
+    if (fd < 0) {
+        return -1;
+    }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        return -1;
+    }
+    if (::geteuid() == 0 && st.st_uid != 0) {
+        ::close(fd);
+        return -1;
+    }
+    (void)::fchmod(fd, 0600);
+    if (!append && ::ftruncate(fd, 0) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 struct MonitorBringUpResult {
@@ -443,7 +530,7 @@ public:
         }
         const std::optional<std::string> text = job_.collect();
         if (!text.has_value()) {
-            return {zd::hal::ScanPollState::Running, {}};
+            return {zd::hal::ScanPollState::Failed, {}};
         }
         detailed_ = parseNmcliScanDetailed(*text);
         std::vector<AccessPoint> aps;
@@ -492,7 +579,7 @@ public:
             res.detail = "invalid monitor interface name";
             return res;
         }
-        if (!sec::isValidMac(bssid) || (!client.empty() && !sec::isValidMac(client))) {
+        if (!sec::isValidMac(bssid) || !sec::isValidClientTarget(client)) {
             res.transmitted = false;
             res.detail = "invalid BSSID or client MAC";
             return res;
@@ -528,17 +615,31 @@ class SysfsPowerSensor final : public zd::hal::IPowerSensor {
 public:
     zd::hal::PowerStatus readPower() override {
         zd::hal::PowerStatus st{100, false};
-        const char* bases[] = {"/sys/class/power_supply/BAT0", "/sys/class/power_supply/BAT1"};
-        for (const char* base : bases) {
-            const std::string cap = readFileToString(std::string(base) + "/capacity");
+        DIR* dir = ::opendir("/sys/class/power_supply");
+        if (dir == nullptr) {
+            return st;
+        }
+        while (struct dirent* ent = ::readdir(dir)) {
+            if (ent->d_name[0] == '.') {
+                continue;
+            }
+            const std::string base = std::string("/sys/class/power_supply/") + ent->d_name;
+            const std::string ptype = trim(readFileToString(base + "/type", 64u));
+            if (ptype != "Battery") {
+                continue;
+            }
+            const std::string cap = readFileToString(base + "/capacity", 64u);
             if (!cap.empty()) {
-                st.batteryPercent = std::atoi(cap.c_str());
-                const std::string status = readFileToString(std::string(base) + "/status");
+                const int32_t pct = sec::detail::parseI32(cap);
+                st.batteryPercent = (pct < 0) ? 0 : ((pct > 100) ? 100 : pct);
+                const std::string status = readFileToString(base + "/status", 64u);
                 st.isCharging = (status.find("Charging") != std::string::npos) ||
                                 (status.find("Full") != std::string::npos);
+                ::closedir(dir);
                 return st;
             }
         }
+        ::closedir(dir);
         return st;  // desktop with no battery => 100%, not charging
     }
 };
@@ -549,12 +650,16 @@ class FileThemeStore final : public zd::hal::IThemeStore {
 public:
     FileThemeStore() {
         const std::string dir = homeDir() + "/.config/pwnagotchi-zeroday";
-        makeDirRecursive(dir);
+        dirOk_ = makeDirRecursive(dir, 0700);
         path_ = dir + "/theme";
+        hiScorePath_ = dir + "/highscore";
     }
 
     std::string loadThemeKey() override {
-        const std::string raw = readFileToString(path_);
+        if (!dirOk_) {
+            return {};
+        }
+        const std::string raw = readFileToString(path_, 256u);
         std::string key;
         for (char c : raw) {
             if (c == '\n' || c == '\r' || c == ' ') {
@@ -566,11 +671,32 @@ public:
     }
 
     void saveThemeKey(std::string_view key) override {
-        // Enforce 0600 permissions (read/write only by owner) and block symlink following
-        const int fd = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (!dirOk_) {
+            return;
+        }
+        const int fd = openSecureWriteRegular(path_, /*append=*/false);
         if (fd >= 0) {
-            ::fchmod(fd, 0600);
             const std::string entry = std::string(key.data(), key.size()) + "\n";
+            (void)writeAllFd(fd, entry.data(), entry.size());
+            ::close(fd);
+        }
+    }
+
+    uint32_t loadHighScore() override {
+        if (!dirOk_) {
+            return 0u;
+        }
+        const std::string raw = readFileToString(hiScorePath_, 64u);
+        return sec::detail::parseU32(raw);
+    }
+
+    void saveHighScore(uint32_t score) override {
+        if (!dirOk_) {
+            return;
+        }
+        const int fd = openSecureWriteRegular(hiScorePath_, /*append=*/false);
+        if (fd >= 0) {
+            const std::string entry = std::to_string(score) + "\n";
             (void)writeAllFd(fd, entry.data(), entry.size());
             ::close(fd);
         }
@@ -578,6 +704,8 @@ public:
 
 private:
     std::string path_;
+    std::string hiScorePath_;
+    bool dirOk_ = false;
 };
 
 // --- Append-only audit log for every transmit decision -------------------------------
@@ -588,30 +716,35 @@ public:
         const std::string dir = (::geteuid() == 0)
                                     ? std::string("/var/log/pwnagotchi-zeroday")
                                     : (homeDir() + "/.local/share/pwnagotchi-zeroday");
-        makeDirRecursive(dir, 0700);
+        dirOk_ = makeDirRecursive(dir, 0700);
         path_ = dir + "/audit.log";
     }
 
-    explicit FileAuditLog(std::string customPath) : path_(std::move(customPath)) {}
+    explicit FileAuditLog(std::string customPath) : path_(std::move(customPath)) {
+        const std::size_t slash = path_.rfind('/');
+        if (slash != std::string::npos && slash > 0u) {
+            dirOk_ = makeDirRecursive(path_.substr(0, slash), 0700);
+        } else {
+            dirOk_ = true;
+        }
+    }
 
     bool record(const std::string& line) override {
-        // Enforce 0600 permissions, block symlink following, and fsync so audit is fail-closed.
-        const int fd = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (!dirOk_) {
+            return false;
+        }
+        // Enforce 0600 permissions, regular file, no symlinks, sanitized single-line entry, and fsync.
+        const int fd = openSecureWriteRegular(path_, /*append=*/true);
         if (fd < 0) {
             return false;
         }
-        struct stat st {};
-        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
-            ::close(fd);
-            return false;
-        }
-        ::fchmod(fd, 0600);
+        const std::string cleanLine = sec::sanitizePrintableText(line, 512u);
         const std::time_t t = std::time(nullptr);
         std::tm tmBuf{};
         ::localtime_r(&t, &tmBuf);
         char ts[32] = {0};
         std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmBuf);
-        const std::string entry = std::string(ts) + " " + line + "\n";
+        const std::string entry = std::string(ts) + " " + cleanLine + "\n";
         const bool ok = writeAllFd(fd, entry.data(), entry.size()) && (::fsync(fd) == 0);
         ::close(fd);
         return ok;
@@ -621,6 +754,7 @@ public:
 
 private:
     std::string path_;
+    bool dirOk_ = false;
 };
 
 // --- Live session event recorder (--record <file>) & file I/O helpers ----------------
@@ -629,11 +763,10 @@ class FileSessionRecorder final : public sec::ISessionRecorder {
 public:
     bool open(const std::string& path) {
         close();
-        fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+        fd_ = openSecureWriteRegular(path, /*append=*/true);
         if (fd_ < 0) {
             return false;
         }
-        ::fchmod(fd_, 0600);
         path_ = path;
         return true;
     }
@@ -664,12 +797,12 @@ private:
     std::string path_;
 };
 
-inline bool saveEventsToFile(const std::string& path, const std::vector<sec::SecEvent>& events) {
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+template <typename Container = std::vector<sec::SecEvent>>
+inline bool saveEventsToFile(const std::string& path, const Container& events) {
+    const int fd = openSecureWriteRegular(path, /*append=*/false);
     if (fd < 0) {
         return false;
     }
-    ::fchmod(fd, 0600);
     for (const std::string& line : sec::encodeSecEvents(events)) {
         const std::string entry = line + "\n";
         if (!writeAllFd(fd, entry.data(), entry.size())) {

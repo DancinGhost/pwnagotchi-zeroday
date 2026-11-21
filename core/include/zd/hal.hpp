@@ -52,6 +52,42 @@ public:
     virtual void clearScan() {}
 };
 
+// Optional BLE advertisement scanner interface (AirTag/FindMy/Tile/Multi-Tool Guard).
+class IBleScanner {
+public:
+    virtual ~IBleScanner() = default;
+    virtual bool available() const { return false; }
+    virtual std::vector<BleDevice> pollBleDevices(uint32_t nowMs) = 0;
+};
+
+// Optional Sub-GHz transceiver interface (e.g. CC1101 on 315/433.92/868.35/915 MHz).
+class ISubGhzRadio {
+public:
+    virtual ~ISubGhzRadio() = default;
+    virtual bool available() const { return false; }
+    virtual bool tuneFrequency(uint32_t freqKhz) = 0;
+    virtual uint32_t frequencyKhz() const = 0;
+    virtual std::optional<SubGhzSignal> pollSignal(uint32_t nowMs) = 0;
+};
+
+class NullBleScanner final : public IBleScanner {
+public:
+    std::vector<BleDevice> pollBleDevices(uint32_t) override { return {}; }
+};
+
+class NullSubGhzRadio final : public ISubGhzRadio {
+public:
+    bool tuneFrequency(uint32_t freqKhz) override {
+        freqKhz_ = freqKhz;
+        return false;
+    }
+    uint32_t frequencyKhz() const override { return freqKhz_; }
+    std::optional<SubGhzSignal> pollSignal(uint32_t) override { return std::nullopt; }
+
+private:
+    uint32_t freqKhz_ = 433920u;
+};
+
 class IPowerSensor {
 public:
     virtual ~IPowerSensor() = default;
@@ -61,10 +97,13 @@ public:
 class IThemeStore {
 public:
     virtual ~IThemeStore() = default;
-    // Return persisted theme slug (e.g. "neon") or empty string if unset.
+    // Return persisted theme slug (e.g. "cyan") or empty string if unset.
     virtual std::string loadThemeKey() = 0;
-    // Persist stable theme slug (e.g. "operator") to NVS / file / EEPROM.
+    // Persist stable theme slug (e.g. "blueteam") to NVS / file / EEPROM.
     virtual void saveThemeKey(std::string_view key) = 0;
+    // Optional highscore persistence (defaults to no-op for minimal stores).
+    virtual uint32_t loadHighScore() { return 0u; }
+    virtual void saveHighScore(uint32_t) {}
 };
 
 class IDisplaySink {
@@ -87,13 +126,18 @@ private:
 
 class MemoryThemeStore final : public IThemeStore {
 public:
-    explicit MemoryThemeStore(std::string initialKey = {}) : key_(std::move(initialKey)) {}
+    explicit MemoryThemeStore(std::string initialKey = {}, uint32_t initialHi = 0u)
+        : key_(std::move(initialKey)), highScore_(initialHi) {}
     std::string loadThemeKey() override { return key_; }
     void saveThemeKey(std::string_view key) override { key_.assign(key.data(), key.size()); }
+    uint32_t loadHighScore() override { return highScore_; }
+    void saveHighScore(uint32_t score) override { highScore_ = score; }
     const std::string& storedKey() const { return key_; }
+    uint32_t storedHighScore() const { return highScore_; }
 
 private:
     std::string key_;
+    uint32_t highScore_ = 0u;
 };
 
 // --- Shared portable text CLI (Serial Monitor, desktop terminal, SSH, USB CDC) -------
@@ -146,6 +190,9 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
 
     if (cmd == "q" || cmd == "quit" || cmd == "exit") {
         out.requestQuit = true;
+    } else if (cmd == "help" || cmd == "?") {
+        out.output =
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | score | scan | ascii | status\n";
     } else if (cmd == "themes") {
         out.output = formatThemeTable(state.theme);
     } else if (cmd == "t") {
@@ -162,24 +209,83 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
         } else {
             out.output = "Unknown theme '" + std::string(arg) + "'.\n" + formatThemeTable(state.theme);
         }
+    } else if (cmd == "1") {
+        out.event = SetPageEvent{nowMs, ScreenPage::PetFace};
+    } else if (cmd == "2") {
+        out.event = SetPageEvent{nowMs, ScreenPage::NearbyRadar};
+    } else if (cmd == "3") {
+        out.event = SetPageEvent{nowMs, ScreenPage::ChannelSpectrum};
+    } else if (cmd == "4") {
+        out.event = SetPageEvent{nowMs, ScreenPage::RfGuard};
     } else if (cmd == "a" || cmd == "view" || cmd == "page") {
         if (arg == "prev" || arg == "back" || arg == "-") {
             out.event = CyclePageEvent{nowMs, -1};
+        } else if (arg == "1" || arg == "face") {
+            out.event = SetPageEvent{nowMs, ScreenPage::PetFace};
+        } else if (arg == "2" || arg == "radar") {
+            out.event = SetPageEvent{nowMs, ScreenPage::NearbyRadar};
+        } else if (arg == "3" || arg == "spectrum") {
+            out.event = SetPageEvent{nowMs, ScreenPage::ChannelSpectrum};
+        } else if (arg == "4" || arg == "guard" || arg == "rf") {
+            out.event = SetPageEvent{nowMs, ScreenPage::RfGuard};
         } else {
             out.event = CyclePageEvent{nowMs, +1};
         }
     } else if (cmd == "b" || cmd == "scan") {
         out.event = ButtonBPressedEvent{nowMs};
+    } else if (cmd == "m" || cmd == "mode") {
+        if (arg.empty() || arg == "next" || arg == "cycle") {
+            out.event = CycleOpsModeEvent{nowMs};
+        } else if (arg == "recon" || arg == "rcn") {
+            out.event = SetOpsModeEvent{nowMs, OpsMode::Recon};
+        } else if (arg == "def" || arg == "defense" || arg == "defensive") {
+            out.event = SetOpsModeEvent{nowMs, OpsMode::Defensive};
+        } else if (arg == "off" || arg == "offense" || arg == "offensive") {
+            out.event = SetOpsModeEvent{nowMs, OpsMode::Offensive};
+        } else {
+            out.output = "Usage: mode [next|recon|defense|offense]\n";
+        }
+    } else if (cmd == "subghz") {
+        if (arg == "315") {
+            out.event = SetSubGhzFreqEvent{nowMs, 315000u};
+        } else if (arg == "433" || arg == "433.92") {
+            out.event = SetSubGhzFreqEvent{nowMs, 433920u};
+        } else if (arg == "868" || arg == "868.35") {
+            out.event = SetSubGhzFreqEvent{nowMs, 868350u};
+        } else if (arg == "915") {
+            out.event = SetSubGhzFreqEvent{nowMs, 915000u};
+        } else if (arg == "next" || arg == "cycle") {
+            uint32_t nextFreq = 315000u;
+            if (state.subGhzFreqKhz == 315000u) nextFreq = 433920u;
+            else if (state.subGhzFreqKhz == 433920u) nextFreq = 868350u;
+            else if (state.subGhzFreqKhz == 868350u) nextFreq = 915000u;
+            out.event = SetSubGhzFreqEvent{nowMs, nextFreq};
+        } else {
+            out.output = "Sub-GHz tuned: " + formatFreqMhz(state.subGhzFreqKhz) +
+                         " | Captures: " + std::to_string(state.subGhzSignals.size()) + "\n";
+        }
+    } else if (cmd == "ble") {
+        out.output = "BLE Devices: " + std::to_string(state.bleDevices.size()) +
+                     " | Threats: " + std::to_string(state.threatsDetected) + "\n";
+    } else if (cmd == "score" || cmd == "level") {
+        const LevelInfo lvl = deriveLevelInfo(state.xp);
+        out.output = "Lv." + std::to_string(lvl.level) + " " + lvl.title +
+                     " | XP:" + std::to_string(lvl.xp) +
+                     " | HighScore:" + std::to_string(state.highScore) + "\n";
     } else if (cmd == "ascii") {
         out.output = renderAsciiPreview(buildUiFrame(state, dims));
     } else if (cmd == "status") {
         const FaceDescriptor f = faceForMood(state.mood);
         out.output = std::string(f.asciiFace) + " " + state.petName + "> \"" + state.phrase +
-                     "\" | APs:" + std::to_string(state.latestScan.totalAps) +
+                     "\" | Mode:" + opsModeLabel(state.opsMode) +
+                     " | Lv." + std::to_string(state.level) + " HI:" + std::to_string(state.highScore) +
+                     " | APs:" + std::to_string(state.latestScan.totalAps) +
+                     " | BLE:" + std::to_string(state.bleDevices.size()) +
+                     " | SubGHz:" + formatFreqMhz(state.subGhzFreqKhz) +
                      " | Theme:" + themeSpec(state.theme).key + "\n";
     } else {
         out.output =
-            "Commands: theme [next|prev|<key>] | themes | view [next|prev] | scan | ascii | status\n";
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev] | mode [recon|def|off] | subghz [315|433|868|915] | ble | score | scan | ascii | status\n";
     }
     return out;
 }
@@ -197,8 +303,13 @@ public:
             if (const auto theme = themeFromKey(saved)) {
                 state_ = reduce(state_, SetThemeEvent{nowMs, *theme, /*announce=*/false});
             }
+            const uint32_t hi = store->loadHighScore();
+            if (hi > 0u) {
+                state_ = reduce(state_, SetHighScoreEvent{nowMs, hi, 0u});
+            }
         }
         persistedTheme_ = state_.theme;
+        persistedHighScore_ = state_.highScore;
     }
 
     void dispatch(const AppEvent& ev, IThemeStore* store = nullptr) {
@@ -210,18 +321,21 @@ public:
     // Returns a diagnostic tag ("SCAN_START", "SCAN_DONE", "SCAN_EMPTY") when a transition occurs.
     const char* stepRadio(uint32_t nowMs,
                           IRadioScanner& radio,
-                          uint32_t scanTimeoutMs = kDefaultScanTimeoutMs) {
+                          uint32_t scanTimeoutMs = kDefaultScanTimeoutMs,
+                          IThemeStore* store = nullptr) {
         const char* tag = nullptr;
         if (state_.isScanning) {
             const ScanPollResult poll = radio.pollScan();
             if (poll.state == ScanPollState::Completed) {
                 radio.clearScan();
                 state_ = reduce(state_, ScanCompletedEvent{nowMs, poll.networks});
+                syncThemeStore(store);
                 tag = "SCAN_DONE";
             } else if (poll.state == ScanPollState::Failed ||
                        (nowMs - state_.lastScanStartMs) > scanTimeoutMs) {
                 radio.clearScan();
                 state_ = reduce(state_, ScanCompletedEvent{nowMs, {}});
+                syncThemeStore(store);
                 tag = "SCAN_EMPTY";
             }
         }
@@ -235,6 +349,31 @@ public:
                 }
             }
         }
+        return tag;
+    }
+
+    const char* stepMultiRadio(uint32_t nowMs,
+                               IRadioScanner& wifi,
+                               IBleScanner* ble = nullptr,
+                               ISubGhzRadio* subghz = nullptr,
+                               IThemeStore* store = nullptr,
+                               uint32_t scanTimeoutMs = kDefaultScanTimeoutMs) {
+        const char* tag = stepRadio(nowMs, wifi, scanTimeoutMs, store);
+        if (ble != nullptr && ble->available()) {
+            auto devs = ble->pollBleDevices(nowMs);
+            if (!devs.empty()) {
+                state_ = reduce(state_, BleScanCompletedEvent{nowMs, std::move(devs)});
+            }
+        }
+        if (subghz != nullptr && subghz->available()) {
+            if (subghz->frequencyKhz() != state_.subGhzFreqKhz) {
+                subghz->tuneFrequency(state_.subGhzFreqKhz);
+            }
+            if (auto sig = subghz->pollSignal(nowMs)) {
+                state_ = reduce(state_, SubGhzObservedEvent{nowMs, *sig});
+            }
+        }
+        syncThemeStore(store);
         return tag;
     }
 
@@ -255,15 +394,22 @@ public:
 
 private:
     void syncThemeStore(IThemeStore* store) {
-        if (store == nullptr || state_.theme == persistedTheme_) {
+        if (store == nullptr) {
             return;
         }
-        store->saveThemeKey(themeSpec(state_.theme).key);
-        persistedTheme_ = state_.theme;
+        if (state_.theme != persistedTheme_) {
+            store->saveThemeKey(themeSpec(state_.theme).key);
+            persistedTheme_ = state_.theme;
+        }
+        if (state_.highScore > persistedHighScore_) {
+            store->saveHighScore(state_.highScore);
+            persistedHighScore_ = state_.highScore;
+        }
     }
 
     AppState state_ = initialState();
     ThemeId persistedTheme_ = ThemeId::PaperInk;
+    uint32_t persistedHighScore_ = 0u;
 };
 
 }  // namespace hal

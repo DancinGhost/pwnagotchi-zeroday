@@ -70,15 +70,34 @@
   const elSelectFx = document.getElementById('select-fx');
   const elBtnHotkeys = document.getElementById('btn-hotkeys');
   const elBtnSfx = document.getElementById('btn-sfx');
+  const elBtnMotion = document.getElementById('btn-motion');
   const elBtnSnapPng = document.getElementById('btn-snap-png');
   const elBtnCopyAscii = document.getElementById('btn-copy-ascii');
 
   let hotkeysEnabled = loadPref('hotkeys', 'on') !== 'off';
+  const motionQuery =
+    window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  let systemReducedMotion = Boolean(motionQuery && motionQuery.matches);
+  let userMotionEnabled = loadPref('motion', 'on') !== 'off';
   const cachedPageBtns = Array.from(document.querySelectorAll('[data-page]'));
   const cachedEnvCards = Array.from(document.querySelectorAll('[data-env]'));
   let cachedSwatches = [];
   let lastCanvasSig = '';
   let lastDashboardSig = '';
+
+  function isAnimationsPaused() {
+    return systemReducedMotion || !userMotionEnabled;
+  }
+
+  function syncMotionUi() {
+    const paused = isAnimationsPaused();
+    document.body.classList.toggle('reduce-motion', paused);
+    if (elBtnMotion) {
+      elBtnMotion.textContent = userMotionEnabled ? 'MOTION: ON' : 'MOTION: OFF';
+      elBtnMotion.classList.toggle('active', userMotionEnabled);
+      elBtnMotion.setAttribute('aria-pressed', String(userMotionEnabled));
+    }
+  }
 
   function announceSr(text) {
     if (elSrStatus && text) {
@@ -96,7 +115,9 @@
 
   const elPetNameInput = document.getElementById('input-pet-name');
   const elRankPill = document.getElementById('rank-pill');
+  const elHiscorePill = document.getElementById('hiscore-pill');
   const elXpLabel = document.getElementById('xp-label');
+  const elXpTrack = document.getElementById('xp-track');
   const elXpFill = document.getElementById('xp-fill');
   const elStatPwns = document.getElementById('stat-pwns');
   const elStatSnacks = document.getElementById('stat-snacks');
@@ -107,6 +128,12 @@
   const elActPwn = document.getElementById('act-pwn');
   const elActPeer = document.getElementById('act-peer');
   const elActScan = document.getElementById('act-scan');
+  const elActMode = document.getElementById('act-mode');
+  const elActModeLbl = document.getElementById('act-mode-lbl');
+  const elActGuard = document.getElementById('act-guard');
+  const elActSubGhz = document.getElementById('act-subghz');
+  const elActSubGhzLbl = document.getElementById('act-subghz-lbl');
+  const elActBoop = document.getElementById('act-boop');
 
   const elInputBat = document.getElementById('input-battery');
   const elBatVal = document.getElementById('battery-val');
@@ -146,10 +173,10 @@
   function syncCanvasBuffers() {
     const d = currentDims();
     if (!pixelBuf || pixelBuf.width !== d.width || pixelBuf.height !== d.height) {
-      pixelBuf = gfxMod.createPixelBuffer(d.width, d.height);
       offCanvas.width = d.width;
       offCanvas.height = d.height;
       offImageData = offCtx.createImageData(d.width, d.height);
+      pixelBuf = gfxMod.createPixelBuffer(d.width, d.height, offImageData.data);
 
       elScreen.width = d.width * d.scale;
       elScreen.height = d.height * d.scale;
@@ -201,6 +228,9 @@
 
   // --- Floating Screen FX Particles ---
   function spawnFloatingGlyphs(glyphs, colorHex) {
+    if (isAnimationsPaused()) {
+      return;
+    }
     for (let i = 0; i < glyphs.length; i++) {
       setTimeout(function () {
         const span = document.createElement('span');
@@ -225,7 +255,9 @@
     const pwnActive = !gState.isScanning && t < pwnLedUntilMs;
     const roamSub = activeEnv === 'roam' ? sim.resolveRoamSubPreset(t) : '';
     const dashSig =
-      gState.mood + '|' + gState.petName + '|' + gState.xp + '|' + gState.toyHandshakes + '|' +
+      gState.mood + '|' + gState.petName + '|' + gState.xp + '|' + gState.highScore + '|' +
+      gState.opsMode + '|' + gState.subGhzFreqKhz + '|' + gState.threatsDetected + '|' +
+      gState.toyHandshakes + '|' +
       gState.snacksFed + '|' + gState.peersMet + '|' + gState.peakApCount + '|' +
       gState.isScanning + '|' + pwnActive + '|' + gState.isCharging + '|' +
       activeEnv + '|' + roamSub + '|' + gState.page + '|' + gState.theme + '|' + gState.phrase;
@@ -244,11 +276,24 @@
 
     const lvl = logic.deriveLevelInfo(gState.xp);
     elRankPill.textContent = 'Lv.' + lvl.level + ' ' + lvl.title;
+    if (elHiscorePill) {
+      elHiscorePill.textContent = 'HI: ' + Math.max(gState.highScore || 0, lvl.xp);
+    }
     elXpLabel.textContent =
-      lvl.progressPct >= 100 && lvl.xp >= 600
+      lvl.progressPct >= 100 && lvl.xp >= 2500
         ? lvl.xp + ' XP (MAX)'
         : lvl.xp + ' / ' + lvl.nextXp + ' XP';
     elXpFill.style.width = lvl.progressPct + '%';
+    if (elXpTrack) {
+      elXpTrack.setAttribute('aria-valuenow', String(lvl.progressPct));
+    }
+
+    if (elActModeLbl) {
+      elActModeLbl.textContent = 'Mode: ' + logic.opsModeLabel(gState.opsMode, false);
+    }
+    if (elActSubGhzLbl) {
+      elActSubGhzLbl.textContent = 'SubGHz: ' + window.ZD.wifiAnalysis.formatFreqMhz(gState.subGhzFreqKhz);
+    }
 
     elStatPwns.textContent = String(gState.toyHandshakes);
     elStatSnacks.textContent = String(gState.snacksFed);
@@ -259,12 +304,15 @@
     elStatusLed.classList.toggle('scanning', gState.isScanning);
     elStatusLed.classList.toggle('pwn', pwnActive);
     if (gState.isScanning) {
-      elLedLabel.textContent = 'SWEEPING CH 1-13...';
+      elLedLabel.textContent = 'SWEEPING WIFI + BLE...';
     } else if (pwnActive) {
       elLedLabel.textContent = 'EAPOL TOY EVENT!';
     } else {
       const preset = sim.PRESETS[activeEnv] || sim.PRESETS.cafe;
-      elLedLabel.textContent = gState.isCharging ? 'CHG \u2022 2.4GHZ SIM' : 'BAT \u2022 2.4GHZ SIM';
+      elLedLabel.textContent =
+        logic.opsModeLabel(gState.opsMode, false) +
+        ' \u2022 ' +
+        window.ZD.wifiAnalysis.formatFreqMhz(gState.subGhzFreqKhz);
       const subLabel =
         activeEnv === 'roam'
           ? 'ROAM (' + roamSub.toUpperCase() + ')'
@@ -312,25 +360,35 @@
     syncCanvasBuffers();
     const d = currentDims();
     const t = nowMs();
+    const paused = isAnimationsPaused();
 
-    // Subtle natural blink for 140ms every ~4.6s when idle
+    // Subtle natural blink for 140ms every ~4.6s when idle (suppressed when reduced-motion is active)
     const blinkCycle = t % 4600;
-    const isBlinking = !gState.isScanning && blinkCycle > 4450;
+    const isBlinking = !paused && !gState.isScanning && blinkCycle > 4450;
 
-    const frame = ui.buildUiFrame(gState, { width: d.width, height: d.height });
-    const animKey = frame.themeEffect && frame.themeEffect !== 'None' ? frame.animTick : 0;
+    let frame = ui.buildUiFrame(gState, { width: d.width, height: d.height });
+    if (paused && frame.animTick !== 0) {
+      frame = Object.assign({}, frame, { animTick: 0 });
+    }
+    const hasActiveAnim =
+      (frame.themeEffect && frame.themeEffect !== 'None') ||
+      (frame.scene && frame.scene !== 'None');
+    const animKey = hasActiveAnim ? frame.animTick : 0;
     const canvasSig =
       d.width + 'x' + d.height + '|' + frame.page + '|' + frame.theme + '|' + animKey + '|' +
-      isBlinking + '|' + frame.headerLine + '|' + frame.footerLine + '|' +
+      isBlinking + '|' + frame.headerLine + '|' + frame.footerLine + '|' + frame.modeBadge + '|' +
+      frame.scene + '|' + frame.rankLine + '|' +
       frame.face.moodLabel + '|' + (frame.toast && frame.toast.visible ? frame.toast.text : '') +
       '|' + frame.phraseLines.join('/') + '|' + frame.spotlightLabel + '|' +
-      frame.radarRows.length + '|' + frame.spectrumSummary;
+      frame.radarRows.length + '|' + frame.rfGuardRows.length + '|' + frame.spectrumSummary;
 
     if (force || canvasSig !== lastCanvasSig) {
       lastCanvasSig = canvasSig;
       gfxMod.paintUiFrame(pixelBuf, frame, { blink: isBlinking });
 
-      offImageData.data.set(pixelBuf.data);
+      if (pixelBuf.data !== offImageData.data) {
+        offImageData.data.set(pixelBuf.data);
+      }
       offCtx.putImageData(offImageData, 0, 0);
 
       displayCtx.imageSmoothingEnabled = false;
@@ -372,8 +430,13 @@
     renderCurrentState(true);
   }
 
+  function persistHighScore() {
+    savePref('hiscore', gState.highScore);
+  }
+
   function triggerPetBoop() {
     gState = logic.reduce(gState, { type: 'PetPoked', nowMs: nowMs() });
+    persistHighScore();
     buzzer.boop();
     spawnFloatingGlyphs(['\u2665', '*', '~'], '#ff5ca8');
     logSerialStatus('BOOP');
@@ -383,6 +446,7 @@
 
   function triggerFeedSnack() {
     gState = logic.reduce(gState, { type: 'SnackFed', nowMs: nowMs() });
+    persistHighScore();
     buzzer.boop();
     spawnFloatingGlyphs(['+10XP', '0xFF', '\u2665'], '#38ff7a');
     logSerialStatus('SNACK', 'log-cmd');
@@ -399,6 +463,7 @@
       nowMs: t,
       targetSsid: target
     });
+    persistHighScore();
     pwnLedUntilMs = t + 2000;
     buzzer.pwn();
     spawnFloatingGlyphs(['PWN!', 'EAPOL', '+25XP'], '#00e5ff');
@@ -417,6 +482,7 @@
       peerName,
       peerRssi: enc.peerRssi
     });
+    persistHighScore();
     pwnLedUntilMs = t + 1800;
     buzzer.peer();
     spawnFloatingGlyphs(['(^_^)', peerName, '+20XP'], '#ffb020');
@@ -509,6 +575,16 @@
         nowMs: t,
         rawNetworks: snap.networks
       });
+      if (sim.generateBleSnapshot) {
+        const bleSnap = sim.generateBleSnapshot(activeEnv, simSeed, t);
+        simSeed = bleSnap.nextSeed;
+        gState = logic.reduce(gState, {
+          type: 'BleScanCompleted',
+          nowMs: t,
+          devices: bleSnap.devices
+        });
+      }
+      savePref('hiscore', gState.highScore);
       buzzer.scanDone(gState.latestScan.totalAps);
       logSerialStatus(gState.latestScan.totalAps > 0 ? 'SCAN_DONE' : 'SCAN_EMPTY');
     }
@@ -521,11 +597,22 @@
   }
 
   // --- Wire Hardware Buttons (including 700ms Long-Press on Button B) ---
-  elHwBtnA.addEventListener('click', triggerButtonA);
+  elHwBtnA.addEventListener('click', function (ev) {
+    if (ev && ev.shiftKey) {
+      gState = logic.reduce(gState, { type: 'CyclePage', nowMs: nowMs(), step: -1 });
+      buzzer.clickA();
+      logSerialStatus('BTN_A');
+      announceSr('View switched to ' + gState.page);
+      renderCurrentState(true);
+    } else {
+      triggerButtonA();
+    }
+  });
 
   let btnBDownAt = 0;
   let btnBLongFired = false;
   let btnBHoldTimer = null;
+  let suppressNextBtnBClick = false;
 
   function clearBtnBHold() {
     btnBDownAt = 0;
@@ -538,7 +625,8 @@
   }
 
   elHwBtnB.addEventListener('pointerdown', function (ev) {
-    ev.preventDefault();
+    if (ev.button !== undefined && ev.button !== 0) return;
+    suppressNextBtnBClick = false;
     btnBDownAt = performance.now();
     btnBLongFired = false;
     elHwBtnB.classList.add('pressed');
@@ -552,6 +640,7 @@
       elBtnBProgress.style.width = pct + '%';
       if (held >= 700 && !btnBLongFired) {
         btnBLongFired = true;
+        suppressNextBtnBClick = true;
         clearBtnBHold();
         triggerThemeCycle();
       }
@@ -561,6 +650,10 @@
   window.addEventListener('pointerup', function () {
     if (!btnBDownAt) return;
     const wasLong = btnBLongFired;
+    suppressNextBtnBClick = true;
+    setTimeout(function () {
+      suppressNextBtnBClick = false;
+    }, 120);
     clearBtnBHold();
     if (!wasLong) {
       triggerButtonBShort();
@@ -568,31 +661,39 @@
   });
   window.addEventListener('pointercancel', clearBtnBHold);
 
-  // Full keyboard operability for Hardware Button B (Enter / Space).
+  // Native click path handles keyboard activation and assistive-technology synthetic clicks.
+  elHwBtnB.addEventListener('click', function () {
+    if (suppressNextBtnBClick) {
+      suppressNextBtnBClick = false;
+      return;
+    }
+    triggerButtonBShort();
+  });
+
+  // Shift+Enter / Shift+Space on Hardware Button B alternates to Theme Cycle.
   elHwBtnB.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter' || ev.key === ' ') {
+    if (ev.shiftKey && (ev.key === 'Enter' || ev.key === ' ')) {
       ev.preventDefault();
-      if (ev.shiftKey) {
-        triggerThemeCycle(+1);
-      } else {
-        triggerButtonBShort();
-      }
+      triggerThemeCycle(+1);
     }
   });
 
-  // --- Direct LCD Screen Touch / Boop ---
-  elViewport.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter' || ev.key === ' ') {
-      ev.preventDefault();
-      triggerPetBoop();
-    }
-  });
-
+  // --- Direct LCD Screen Touch / Boop (mouse convenience; keyboard uses #act-boop or K) ---
   elViewport.addEventListener('click', function (ev) {
     const rect = elScreen.getBoundingClientRect();
     const d = currentDims();
     const lx = ((ev.clientX - rect.left) / rect.width) * d.width;
     const ly = ((ev.clientY - rect.top) / rect.height) * d.height;
+    const headerH = d.width < 150 || d.height < 72 ? 10 : d.width < 200 || d.height < 100 ? 12 : 17;
+
+    if (ly <= headerH) {
+      if (lx >= d.width * 0.72) {
+        triggerModeCycle();
+      } else {
+        triggerThemeCycle(ev.shiftKey ? -1 : +1);
+      }
+      return;
+    }
 
     // Clicking bottom status bar triggers [A] or [B]
     if (ly >= d.height - (d.width < 200 ? 14 : 18)) {
@@ -622,21 +723,45 @@
     renderCurrentState();
   });
 
-  const savedShell = loadPref('shell', 'orange');
+  const VALID_SHELLS = ['orange', 'stealth', 'paper', 'atomic'];
+  const rawShell = loadPref('shell', 'orange');
+  const savedShell = VALID_SHELLS.indexOf(rawShell) >= 0 ? rawShell : 'orange';
   document.body.setAttribute('data-shell', savedShell);
   elSelectShell.value = savedShell;
   elSelectShell.addEventListener('change', function () {
-    document.body.setAttribute('data-shell', elSelectShell.value);
-    savePref('shell', elSelectShell.value);
+    const val = VALID_SHELLS.indexOf(elSelectShell.value) >= 0 ? elSelectShell.value : 'orange';
+    document.body.setAttribute('data-shell', val);
+    savePref('shell', val);
   });
 
-  const savedFx = loadPref('fx', 'grid');
+  const VALID_FX = ['grid', 'crt', 'clean'];
+  const rawFx = loadPref('fx', 'grid');
+  const savedFx = VALID_FX.indexOf(rawFx) >= 0 ? rawFx : 'grid';
   elViewport.setAttribute('data-fx', savedFx);
   elSelectFx.value = savedFx;
   elSelectFx.addEventListener('change', function () {
-    elViewport.setAttribute('data-fx', elSelectFx.value);
-    savePref('fx', elSelectFx.value);
+    const val = VALID_FX.indexOf(elSelectFx.value) >= 0 ? elSelectFx.value : 'grid';
+    elViewport.setAttribute('data-fx', val);
+    savePref('fx', val);
   });
+
+  syncMotionUi();
+  if (motionQuery && motionQuery.addEventListener) {
+    motionQuery.addEventListener('change', function (ev) {
+      systemReducedMotion = Boolean(ev.matches);
+      syncMotionUi();
+      renderCurrentState(true);
+    });
+  }
+  if (elBtnMotion) {
+    elBtnMotion.addEventListener('click', function () {
+      userMotionEnabled = !userMotionEnabled;
+      savePref('motion', userMotionEnabled ? 'on' : 'off');
+      syncMotionUi();
+      announceSr('Screen motion ' + (isAnimationsPaused() ? 'paused' : 'enabled'));
+      renderCurrentState(true);
+    });
+  }
 
   if (elBtnHotkeys) {
     elBtnHotkeys.textContent = hotkeysEnabled ? 'KEYS: ON' : 'KEYS: OFF';
@@ -668,6 +793,7 @@
     appendLog('SNAPSHOT', 'Saved crisp pixel PNG -> ' + link.download, 'log-cmd');
   });
 
+  let copyResetTimer = null;
   function copyAsciiFrameToClipboard() {
     const d = currentDims();
     const frame = ui.buildUiFrame(gState, { width: d.width, height: d.height });
@@ -676,11 +802,12 @@
       navigator.clipboard
         .writeText(ascii)
         .then(function () {
-          const prev = elBtnCopyAscii.textContent;
           elBtnCopyAscii.textContent = 'Copied!';
           announceSr('ASCII frame copied to clipboard');
-          setTimeout(function () {
-            elBtnCopyAscii.textContent = prev;
+          if (copyResetTimer) clearTimeout(copyResetTimer);
+          copyResetTimer = setTimeout(function () {
+            elBtnCopyAscii.textContent = 'Copy ASCII';
+            copyResetTimer = null;
           }, 1200);
         })
         .catch(function () {
@@ -780,6 +907,46 @@
       announce: false
     });
   }
+  const savedHi = Math.max(0, Math.trunc(Number(loadPref('hiscore', '0')) || 0));
+  if (savedHi > 0) {
+    gState = logic.reduce(gState, { type: 'SetHighScore', nowMs: 0, highScore: savedHi, xp: 0 });
+  }
+
+  const SUBGHZ_BANDS = [315000, 433920, 868350, 915000];
+  function triggerModeCycle() {
+    gState = logic.reduce(gState, { type: 'CycleOpsMode', nowMs: nowMs() });
+    buzzer.clickA();
+    logSerialStatus('MODE', 'log-cmd');
+    renderCurrentState(true);
+  }
+
+  function triggerSubGhzCycle() {
+    const idx = SUBGHZ_BANDS.indexOf(gState.subGhzFreqKhz);
+    const nextFreq = SUBGHZ_BANDS[(idx + 1) % SUBGHZ_BANDS.length];
+    gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: nextFreq });
+    buzzer.clickB();
+    logSerialStatus('SUBGHZ', 'log-cmd');
+    renderCurrentState(true);
+  }
+
+  function triggerGuardAlertSim() {
+    const t = nowMs();
+    if (sim.generateBleSnapshot) {
+      const bleSnap = sim.generateBleSnapshot('con', simSeed, t);
+      simSeed = bleSnap.nextSeed;
+      gState = logic.reduce(gState, { type: 'BleScanCompleted', nowMs: t, devices: bleSnap.devices });
+    }
+    if (sim.generateSubGhzEvent) {
+      const subSnap = sim.generateSubGhzEvent('con', gState.subGhzFreqKhz, simSeed);
+      simSeed = subSnap.nextSeed;
+      gState = logic.reduce(gState, { type: 'SubGhzObserved', nowMs: t, signal: subSnap.signal });
+    }
+    persistHighScore();
+    buzzer.peer();
+    spawnFloatingGlyphs(['!ALERT', 'BLE', 'SUBGHZ'], '#ff5ca8');
+    logSerialStatus('GUARD_ALERT', 'log-warn');
+    renderCurrentState(true);
+  }
 
   elPetNameInput.addEventListener('change', function () {
     gState = logic.reduce(gState, {
@@ -793,12 +960,34 @@
   });
 
   // Toy buttons
-  elActSnack.addEventListener('click', triggerFeedSnack);
-  elActPwn.addEventListener('click', triggerToyHandshake);
+  elActSnack.addEventListener('click', function () {
+    triggerFeedSnack();
+    persistHighScore();
+  });
+  elActPwn.addEventListener('click', function () {
+    triggerToyHandshake();
+    persistHighScore();
+  });
   elActPeer.addEventListener('click', function () {
     triggerPeerEncounter();
+    persistHighScore();
   });
   elActScan.addEventListener('click', triggerButtonBShort);
+  if (elActMode) {
+    elActMode.addEventListener('click', triggerModeCycle);
+  }
+  if (elActSubGhz) {
+    elActSubGhz.addEventListener('click', triggerSubGhzCycle);
+  }
+  if (elActGuard) {
+    elActGuard.addEventListener('click', triggerGuardAlertSim);
+  }
+  if (elActBoop) {
+    elActBoop.addEventListener('click', function () {
+      triggerPetBoop();
+      persistHighScore();
+    });
+  }
 
   // Battery controls & optional browser Battery API bridge
   elInputBat.addEventListener('input', function () {
@@ -886,25 +1075,119 @@
       case '?':
         appendLog(
           'HELP',
-          'Commands: scan | view [next|prev] | theme [next|prev|<key>] | themes | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
+          'Commands: scan | view [next|prev|1-4] | mode [recon|defense|offense] | subghz [next|315|433|868|915] | ble | score | guard | theme [next|prev|<key>] | themes | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
         );
+        break;
+
+      case 'mode': {
+        const sub = arg1.toLowerCase();
+        if (!sub || sub === 'next') {
+          triggerModeCycle();
+        } else if (sub === 'recon' || sub === 'rcn') {
+          gState = logic.reduce(gState, { type: 'SetOpsMode', nowMs: nowMs(), mode: logic.OpsMode.Recon });
+          renderCurrentState(true);
+        } else if (sub === 'def' || sub === 'defense' || sub === 'defensive') {
+          gState = logic.reduce(gState, { type: 'SetOpsMode', nowMs: nowMs(), mode: logic.OpsMode.Defensive });
+          renderCurrentState(true);
+        } else if (sub === 'off' || sub === 'offense' || sub === 'offensive') {
+          gState = logic.reduce(gState, { type: 'SetOpsMode', nowMs: nowMs(), mode: logic.OpsMode.Offensive });
+          renderCurrentState(true);
+        } else {
+          appendLog('ERR', 'Usage: mode [next|recon|defense|offense]', 'log-warn');
+        }
+        break;
+      }
+
+      case 'subghz': {
+        if (arg1 === '315') gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: 315000 });
+        else if (arg1 === '433' || arg1 === '433.92') gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: 433920 });
+        else if (arg1 === '868' || arg1 === '868.35') gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: 868350 });
+        else if (arg1 === '915') gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: 915000 });
+        else triggerSubGhzCycle();
+        renderCurrentState(true);
+        break;
+      }
+
+      case 'guard':
+      case 'tracker':
+        triggerGuardAlertSim();
         break;
 
       case 'scan':
         triggerButtonBShort();
         break;
 
+      case '1':
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.PetFace });
+        buzzer.clickA();
+        renderCurrentState(true);
+        break;
+
+      case '2':
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.NearbyRadar });
+        buzzer.clickA();
+        renderCurrentState(true);
+        break;
+
+      case '3':
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.ChannelSpectrum });
+        buzzer.clickA();
+        renderCurrentState(true);
+        break;
+
+      case '4':
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.RfGuard });
+        buzzer.clickA();
+        renderCurrentState(true);
+        break;
+
+      case 'ble':
+        appendLog(
+          'BLE',
+          'BLE Devices: ' + (gState.bleDevices ? gState.bleDevices.length : 0) +
+          ' | Threats: ' + (gState.threatsDetected || 0)
+        );
+        break;
+
+      case 'score':
+      case 'level': {
+        const lvl = logic.deriveLevelInfo(gState.xp);
+        appendLog(
+          'SCORE',
+          'Lv.' + lvl.level + ' ' + lvl.title + ' | XP:' + lvl.xp + ' | HighScore:' + (gState.highScore || 0)
+        );
+        break;
+      }
+
       case 'view':
-      case 'page':
-        if (arg1 && (arg1.toLowerCase() === 'prev' || arg1.toLowerCase() === 'back')) {
+      case 'page': {
+        const sub = arg1.toLowerCase();
+        if (sub === 'prev' || sub === 'back' || sub === '-') {
           gState = logic.reduce(gState, { type: 'CyclePage', nowMs: nowMs(), step: -1 });
           buzzer.clickA();
           logSerialStatus('BTN_A');
-          renderCurrentState();
+          renderCurrentState(true);
+        } else if (sub === '1' || sub === 'face') {
+          gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.PetFace });
+          buzzer.clickA();
+          renderCurrentState(true);
+        } else if (sub === '2' || sub === 'radar') {
+          gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.NearbyRadar });
+          buzzer.clickA();
+          renderCurrentState(true);
+        } else if (sub === '3' || sub === 'spectrum') {
+          gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.ChannelSpectrum });
+          buzzer.clickA();
+          renderCurrentState(true);
+        } else if (sub === '4' || sub === 'guard' || sub === 'rf') {
+          gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.RfGuard });
+          buzzer.clickA();
+          renderCurrentState(true);
         } else {
           triggerButtonA();
         }
         break;
+      }
 
       case 'themes': {
         const rows = themes.THEME_CATALOG.map(function (t) {
@@ -1094,13 +1377,47 @@
       setTimeout(function () {
         elHwBtnA.classList.remove('pressed');
       }, 120);
-      triggerButtonA();
+      if (ev.shiftKey) {
+        gState = logic.reduce(gState, { type: 'CyclePage', nowMs: nowMs(), step: -1 });
+        buzzer.clickA();
+        logSerialStatus('BTN_A');
+        announceSr('View switched to ' + gState.page);
+        renderCurrentState(true);
+      } else {
+        triggerButtonA();
+      }
     } else if (k === 'b') {
       ev.preventDefault();
       triggerButtonBShort();
     } else if (k === 't') {
       ev.preventDefault();
       triggerThemeCycle(ev.shiftKey ? -1 : +1);
+    } else if (ev.key === '[') {
+      ev.preventDefault();
+      triggerThemeCycle(-1);
+    } else if (ev.key === ']') {
+      ev.preventDefault();
+      triggerThemeCycle(+1);
+    } else if (k === '1') {
+      ev.preventDefault();
+      gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.PetFace });
+      buzzer.clickA();
+      renderCurrentState(true);
+    } else if (k === '2') {
+      ev.preventDefault();
+      gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.NearbyRadar });
+      buzzer.clickA();
+      renderCurrentState(true);
+    } else if (k === '3') {
+      ev.preventDefault();
+      gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.ChannelSpectrum });
+      buzzer.clickA();
+      renderCurrentState(true);
+    } else if (k === '4') {
+      ev.preventDefault();
+      gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.RfGuard });
+      buzzer.clickA();
+      renderCurrentState(true);
     } else if (k === 'f') {
       ev.preventDefault();
       triggerFeedSnack();
@@ -1110,10 +1427,22 @@
     } else if (k === 'p') {
       ev.preventDefault();
       triggerPeerEncounter();
+    } else if (k === 'k') {
+      ev.preventDefault();
+      triggerPetBoop();
+    } else if (k === 'm') {
+      ev.preventDefault();
+      triggerModeCycle();
+    } else if (k === 'g') {
+      ev.preventDefault();
+      triggerGuardAlertSim();
+    } else if (k === 'c') {
+      ev.preventDefault();
+      triggerSubGhzCycle();
     }
   });
 
-  // --- Visibility-Gated Animation Loop (~16.7 FPS active, paused when tab hidden) ---
+  // --- Visibility-Gated Animation Loop (~16.7 FPS active, zero wakeups when tab hidden) ---
   logSerialStatus('BOOT');
   appendLog(
     'WEB_TOY',
@@ -1123,8 +1452,13 @@
   renderCurrentState(true);
 
   let lastFrameAt = 0;
+  let rafId = 0;
   function stepLoop(ts) {
-    if (!document.hidden && ts - lastFrameAt >= 60) {
+    rafId = 0;
+    if (document.hidden) {
+      return;
+    }
+    if (ts - lastFrameAt >= 60) {
       lastFrameAt = ts;
       const t = nowMs();
       checkAndRunScanCycle();
@@ -1136,7 +1470,25 @@
       });
       renderCurrentState(false);
     }
-    window.requestAnimationFrame(stepLoop);
+    rafId = window.requestAnimationFrame(stepLoop);
   }
-  window.requestAnimationFrame(stepLoop);
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      if (rafId) {
+        window.cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+    } else {
+      lastFrameAt = 0;
+      renderCurrentState(true);
+      if (!rafId) {
+        rafId = window.requestAnimationFrame(stepLoop);
+      }
+    }
+  });
+
+  if (!document.hidden) {
+    rafId = window.requestAnimationFrame(stepLoop);
+  }
 })();

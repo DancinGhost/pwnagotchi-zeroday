@@ -5,6 +5,7 @@
 // works unprivileged via NetworkManager. The offensive panel stays disabled until the
 // operator explicitly confirms authorization and allow-lists a target.
 
+#include <cstdio>
 #include <string>
 
 #include <QApplication>
@@ -18,14 +19,23 @@ int main(int argc, char** argv) {
     std::string iface = "wlan0";
     std::string replayFile;
     std::string recordFile;
+    std::string pcapFile;
     for (int i = 1; i < argc; ++i) {
         const std::string s = argv[i];
-        if (s == "--iface" && i + 1 < argc) {
+        if (s == "--help" || s == "-h") {
+            std::printf("Usage: zd-gui [--iface wlan0] [--replay FILE] [--record FILE] [--pcap FILE]\n");
+            return 0;
+        } else if (s == "--iface" && i + 1 < argc) {
             iface = argv[++i];
         } else if (s == "--replay" && i + 1 < argc) {
             replayFile = argv[++i];
         } else if (s == "--record" && i + 1 < argc) {
             recordFile = argv[++i];
+        } else if (s == "--pcap" && i + 1 < argc) {
+            pcapFile = argv[++i];
+        } else {
+            std::fprintf(stderr, "unknown or incomplete option '%s'\n", s.c_str());
+            return 2;
         }
     }
 
@@ -34,12 +44,23 @@ int main(int argc, char** argv) {
         return 2;
     }
     zd::linux_app::AppController controller(iface);
+    if (!pcapFile.empty()) {
+        controller.setPcapDumpPath(pcapFile);
+    }
     controller.boot();
     if (!replayFile.empty()) {
-        controller.loadSession(replayFile);
+        const auto r = controller.loadSession(replayFile);
+        if (!r.ok) {
+            std::fprintf(stderr, "[replay] %s\n", r.message.c_str());
+            return 1;
+        }
     }
     if (!recordFile.empty()) {
-        controller.startRecording(recordFile);
+        const auto r = controller.startRecording(recordFile);
+        if (!r.ok) {
+            std::fprintf(stderr, "[record] %s\n", r.message.c_str());
+            return 1;
+        }
     }
 
     zd::linux_gui::MainWindow window(controller);

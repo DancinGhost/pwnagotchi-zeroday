@@ -26,10 +26,14 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
+
+#include "wifi_analysis.hpp"
 
 namespace zd {
 namespace sec {
@@ -120,6 +124,19 @@ inline bool isValidMac(const std::string& raw) {
     return hexCount == 12u;
 }
 
+// True if `client` is empty (broadcast), ff:ff:ff:ff:ff:ff, or a valid unicast MAC.
+// Rejects malformed addresses and non-broadcast group/multicast MACs (e.g. 01:00:5e:...).
+inline bool isValidClientTarget(const std::string& client) {
+    if (client.empty()) {
+        return true;
+    }
+    if (!isValidMac(client)) {
+        return false;
+    }
+    const std::string n = normalizeMac(client);
+    return isBroadcastMac(n) || !isMulticastMac(n);
+}
+
 // True if `iface` is a legal Linux network interface name (1..15 chars, IFNAMSIZ - 1,
 // alphanumeric or '_', '-', '.', and not starting with '-' or '.'). Prevents option/argument
 // injection (CWE-88) when `iface` is passed to privileged tools (airmon-ng, airodump-ng, iw).
@@ -179,24 +196,30 @@ struct WifiTarget {
 enum class Severity : uint8_t { Info = 0, Warn, Critical };
 
 enum class AlertKind : uint8_t {
-    DeauthFlood = 0,   // sustained deauth/disassoc burst against a BSSID (possible attack/jam)
-    EvilTwin,          // same SSID advertised by a second BSSID
-    OpenDowngrade,     // a previously-encrypted SSID reappeared as Open (rogue/MITM bait)
-    KarmaBeacon,       // one BSSID advertising an abnormal number of SSIDs (mana/karma AP)
-    HandshakeCaptured, // offensive progress marker
-    PmkidCaptured,     // offensive progress marker
-    TxBlocked          // an injection was refused by the authorization gate
+    DeauthFlood = 0,     // sustained deauth/disassoc burst against a BSSID (possible attack/jam)
+    EvilTwin,            // same SSID advertised by a second BSSID
+    OpenDowngrade,       // a previously-encrypted SSID reappeared as Open (rogue/MITM bait)
+    KarmaBeacon,         // one BSSID advertising an abnormal number of SSIDs (mana/karma AP)
+    HandshakeCaptured,   // offensive progress marker
+    PmkidCaptured,       // offensive progress marker
+    TxBlocked,           // an injection was refused by the authorization gate
+    BleTrackerDetected,  // AirTag / FindMy / SmartTag / Tile tracker or BLE spam detected
+    MultiToolDetected,   // Flipper Zero / BLE multi-tool signature detected
+    SubGhzAnomaly        // Sub-GHz replay burst or jamming carrier detected
 };
 
 inline const char* alertKindLabel(AlertKind k) {
     switch (k) {
-        case AlertKind::DeauthFlood:       return "DEAUTH-FLOOD";
-        case AlertKind::EvilTwin:          return "EVIL-TWIN";
-        case AlertKind::OpenDowngrade:     return "OPEN-DOWNGRADE";
-        case AlertKind::KarmaBeacon:       return "KARMA-BEACON";
-        case AlertKind::HandshakeCaptured: return "HANDSHAKE";
-        case AlertKind::PmkidCaptured:     return "PMKID";
-        case AlertKind::TxBlocked:         return "TX-BLOCKED";
+        case AlertKind::DeauthFlood:        return "DEAUTH-FLOOD";
+        case AlertKind::EvilTwin:           return "EVIL-TWIN";
+        case AlertKind::OpenDowngrade:      return "OPEN-DOWNGRADE";
+        case AlertKind::KarmaBeacon:        return "KARMA-BEACON";
+        case AlertKind::HandshakeCaptured:  return "HANDSHAKE";
+        case AlertKind::PmkidCaptured:      return "PMKID";
+        case AlertKind::TxBlocked:          return "TX-BLOCKED";
+        case AlertKind::BleTrackerDetected: return "BLE-TRACKER";
+        case AlertKind::MultiToolDetected:  return "MULTI-TOOL";
+        case AlertKind::SubGhzAnomaly:      return "SUBGHZ-ALERT";
     }
     return "ALERT";
 }
@@ -224,7 +247,7 @@ enum class AuthDecision : uint8_t {
 
 struct Authorization {
     bool operatorConfirmed = false;      // set only by explicit operator action (flag / dialog)
-    std::vector<std::string> allowedBssids;  // normalized BSSIDs the operator owns / may test
+    std::vector<std::string> allowedBssids;  // sorted normalized BSSIDs the operator owns
     bool allowAll = false;               // "*" wildcard; STILL requires operatorConfirmed
 
     bool allow(const std::string& bssid) {
@@ -232,8 +255,9 @@ struct Authorization {
             return false;
         }
         const std::string n = normalizeMac(bssid);
-        if (std::find(allowedBssids.begin(), allowedBssids.end(), n) == allowedBssids.end()) {
-            allowedBssids.push_back(n);
+        const auto it = std::lower_bound(allowedBssids.begin(), allowedBssids.end(), n);
+        if (it == allowedBssids.end() || *it != n) {
+            allowedBssids.insert(it, n);
         }
         return true;
     }
@@ -243,7 +267,7 @@ struct Authorization {
             return false;
         }
         const std::string n = normalizeMac(bssid);
-        return std::find(allowedBssids.begin(), allowedBssids.end(), n) != allowedBssids.end();
+        return std::binary_search(allowedBssids.begin(), allowedBssids.end(), n);
     }
 
     bool disallow(const std::string& bssid) {
@@ -251,8 +275,8 @@ struct Authorization {
             return false;
         }
         const std::string n = normalizeMac(bssid);
-        const auto it = std::find(allowedBssids.begin(), allowedBssids.end(), n);
-        if (it == allowedBssids.end()) {
+        const auto it = std::lower_bound(allowedBssids.begin(), allowedBssids.end(), n);
+        if (it == allowedBssids.end() || *it != n) {
             return false;
         }
         allowedBssids.erase(it);
@@ -268,12 +292,7 @@ inline AuthDecision authorize(const Authorization& auth, const std::string& bssi
     if (!isValidMac(bssid) || isMulticastMac(bssid)) {
         return AuthDecision::BlockedNotAllowlisted;
     }
-    const std::string n = normalizeMac(bssid);
-    if (auth.allowAll) {
-        return AuthDecision::Allowed;
-    }
-    if (std::find(auth.allowedBssids.begin(), auth.allowedBssids.end(), n) !=
-        auth.allowedBssids.end()) {
+    if (auth.allowAll || auth.isAllowed(bssid)) {
         return AuthDecision::Allowed;
     }
     return AuthDecision::BlockedNotAllowlisted;
@@ -348,6 +367,25 @@ struct InjectionAttempt {
     AuthDecision decision;
 };
 
+struct BleObserved {
+    uint32_t nowMs;
+    std::string mac;
+    std::string name;
+    int32_t rssi;
+    uint16_t companyId = 0;
+    uint16_t serviceUuid = 0;
+    bool trackerPayload = false;
+};
+
+struct SubGhzObserved {
+    uint32_t nowMs;
+    uint32_t freqKhz;
+    int32_t rssi;
+    std::string protocol;
+    uint32_t burstCount = 1;
+    bool continuousCarrier = false;
+};
+
 using SecEvent = std::variant<
     ApObserved,
     ClientObserved,
@@ -356,7 +394,9 @@ using SecEvent = std::variant<
     HandshakeObserved,
     PmkidObserved,
     ProbeRequestObserved,
-    InjectionAttempt>;
+    InjectionAttempt,
+    BleObserved,
+    SubGhzObserved>;
 
 // --- Immutable aggregate state -------------------------------------------------------
 
@@ -373,6 +413,31 @@ constexpr std::size_t kMaxBssidSsids = 256u;   // ring cap; evicts oldest BSSID-
 constexpr std::size_t kMaxSsidsPerBssid = 32u; // cap per-BSSID advertised SSIDs list
 constexpr std::size_t kMaxProbedSsidsPerStation = 16u;  // cap per-station probed-SSID list
 constexpr std::size_t kMaxStations = 500u;     // ring cap; evicts least-recently-seen station
+constexpr std::size_t kMaxBleTargets = 256u;
+constexpr std::size_t kMaxSubGhzCaptures = 128u;
+
+struct BleTarget {
+    std::string mac;
+    std::string name;
+    int32_t rssi = -100;
+    uint16_t companyId = 0;
+    uint16_t serviceUuid = 0;
+    bool trackerPayload = false;
+    BleThreatKind threat = BleThreatKind::None;
+    uint32_t seenCount = 0;
+    uint32_t firstSeenMs = 0;
+    uint32_t lastSeenMs = 0;
+    uint32_t lastAlertMs = 0;
+};
+
+struct SubGhzCapture {
+    uint32_t freqKhz = 433920u;
+    int32_t rssi = -100;
+    std::string protocol;
+    uint32_t burstCount = 1;
+    bool continuousCarrier = false;
+    uint32_t seenMs = 0;
+};
 
 // Per-BSSID sliding window of recent deauth timestamps (defensive flood detector).
 struct DeauthTracker {
@@ -386,6 +451,7 @@ struct BssidSsids {
     std::string bssid;
     std::vector<std::string> ssids;
     uint32_t lastKarmaAlertMs = 0;
+    uint32_t lastSeenMs = 0;
 };
 
 // A client station observed either associating with a known BSSID or sending probe
@@ -406,7 +472,9 @@ struct SecState {
     std::vector<DeauthTracker> deauthTrackers;
     std::vector<BssidSsids> bssidSsids;
     std::vector<Station> stations;
-    std::vector<Alert> alerts;         // most-recent appended last, capped at kMaxAlerts
+    std::vector<BleTarget> bleTargets;
+    std::vector<SubGhzCapture> subGhzCaptures;
+    std::deque<Alert> alerts;         // most-recent appended last, capped at kMaxAlerts
     uint32_t totalDeauths = 0;
     uint32_t totalHandshakes = 0;
     uint32_t totalPmkids = 0;
@@ -414,161 +482,68 @@ struct SecState {
     uint32_t allowedInjections = 0;
     uint32_t totalAlertsEmitted = 0;  // monotonic count even after alerts wrap kMaxAlerts
     uint64_t revision = 0;            // monotonic counter incremented on every reduce()
+    uint32_t lastEventMs = 0;         // high-water timestamp of processed events
+
+    // O(1) lookup indices synchronized with the bounded vectors above.
+    std::unordered_map<std::string, std::size_t> targetIndex;
+    std::unordered_map<std::string, std::size_t> stationIndex;
+    std::unordered_map<std::string, std::size_t> bleIndex;
+    std::unordered_map<std::string, std::size_t> deauthIndex;
+    std::unordered_map<std::string, std::size_t> bssidSsidIndex;
+    std::unordered_map<std::string, std::vector<std::string>> ssidToBssids;
 };
 
 // --- Pure helpers (exposed for tests & shell convenience) ----------------------------
 
 inline WifiTarget* findTarget(SecState& s, const std::string& bssid) {
-    for (WifiTarget& t : s.targets) {
-        if (t.bssid == bssid) {
-            return &t;
-        }
+    const auto it = s.targetIndex.find(bssid);
+    if (it != s.targetIndex.end() && it->second < s.targets.size()) {
+        return &s.targets[it->second];
     }
     return nullptr;
 }
 
 inline const WifiTarget* findTarget(const SecState& s, const std::string& bssid) {
-    for (const WifiTarget& t : s.targets) {
-        if (t.bssid == bssid) {
-            return &t;
-        }
+    const auto it = s.targetIndex.find(bssid);
+    if (it != s.targetIndex.end() && it->second < s.targets.size()) {
+        return &s.targets[it->second];
     }
     return nullptr;
 }
 
 inline Station* findStation(SecState& s, const std::string& mac) {
-    for (Station& st : s.stations) {
-        if (st.mac == mac) {
-            return &st;
-        }
+    const auto it = s.stationIndex.find(mac);
+    if (it != s.stationIndex.end() && it->second < s.stations.size()) {
+        return &s.stations[it->second];
     }
     return nullptr;
 }
 
 inline const Station* findStation(const SecState& s, const std::string& mac) {
-    for (const Station& st : s.stations) {
-        if (st.mac == mac) {
-            return &st;
-        }
+    const auto it = s.stationIndex.find(mac);
+    if (it != s.stationIndex.end() && it->second < s.stations.size()) {
+        return &s.stations[it->second];
+    }
+    return nullptr;
+}
+
+inline BleTarget* findBleTarget(SecState& s, const std::string& mac) {
+    const auto it = s.bleIndex.find(mac);
+    if (it != s.bleIndex.end() && it->second < s.bleTargets.size()) {
+        return &s.bleTargets[it->second];
+    }
+    return nullptr;
+}
+
+inline const BleTarget* findBleTarget(const SecState& s, const std::string& mac) {
+    const auto it = s.bleIndex.find(mac);
+    if (it != s.bleIndex.end() && it->second < s.bleTargets.size()) {
+        return &s.bleTargets[it->second];
     }
     return nullptr;
 }
 
 namespace detail {
-
-inline void pushAlert(SecState& s, Alert a) {
-    s.totalAlertsEmitted += 1u;
-    s.alerts.push_back(std::move(a));
-    if (s.alerts.size() > kMaxAlerts) {
-        s.alerts.erase(s.alerts.begin(),
-                       s.alerts.begin() +
-                           static_cast<std::ptrdiff_t>(s.alerts.size() - kMaxAlerts));
-    }
-}
-
-// Upserts a target AP, evicting the least-recently-seen one first if at kMaxTargets.
-inline WifiTarget& targetFor(SecState& s, const std::string& bssid, bool* isNewOut = nullptr) {
-    for (WifiTarget& t : s.targets) {
-        if (t.bssid == bssid) {
-            if (isNewOut != nullptr) {
-                *isNewOut = false;
-            }
-            return t;
-        }
-    }
-    if (s.targets.size() >= kMaxTargets) {
-        std::size_t oldestIdx = 0u;
-        for (std::size_t i = 1u; i < s.targets.size(); ++i) {
-            if (s.targets[i].lastSeenMs < s.targets[oldestIdx].lastSeenMs) {
-                oldestIdx = i;
-            }
-        }
-        s.targets.erase(s.targets.begin() + static_cast<std::ptrdiff_t>(oldestIdx));
-    }
-    s.targets.push_back(WifiTarget{});
-    s.targets.back().bssid = bssid;
-    if (isNewOut != nullptr) {
-        *isNewOut = true;
-    }
-    return s.targets.back();
-}
-
-inline DeauthTracker& trackerFor(SecState& s, const std::string& bssid) {
-    for (DeauthTracker& d : s.deauthTrackers) {
-        if (d.bssid == bssid) {
-            return d;
-        }
-    }
-    if (s.deauthTrackers.size() >= kMaxDeauthTrackers) {
-        std::size_t oldestIdx = 0u;
-        uint32_t oldestMs = s.deauthTrackers[0].recentMs.empty()
-                                ? 0u
-                                : s.deauthTrackers[0].recentMs.back();
-        for (std::size_t i = 1u; i < s.deauthTrackers.size(); ++i) {
-            const uint32_t lastMs = s.deauthTrackers[i].recentMs.empty()
-                                        ? 0u
-                                        : s.deauthTrackers[i].recentMs.back();
-            if (lastMs < oldestMs) {
-                oldestMs = lastMs;
-                oldestIdx = i;
-            }
-        }
-        s.deauthTrackers.erase(s.deauthTrackers.begin() + static_cast<std::ptrdiff_t>(oldestIdx));
-    }
-    s.deauthTrackers.push_back(DeauthTracker{bssid, {}, 0u});
-    return s.deauthTrackers.back();
-}
-
-inline BssidSsids& ssidsFor(SecState& s, const std::string& bssid) {
-    for (BssidSsids& b : s.bssidSsids) {
-        if (b.bssid == bssid) {
-            return b;
-        }
-    }
-    if (s.bssidSsids.size() >= kMaxBssidSsids) {
-        s.bssidSsids.erase(s.bssidSsids.begin());
-    }
-    s.bssidSsids.push_back(BssidSsids{bssid, {}, 0u});
-    return s.bssidSsids.back();
-}
-
-// Upserts a station, evicting the least-recently-seen one first if at the ring cap.
-inline Station& stationFor(SecState& s, const std::string& mac, bool* isNewOut = nullptr) {
-    for (Station& st : s.stations) {
-        if (st.mac == mac) {
-            if (isNewOut != nullptr) {
-                *isNewOut = false;
-            }
-            return st;
-        }
-    }
-    if (s.stations.size() >= kMaxStations) {
-        std::size_t oldestIdx = 0u;
-        for (std::size_t i = 1u; i < s.stations.size(); ++i) {
-            if (s.stations[i].lastSeenMs < s.stations[oldestIdx].lastSeenMs) {
-                oldestIdx = i;
-            }
-        }
-        s.stations.erase(s.stations.begin() + static_cast<std::ptrdiff_t>(oldestIdx));
-    }
-    s.stations.push_back(Station{});
-    s.stations.back().mac = mac;
-    if (isNewOut != nullptr) {
-        *isNewOut = true;
-    }
-    return s.stations.back();
-}
-
-// Count how many distinct BSSIDs currently advertise `ssid` (evil-twin signal).
-inline std::size_t bssidsAdvertising(const SecState& s, const std::string& ssid) {
-    std::size_t n = 0;
-    for (const WifiTarget& t : s.targets) {
-        if (!t.ssid.empty() && t.ssid == ssid) {
-            ++n;
-        }
-    }
-    return n;
-}
 
 // Wrap-safe and clock-skew-safe elapsed time helpers (32-bit ms clock wraps every ~49.7d).
 inline constexpr bool elapsedAtLeast(uint32_t nowMs, uint32_t prevMs, uint32_t deltaMs) {
@@ -579,6 +554,226 @@ inline constexpr bool elapsedAtLeast(uint32_t nowMs, uint32_t prevMs, uint32_t d
 inline constexpr bool elapsedMoreThan(uint32_t nowMs, uint32_t prevMs, uint32_t deltaMs) {
     const uint32_t diff = nowMs - prevMs;
     return diff < 0x80000000u && diff > deltaMs;
+}
+
+inline constexpr uint32_t wrapSafeAgeMs(uint32_t nowMs, uint32_t prevMs) {
+    const uint32_t diff = nowMs - prevMs;
+    return (diff < 0x80000000u) ? diff : 0u;
+}
+
+inline void pushAlert(SecState& s, Alert a) {
+    s.totalAlertsEmitted += 1u;
+    s.alerts.push_back(std::move(a));
+    while (s.alerts.size() > kMaxAlerts) {
+        s.alerts.pop_front();
+    }
+}
+
+inline void removeSsidBssid(SecState& s, const std::string& ssid, const std::string& bssid) {
+    if (ssid.empty()) {
+        return;
+    }
+    const auto it = s.ssidToBssids.find(ssid);
+    if (it == s.ssidToBssids.end()) {
+        return;
+    }
+    auto& vec = it->second;
+    vec.erase(std::remove(vec.begin(), vec.end(), bssid), vec.end());
+    if (vec.empty()) {
+        s.ssidToBssids.erase(it);
+    }
+}
+
+inline void addSsidBssid(SecState& s, const std::string& ssid, const std::string& bssid) {
+    if (ssid.empty()) {
+        return;
+    }
+    auto& vec = s.ssidToBssids[ssid];
+    if (std::find(vec.begin(), vec.end(), bssid) == vec.end()) {
+        vec.push_back(bssid);
+    }
+}
+
+// Upserts a target AP, evicting the least-recently-seen one first if at kMaxTargets.
+inline WifiTarget& targetFor(SecState& s, const std::string& bssid, uint32_t nowMs,
+                             bool* isNewOut = nullptr) {
+    if (WifiTarget* existing = findTarget(s, bssid)) {
+        if (isNewOut != nullptr) {
+            *isNewOut = false;
+        }
+        return *existing;
+    }
+    if (s.targets.size() >= kMaxTargets) {
+        std::size_t oldestIdx = 0u;
+        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.targets[0].lastSeenMs);
+        for (std::size_t i = 1u; i < s.targets.size(); ++i) {
+            const uint32_t age = wrapSafeAgeMs(nowMs, s.targets[i].lastSeenMs);
+            if (age > maxAge) {
+                maxAge = age;
+                oldestIdx = i;
+            }
+        }
+        removeSsidBssid(s, s.targets[oldestIdx].ssid, s.targets[oldestIdx].bssid);
+        s.targetIndex.erase(s.targets[oldestIdx].bssid);
+        const std::size_t lastIdx = s.targets.size() - 1u;
+        if (oldestIdx != lastIdx) {
+            s.targets[oldestIdx] = std::move(s.targets[lastIdx]);
+            s.targetIndex[s.targets[oldestIdx].bssid] = oldestIdx;
+        }
+        s.targets.pop_back();
+    }
+    const std::size_t newIdx = s.targets.size();
+    s.targets.push_back(WifiTarget{});
+    s.targets.back().bssid = bssid;
+    s.targetIndex[bssid] = newIdx;
+    if (isNewOut != nullptr) {
+        *isNewOut = true;
+    }
+    return s.targets.back();
+}
+
+inline DeauthTracker& trackerFor(SecState& s, const std::string& bssid, uint32_t nowMs) {
+    const auto it = s.deauthIndex.find(bssid);
+    if (it != s.deauthIndex.end() && it->second < s.deauthTrackers.size()) {
+        return s.deauthTrackers[it->second];
+    }
+    if (s.deauthTrackers.size() >= kMaxDeauthTrackers) {
+        std::size_t oldestIdx = 0u;
+        const uint32_t firstLastMs =
+            s.deauthTrackers[0].recentMs.empty() ? 0u : s.deauthTrackers[0].recentMs.back();
+        uint32_t maxAge = wrapSafeAgeMs(nowMs, firstLastMs);
+        for (std::size_t i = 1u; i < s.deauthTrackers.size(); ++i) {
+            const uint32_t lastMs =
+                s.deauthTrackers[i].recentMs.empty() ? 0u : s.deauthTrackers[i].recentMs.back();
+            const uint32_t age = wrapSafeAgeMs(nowMs, lastMs);
+            if (age > maxAge) {
+                maxAge = age;
+                oldestIdx = i;
+            }
+        }
+        s.deauthIndex.erase(s.deauthTrackers[oldestIdx].bssid);
+        const std::size_t lastIdx = s.deauthTrackers.size() - 1u;
+        if (oldestIdx != lastIdx) {
+            s.deauthTrackers[oldestIdx] = std::move(s.deauthTrackers[lastIdx]);
+            s.deauthIndex[s.deauthTrackers[oldestIdx].bssid] = oldestIdx;
+        }
+        s.deauthTrackers.pop_back();
+    }
+    const std::size_t newIdx = s.deauthTrackers.size();
+    s.deauthTrackers.push_back(DeauthTracker{bssid, {}, 0u});
+    s.deauthIndex[bssid] = newIdx;
+    return s.deauthTrackers.back();
+}
+
+inline BssidSsids& ssidsFor(SecState& s, const std::string& bssid, uint32_t nowMs) {
+    const auto it = s.bssidSsidIndex.find(bssid);
+    if (it != s.bssidSsidIndex.end() && it->second < s.bssidSsids.size()) {
+        return s.bssidSsids[it->second];
+    }
+    if (s.bssidSsids.size() >= kMaxBssidSsids) {
+        std::size_t oldestIdx = 0u;
+        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.bssidSsids[0].lastSeenMs);
+        for (std::size_t i = 1u; i < s.bssidSsids.size(); ++i) {
+            const uint32_t age = wrapSafeAgeMs(nowMs, s.bssidSsids[i].lastSeenMs);
+            if (age > maxAge) {
+                maxAge = age;
+                oldestIdx = i;
+            }
+        }
+        s.bssidSsidIndex.erase(s.bssidSsids[oldestIdx].bssid);
+        const std::size_t lastIdx = s.bssidSsids.size() - 1u;
+        if (oldestIdx != lastIdx) {
+            s.bssidSsids[oldestIdx] = std::move(s.bssidSsids[lastIdx]);
+            s.bssidSsidIndex[s.bssidSsids[oldestIdx].bssid] = oldestIdx;
+        }
+        s.bssidSsids.pop_back();
+    }
+    const std::size_t newIdx = s.bssidSsids.size();
+    s.bssidSsids.push_back(BssidSsids{bssid, {}, 0u, nowMs});
+    s.bssidSsidIndex[bssid] = newIdx;
+    return s.bssidSsids.back();
+}
+
+// Upserts a station, evicting the least-recently-seen one first if at the ring cap.
+inline Station& stationFor(SecState& s, const std::string& mac, uint32_t nowMs,
+                           bool* isNewOut = nullptr) {
+    if (Station* existing = findStation(s, mac)) {
+        if (isNewOut != nullptr) {
+            *isNewOut = false;
+        }
+        return *existing;
+    }
+    if (s.stations.size() >= kMaxStations) {
+        std::size_t oldestIdx = 0u;
+        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.stations[0].lastSeenMs);
+        for (std::size_t i = 1u; i < s.stations.size(); ++i) {
+            const uint32_t age = wrapSafeAgeMs(nowMs, s.stations[i].lastSeenMs);
+            if (age > maxAge) {
+                maxAge = age;
+                oldestIdx = i;
+            }
+        }
+        s.stationIndex.erase(s.stations[oldestIdx].mac);
+        const std::size_t lastIdx = s.stations.size() - 1u;
+        if (oldestIdx != lastIdx) {
+            s.stations[oldestIdx] = std::move(s.stations[lastIdx]);
+            s.stationIndex[s.stations[oldestIdx].mac] = oldestIdx;
+        }
+        s.stations.pop_back();
+    }
+    const std::size_t newIdx = s.stations.size();
+    s.stations.push_back(Station{});
+    s.stations.back().mac = mac;
+    s.stationIndex[mac] = newIdx;
+    if (isNewOut != nullptr) {
+        *isNewOut = true;
+    }
+    return s.stations.back();
+}
+
+inline BleTarget& bleTargetFor(SecState& s, const std::string& mac, uint32_t nowMs,
+                               bool* isNewOut = nullptr) {
+    if (BleTarget* existing = findBleTarget(s, mac)) {
+        if (isNewOut != nullptr) {
+            *isNewOut = false;
+        }
+        return *existing;
+    }
+    if (s.bleTargets.size() >= kMaxBleTargets) {
+        std::size_t oldestIdx = 0u;
+        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.bleTargets[0].lastSeenMs);
+        for (std::size_t i = 1u; i < s.bleTargets.size(); ++i) {
+            const uint32_t age = wrapSafeAgeMs(nowMs, s.bleTargets[i].lastSeenMs);
+            if (age > maxAge) {
+                maxAge = age;
+                oldestIdx = i;
+            }
+        }
+        s.bleIndex.erase(s.bleTargets[oldestIdx].mac);
+        const std::size_t lastIdx = s.bleTargets.size() - 1u;
+        if (oldestIdx != lastIdx) {
+            s.bleTargets[oldestIdx] = std::move(s.bleTargets[lastIdx]);
+            s.bleIndex[s.bleTargets[oldestIdx].mac] = oldestIdx;
+        }
+        s.bleTargets.pop_back();
+    }
+    const std::size_t newIdx = s.bleTargets.size();
+    s.bleTargets.push_back(BleTarget{});
+    s.bleTargets.back().mac = mac;
+    s.bleIndex[mac] = newIdx;
+    if (isNewOut != nullptr) {
+        *isNewOut = true;
+    }
+    return s.bleTargets.back();
+}
+
+// Count how many distinct BSSIDs currently advertise `ssid` (evil-twin signal).
+inline std::size_t bssidsAdvertising(const SecState& s, const std::string& ssid) {
+    if (ssid.empty()) {
+        return 0u;
+    }
+    const auto it = s.ssidToBssids.find(ssid);
+    return (it != s.ssidToBssids.end()) ? it->second.size() : 0u;
 }
 
 }  // namespace detail
@@ -594,6 +789,9 @@ inline SecState reduce(SecState s, const SecEvent& event) {
     std::visit(
         [&](const auto& ev) {
             using E = std::decay_t<decltype(ev)>;
+            if (s.revision == 1u || !detail::elapsedMoreThan(s.lastEventMs, ev.nowMs, 0u)) {
+                s.lastEventMs = ev.nowMs;
+            }
 
             if constexpr (std::is_same_v<E, ApObserved>) {
                 const std::string bssid = normalizeMac(ev.bssid);
@@ -602,12 +800,18 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                 }
                 const std::string cleanSsid = sanitizePrintableText(ev.ssid, 64u);
                 bool isNew = false;
-                WifiTarget& targetRef = detail::targetFor(s, bssid, &isNew);
+                WifiTarget& targetRef = detail::targetFor(s, bssid, ev.nowMs, &isNew);
                 WifiTarget* t = &targetRef;
                 if (isNew) {
                     t->firstSeenMs = ev.nowMs;
                 }
                 const std::string prevSsid = t->ssid;
+                if (!isNew && prevSsid != cleanSsid) {
+                    detail::removeSsidBssid(s, prevSsid, bssid);
+                }
+                if (!cleanSsid.empty() && (isNew || prevSsid != cleanSsid)) {
+                    detail::addSsidBssid(s, cleanSsid, bssid);
+                }
                 t->ssid = cleanSsid;
                 t->channel = ev.channel;
                 t->rssi = ev.rssi;
@@ -632,23 +836,30 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                 if (ev.enc == Encryption::Open && !cleanSsid.empty() &&
                     (t->lastDowngradeAlertMs == 0u ||
                      detail::elapsedAtLeast(ev.nowMs, t->lastDowngradeAlertMs, kAlertCooldownMs))) {
-                    for (const WifiTarget& other : s.targets) {
-                        if (other.bssid != bssid && other.ssid == cleanSsid &&
-                            other.enc != Encryption::Open &&
-                            other.enc != Encryption::Unknown) {
-                            t->lastDowngradeAlertMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
-                            detail::pushAlert(
-                                s, Alert{ev.nowMs, Severity::Critical, AlertKind::OpenDowngrade,
-                                         bssid, cleanSsid,
-                                         "Open AP impersonating encrypted SSID '" + cleanSsid +
-                                             "'"});
-                            break;
+                    const auto ssidIt = s.ssidToBssids.find(cleanSsid);
+                    if (ssidIt != s.ssidToBssids.end()) {
+                        for (const std::string& otherBssid : ssidIt->second) {
+                            if (otherBssid == bssid) {
+                                continue;
+                            }
+                            const WifiTarget* other = findTarget(s, otherBssid);
+                            if (other != nullptr && other->enc != Encryption::Open &&
+                                other->enc != Encryption::Unknown) {
+                                t->lastDowngradeAlertMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                                detail::pushAlert(
+                                    s, Alert{ev.nowMs, Severity::Critical, AlertKind::OpenDowngrade,
+                                             bssid, cleanSsid,
+                                             "Open AP impersonating encrypted SSID '" + cleanSsid +
+                                                 "'"});
+                                break;
+                            }
                         }
                     }
                 }
                 // Karma/mana: this BSSID advertising many distinct SSIDs.
                 if (!cleanSsid.empty()) {
-                    BssidSsids& bs = detail::ssidsFor(s, bssid);
+                    BssidSsids& bs = detail::ssidsFor(s, bssid, ev.nowMs);
+                    bs.lastSeenMs = ev.nowMs;
                     if (std::find(bs.ssids.begin(), bs.ssids.end(), cleanSsid) == bs.ssids.end() &&
                         bs.ssids.size() < kMaxSsidsPerBssid) {
                         bs.ssids.push_back(cleanSsid);
@@ -672,7 +883,7 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                     return;
                 }
                 bool isNewStation = false;
-                Station& st = detail::stationFor(s, client, &isNewStation);
+                Station& st = detail::stationFor(s, client, ev.nowMs, &isNewStation);
                 if (isNewStation) {
                     st.firstSeenMs = ev.nowMs;
                 }
@@ -705,7 +916,7 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                 }
                 const std::string cleanSsid = sanitizePrintableText(ev.ssid, 64u);
                 bool isNewStation = false;
-                Station& st = detail::stationFor(s, client, &isNewStation);
+                Station& st = detail::stationFor(s, client, ev.nowMs, &isNewStation);
                 if (isNewStation) {
                     st.firstSeenMs = ev.nowMs;
                 }
@@ -732,7 +943,7 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                     t->deauthsSeen += 1u;
                     t->lastSeenMs = ev.nowMs;
                 }
-                DeauthTracker& dt = detail::trackerFor(s, bssid);
+                DeauthTracker& dt = detail::trackerFor(s, bssid, ev.nowMs);
                 // Drop timestamps outside the sliding window (wrap-safe & clock-skew-safe).
                 dt.recentMs.erase(
                     std::remove_if(dt.recentMs.begin(), dt.recentMs.end(), [&](uint32_t t) {
@@ -766,7 +977,7 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                     return;
                 }
                 bool isNewTarget = false;
-                WifiTarget& t = detail::targetFor(s, bssid, &isNewTarget);
+                WifiTarget& t = detail::targetFor(s, bssid, ev.nowMs, &isNewTarget);
                 if (isNewTarget) {
                     t.firstSeenMs = ev.nowMs;
                 }
@@ -785,7 +996,7 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                     return;
                 }
                 bool isNewTarget = false;
-                WifiTarget& t = detail::targetFor(s, bssid, &isNewTarget);
+                WifiTarget& t = detail::targetFor(s, bssid, ev.nowMs, &isNewTarget);
                 if (isNewTarget) {
                     t.firstSeenMs = ev.nowMs;
                 }
@@ -810,6 +1021,67 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                                  t != nullptr ? t->ssid : std::string{},
                                  std::string("Injection refused - ") +
                                      authDecisionLabel(ev.decision)});
+                }
+
+            } else if constexpr (std::is_same_v<E, BleObserved>) {
+                const std::string mac = normalizeMac(ev.mac);
+                if (mac.empty() || isBroadcastMac(mac)) {
+                    return;
+                }
+                const std::string cleanName = sanitizePrintableText(ev.name, 48u);
+                bool isNew = false;
+                BleTarget& bt = detail::bleTargetFor(s, mac, ev.nowMs, &isNew);
+                if (isNew) {
+                    bt.firstSeenMs = ev.nowMs;
+                }
+                bt.name = cleanName;
+                bt.rssi = ev.rssi;
+                bt.companyId = ev.companyId;
+                bt.serviceUuid = ev.serviceUuid;
+                bt.trackerPayload = ev.trackerPayload;
+                bt.seenCount += 1u;
+                bt.lastSeenMs = ev.nowMs;
+                bt.threat = classifyBleDevice(mac, cleanName, ev.companyId, ev.serviceUuid,
+                                              ev.trackerPayload);
+                if (bt.threat != BleThreatKind::None &&
+                    (bt.lastAlertMs == 0u ||
+                     detail::elapsedAtLeast(ev.nowMs, bt.lastAlertMs, kAlertCooldownMs))) {
+                    bt.lastAlertMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    if (bt.threat == BleThreatKind::MultiToolBle) {
+                        detail::pushAlert(
+                            s, Alert{ev.nowMs, Severity::Warn, AlertKind::MultiToolDetected, mac,
+                                     cleanName,
+                                     "BLE multi-tool signature detected (" +
+                                         (cleanName.empty() ? mac : cleanName) + ")"});
+                    } else {
+                        const Severity sev =
+                            (ev.rssi >= -60 || bt.seenCount >= 3u) ? Severity::Critical : Severity::Warn;
+                        detail::pushAlert(
+                            s, Alert{ev.nowMs, sev, AlertKind::BleTrackerDetected, mac, cleanName,
+                                     std::string(bleThreatLabel(bt.threat)) + " tracker detected at " +
+                                         std::to_string(ev.rssi) + " dBm"});
+                    }
+                }
+
+            } else if constexpr (std::is_same_v<E, SubGhzObserved>) {
+                const std::string cleanProto = sanitizePrintableText(ev.protocol, 24u);
+                if (s.subGhzCaptures.size() >= kMaxSubGhzCaptures) {
+                    s.subGhzCaptures.erase(s.subGhzCaptures.begin());
+                }
+                s.subGhzCaptures.push_back(SubGhzCapture{
+                    ev.freqKhz, ev.rssi, cleanProto, ev.burstCount, ev.continuousCarrier, ev.nowMs});
+                if (ev.continuousCarrier) {
+                    detail::pushAlert(
+                        s, Alert{ev.nowMs, Severity::Critical, AlertKind::SubGhzAnomaly,
+                                 formatFreqMhz(ev.freqKhz), cleanProto,
+                                 "Sub-GHz continuous jamming carrier detected on " +
+                                     formatFreqMhz(ev.freqKhz)});
+                } else if (ev.burstCount >= 5u) {
+                    detail::pushAlert(
+                        s, Alert{ev.nowMs, Severity::Warn, AlertKind::SubGhzAnomaly,
+                                 formatFreqMhz(ev.freqKhz), cleanProto,
+                                 "Sub-GHz rapid replay burst x" + std::to_string(ev.burstCount) +
+                                     " (" + cleanProto + ")"});
                 }
             }
         },
@@ -869,19 +1141,15 @@ struct ChannelCount {
 // Pure fold: how many currently-tracked targets sit on each channel, across every band the
 // Linux backend can observe. Sorted by channel ascending.
 inline std::vector<ChannelCount> channelDistribution(const SecState& s) {
-    std::vector<ChannelCount> out;
+    std::unordered_map<int32_t, uint32_t> counts;
+    counts.reserve(16u);
     for (const WifiTarget& t : s.targets) {
-        bool found = false;
-        for (ChannelCount& c : out) {
-            if (c.channel == t.channel) {
-                ++c.count;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            out.push_back(ChannelCount{t.channel, classifyChannel(t.channel), 1u});
-        }
+        counts[t.channel] += 1u;
+    }
+    std::vector<ChannelCount> out;
+    out.reserve(counts.size());
+    for (const auto& kv : counts) {
+        out.push_back(ChannelCount{kv.first, classifyChannel(kv.first), kv.second});
     }
     std::sort(out.begin(), out.end(),
               [](const ChannelCount& a, const ChannelCount& b) { return a.channel < b.channel; });
@@ -949,7 +1217,7 @@ inline const char* secMoodLabel(SecMood m) {
 inline SecMood deriveSecMood(const SecState& s, uint32_t nowMs, uint32_t recentMs = 30000u) {
     bool anyWarn = false;
     for (auto it = s.alerts.rbegin(); it != s.alerts.rend(); ++it) {
-        if (it->nowMs <= nowMs && (nowMs - it->nowMs) > recentMs) {
+        if (detail::elapsedMoreThan(nowMs, it->nowMs, recentMs)) {
             break;
         }
         if (it->severity == Severity::Critical) {
@@ -1124,6 +1392,16 @@ inline std::string encodeSecEvent(const SecEvent& event) {
                 return detail::joinRecordFields(
                     {"INJECT", std::to_string(ev.nowMs), ev.bssid, ev.client,
                      std::to_string(ev.count), std::to_string(static_cast<int>(ev.decision))});
+            } else if constexpr (std::is_same_v<E, BleObserved>) {
+                return detail::joinRecordFields(
+                    {"BLE", std::to_string(ev.nowMs), ev.mac, ev.name, std::to_string(ev.rssi),
+                     std::to_string(ev.companyId), std::to_string(ev.serviceUuid),
+                     ev.trackerPayload ? "1" : "0"});
+            } else if constexpr (std::is_same_v<E, SubGhzObserved>) {
+                return detail::joinRecordFields(
+                    {"SUBGHZ", std::to_string(ev.nowMs), std::to_string(ev.freqKhz),
+                     std::to_string(ev.rssi), ev.protocol, std::to_string(ev.burstCount),
+                     ev.continuousCarrier ? "1" : "0"});
             }
             return std::string{};
         },
@@ -1179,12 +1457,25 @@ inline std::optional<SecEvent> decodeSecEvent(const std::string& line) {
         return SecEvent{InjectionAttempt{parseU32(f[1]), f[2], f[3], parseU32(f[4]),
                                          static_cast<AuthDecision>(decRaw)}};
     }
+    if (tag == "BLE" && f.size() == 8u) {
+        return SecEvent{BleObserved{
+            parseU32(f[1]), f[2], f[3], parseI32(f[4]),
+            static_cast<uint16_t>(parseU32(f[5]) & 0xFFFFu),
+            static_cast<uint16_t>(parseU32(f[6]) & 0xFFFFu),
+            f[7] == "1"}};
+    }
+    if (tag == "SUBGHZ" && f.size() == 7u) {
+        return SecEvent{SubGhzObserved{
+            parseU32(f[1]), parseU32(f[2]), parseI32(f[3]), f[4],
+            parseU32(f[5]), f[6] == "1"}};
+    }
     return std::nullopt;
 }
 
 // Encodes a whole session to one line per event, in order (ready to join with "\n" and
 // write to a file - the imperative shell's job).
-inline std::vector<std::string> encodeSecEvents(const std::vector<SecEvent>& events) {
+template <typename Container = std::vector<SecEvent>>
+inline std::vector<std::string> encodeSecEvents(const Container& events) {
     std::vector<std::string> lines;
     lines.reserve(events.size());
     for (const SecEvent& ev : events) {

@@ -19,6 +19,7 @@
 #include "esp32_cli.hpp"
 #include "esp32_hal.hpp"
 #include "esp32_offensive.hpp"
+#include "nmea.hpp"
 
 #include <Arduino.h>
 #define LGFX_USE_V1
@@ -203,7 +204,12 @@ public:
         // 4. Create RGB565 double-buffered sprite
         canvas_.setColorDepth(16);
         canvasReady_ = canvas_.createSprite(lcd_.width(), lcd_.height());
+        if (!canvasReady_) {
+            Serial.println("[DISPLAY] ERROR: createSprite failed; screen output disabled");
+        }
     }
+
+    void setOverlay(std::string text) { overlay_ = std::move(text); }
 
     zd::ScreenDimensions dimensions() const override {
         return zd::ScreenDimensions{
@@ -219,6 +225,15 @@ public:
         canvas_.setFont(&fonts::Font0);
         canvas_.setTextSize(1);
         zd::render::paintUiFrame(canvas_, frame);
+        if (!overlay_.empty()) {
+            const int32_t w = lcd_.width();
+            const int32_t h = lcd_.height();
+            canvas_.fillRect(0, h - 12, w, 12, 0x0000);
+            canvas_.drawFastHLine(0, h - 12, w, 0xFFFF);
+            canvas_.setTextColor(0xFFFF, 0x0000);
+            canvas_.setCursor(3, h - 10);
+            canvas_.print(overlay_.c_str());
+        }
         canvas_.pushSprite(0, 0);
     }
 
@@ -228,125 +243,28 @@ private:
     LGFX_TDeck lcd_;
     lgfx::LGFX_Sprite canvas_{&lcd_};
     bool canvasReady_ = false;
+    std::string overlay_;
 };
 
 // --- Optional MIA-M10Q GNSS / GPS Telemetry (T-Deck Plus) ---
 
-struct GpsState {
-    bool hasFix = false;
-    float latitude = 0.0f;
-    float longitude = 0.0f;
-    uint8_t satellites = 0;
-    char utcTime[10] = "00:00:00";
-    uint32_t lastSentenceMs = 0;
-};
-
 HardwareSerial gGpsSerial(1);
-GpsState gGps;
+zd::esp32_common::GpsState gGps;
 std::string gGpsNmeaLine;
 
 void initGps() {
     gGpsSerial.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);
 }
 
-// Verify standard NMEA-0183 XOR checksum ($body*XX).
-bool verifyNmeaChecksum(std::string_view line) {
-    if (line.size() < 4u || line.front() != '$') {
-        return false;
-    }
-    const std::size_t star = line.rfind('*');
-    if (star == std::string_view::npos || star + 3u > line.size()) {
-        return false;
-    }
-    auto hexNib = [](char ch) -> int {
-        if (ch >= '0' && ch <= '9') return ch - '0';
-        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-        return -1;
-    };
-    const int hi = hexNib(line[star + 1u]);
-    const int lo = hexNib(line[star + 2u]);
-    if (hi < 0 || lo < 0) {
-        return false;
-    }
-    uint8_t x = 0u;
-    for (std::size_t i = 1u; i < star; ++i) {
-        x ^= static_cast<uint8_t>(line[i]);
-    }
-    return x == static_cast<uint8_t>((hi << 4) | lo);
-}
-
-// True zero-heap-allocation NMEA field tokenizer using fixed stack array.
-std::size_t parseNmeaFields(std::string_view line, std::array<std::string_view, 16>& fields) {
-    std::size_t count = 0u;
-    std::size_t start = 0u;
-    for (std::size_t i = 0u; i < line.size() && count < fields.size(); ++i) {
-        if (line[i] == ',' || line[i] == '*') {
-            fields[count++] = line.substr(start, i - start);
-            start = i + 1u;
-            if (line[i] == '*') {
-                break;
-            }
-        }
-    }
-    if (count < fields.size() && start <= line.size()) {
-        fields[count++] = line.substr(start);
-    }
-    return count;
-}
-
 void pollGps(uint32_t nowMs) {
-    // Expire stale GPS fix if no valid RMC sentence arrived in > 5 seconds.
-    if (gGps.hasFix && (nowMs - gGps.lastSentenceMs) > 5000u) {
-        gGps.hasFix = false;
-    }
+    zd::esp32_common::expireStaleGpsFix(gGps, nowMs);
     while (gGpsSerial.available() > 0) {
         const char c = static_cast<char>(gGpsSerial.read());
         if (c == '\n' || c == '\r') {
-            if (!gGpsNmeaLine.empty() && verifyNmeaChecksum(gGpsNmeaLine)) {
-                std::array<std::string_view, 16> f{};
-                const std::size_t n = parseNmeaFields(gGpsNmeaLine, f);
-                if (gGpsNmeaLine.rfind("$GNRMC", 0) == 0 || gGpsNmeaLine.rfind("$GPRMC", 0) == 0) {
-                    if (n >= 7u && f[2] == "A") {  // Status 'A' = Valid fix
-                        gGps.hasFix = true;
-                        gGps.lastSentenceMs = nowMs;
-                        if (f[1].size() >= 6u) {
-                            snprintf(gGps.utcTime, sizeof(gGps.utcTime), "%.2s:%.2s:%.2s",
-                                     f[1].data(), f[1].data() + 2, f[1].data() + 4);
-                        }
-                        if (!f[3].empty() && !f[5].empty()) {
-                            char latBuf[16] = {0};
-                            const std::size_t latLen = std::min(f[3].size(), sizeof(latBuf) - 1);
-                            std::memcpy(latBuf, f[3].data(), latLen);
-                            const float rawLat = std::strtof(latBuf, nullptr);
-                            const float latDeg = std::floor(rawLat / 100.0f);
-                            float lat = latDeg + ((rawLat - (latDeg * 100.0f)) / 60.0f);
-                            if (f[4] == "S") lat = -lat;
-                            gGps.latitude = lat;
-
-                            char lonBuf[16] = {0};
-                            const std::size_t lonLen = std::min(f[5].size(), sizeof(lonBuf) - 1);
-                            std::memcpy(lonBuf, f[5].data(), lonLen);
-                            const float rawLon = std::strtof(lonBuf, nullptr);
-                            const float lonDeg = std::floor(rawLon / 100.0f);
-                            float lon = lonDeg + ((rawLon - (lonDeg * 100.0f)) / 60.0f);
-                            if (f[6] == "W") lon = -lon;
-                            gGps.longitude = lon;
-                        }
-                    } else if (n >= 3u && f[2] == "V") {  // Status 'V' = Warning / Fix lost
-                        gGps.hasFix = false;
-                    }
-                } else if (gGpsNmeaLine.rfind("$GNGGA", 0) == 0 ||
-                           gGpsNmeaLine.rfind("$GPGGA", 0) == 0) {
-                    if (n >= 8u && !f[7].empty()) {
-                        char satBuf[8] = {0};
-                        const std::size_t satLen = std::min(f[7].size(), sizeof(satBuf) - 1);
-                        std::memcpy(satBuf, f[7].data(), satLen);
-                        gGps.satellites = static_cast<uint8_t>(std::atoi(satBuf));
-                    }
-                }
+            if (!gGpsNmeaLine.empty()) {
+                (void)zd::esp32_common::processNmeaSentence(gGps, gGpsNmeaLine, nowMs);
+                gGpsNmeaLine.clear();
             }
-            gGpsNmeaLine.clear();
         } else if (gGpsNmeaLine.size() < 120u) {
             gGpsNmeaLine.push_back(c);
         }
@@ -368,6 +286,9 @@ zd::esp32_common::OffensiveConsole gOffensive;
 zd::esp32_common::DirtyFramePacer gFramePacer;
 std::string gSerialLine;
 std::string gKeyboardLine;
+std::string gKbFeedback;
+uint32_t gKbFeedbackUntilMs = 0;
+std::string gLastKbOverlay;
 
 // Trackball button state
 bool gTbClickActive = false;
@@ -376,34 +297,21 @@ uint32_t gTbClickStartMs = 0;
 uint32_t gLastTbRollMs = 0;
 
 // Touch button state
-bool gTouchActive = false;
-bool gTouchLongHandled = false;
-uint32_t gTouchStartMs = 0;
-uint16_t gTouchStartX = 0;
-uint16_t gTouchStartY = 0;
+zd::esp32_common::TouchZoneGesture gTouchGesture;
 
 void logSerialStatus(const char* eventTag) {
-    const zd::AppState& st = gSession.state();
-    const zd::FaceDescriptor face = zd::faceForMood(st.mood);
-    Serial.printf("[%s] %s %s> \"%s\" | APs:%u | BusiestCh:%d | Theme:%s",
-                  eventTag,
-                  face.asciiFace,
-                  st.petName.c_str(),
-                  st.phrase.c_str(),
-                  static_cast<unsigned>(st.latestScan.totalAps),
-                  static_cast<int>(st.latestScan.busiestChannel),
-                  zd::themeSpec(st.theme).key);
+    char gpsBuf[64] = "";
     if (gGps.hasFix) {
-        Serial.printf(" | GPS: %.4f,%.4f (%u sats)",
-                      gGps.latitude, gGps.longitude, static_cast<unsigned>(gGps.satellites));
+        snprintf(gpsBuf, sizeof(gpsBuf), " | GPS: %.4f,%.4f (%u sats)",
+                 gGps.latitude, gGps.longitude, static_cast<unsigned>(gGps.satellites));
     }
-    Serial.println();
+    zd::esp32_common::printSerialStatus(gSession, eventTag, gpsBuf);
 }
 
 void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
         if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs).c_str());
+            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
             return;
         }
         if (line == "gps") {
@@ -484,8 +392,20 @@ void pollTrackball(uint32_t nowMs) {
 uint32_t gLastKbPollMs = 0;
 
 void initKeyboard() {
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     pinMode(PIN_KB_INT, INPUT_PULLUP);
+}
+
+void setKbFeedback(const std::string& msg, uint32_t nowMs) {
+    std::string line = msg;
+    const std::size_t nl = line.find('\n');
+    if (nl != std::string::npos) {
+        line.resize(nl);
+    }
+    if (line.size() > 50u) {
+        line.resize(50u);
+    }
+    gKbFeedback = std::move(line);
+    gKbFeedbackUntilMs = nowMs + 3000u;
 }
 
 void pollKeyboard(uint32_t nowMs) {
@@ -509,25 +429,34 @@ void pollKeyboard(uint32_t nowMs) {
             if (gKeyboardLine.empty()) {
                 // Empty Enter key: quick shortcut triggers a WiFi scan
                 gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
+                setKbFeedback("Scan requested", nowMs);
                 logSerialStatus("KB_SCAN");
             } else {
                 if (gKeyboardLine == "sec" || gKeyboardLine.rfind("sec ", 0) == 0) {
-                    Serial.print(gOffensive.handleLine(gKeyboardLine, nowMs).c_str());
+                    const std::string out = gOffensive.handleLine(gKeyboardLine, nowMs, &gSession);
+                    Serial.print(out.c_str());
+                    setKbFeedback(out, nowMs);
                     gKeyboardLine.clear();
                     return;
                 }
                 if (gKeyboardLine == "gps") {
                     if (gGps.hasFix) {
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), "GPS %.4f,%.4f (%usats)",
+                                 gGps.latitude, gGps.longitude, static_cast<unsigned>(gGps.satellites));
                         Serial.printf("[GPS] FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
                                       gGps.latitude, gGps.longitude, gGps.satellites, gGps.utcTime);
+                        setKbFeedback(buf, nowMs);
                     } else {
                         Serial.println("[GPS] Searching for satellites (no fix yet)...");
+                        setKbFeedback("GPS: searching...", nowMs);
                     }
                 } else {
                     const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
                         gKeyboardLine, gSession.state(), gDisplay.dimensions(), nowMs);
                     if (!res.output.empty()) {
                         Serial.print(res.output.c_str());
+                        setKbFeedback(res.output, nowMs);
                     }
                     if (res.event.has_value()) {
                         gSession.dispatch(*res.event, &gThemeStore);
@@ -542,6 +471,7 @@ void pollKeyboard(uint32_t nowMs) {
             }
         } else if (c == 0x1B) { // Escape
             gKeyboardLine.clear();
+            gKbFeedbackUntilMs = 0u;
         } else if (gKeyboardLine.empty() && (c == ' ' || c == '\t')) {
             // Immediate hotkey: Space or Tab cycles screen view
             gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
@@ -555,6 +485,15 @@ void pollKeyboard(uint32_t nowMs) {
         } else if (gKeyboardLine.empty() && c == '3') {
             gSession.dispatch(zd::SetPageEvent{nowMs, zd::ScreenPage::ChannelSpectrum}, &gThemeStore);
             logSerialStatus("KB_PAGE_SPECTRUM");
+        } else if (gKeyboardLine.empty() && c == '4') {
+            gSession.dispatch(zd::SetPageEvent{nowMs, zd::ScreenPage::RfGuard}, &gThemeStore);
+            logSerialStatus("KB_PAGE_RFGUARD");
+        } else if (gKeyboardLine.empty() && c == '[') {
+            gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
+            logSerialStatus("KB_THEME_PREV");
+        } else if (gKeyboardLine.empty() && c == ']') {
+            gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
+            logSerialStatus("KB_THEME_NEXT");
         } else if (gKeyboardLine.size() < 64u && c >= 32 && c <= 126) {
             gKeyboardLine.push_back(c);
         }
@@ -562,47 +501,37 @@ void pollKeyboard(uint32_t nowMs) {
 }
 
 void pollTouch(uint32_t nowMs, LGFX_TDeck& lcd) {
-    uint16_t tx = 0, ty = 0;
+    uint16_t tx = 0;
+    uint16_t ty = 0;
     const bool isTouched = lcd.getTouch(&tx, &ty);
-
-    if (isTouched && !gTouchActive) {
-        gTouchActive = true;
-        gTouchLongHandled = false;
-        gTouchStartMs = nowMs;
-        gTouchStartX = tx;
-        gTouchStartY = ty;
-    } else if (isTouched && gTouchActive && !gTouchLongHandled) {
-        // Long-press top header bar (>= 600ms) -> previous theme (matches CYD touch controls)
-        if (gTouchStartY < 42 && (nowMs - gTouchStartMs) >= 600u) {
-            gTouchLongHandled = true;
+    using Act = zd::esp32_common::TouchZoneGesture::Action;
+    switch (gTouchGesture.update(isTouched, tx, ty, nowMs, 0u)) {
+        case Act::PrevTheme:
             gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
             logSerialStatus("TOUCH_THEME_PREV");
-        }
-    } else if (!isTouched && gTouchActive) {
-        gTouchActive = false;
-        if (gTouchLongHandled) {
-            return;
-        }
-        const uint32_t duration = nowMs - gTouchStartMs;
-        if (duration < 600u) {
-            // Tapped top header bar -> next theme
-            if (gTouchStartY < 42) {
-                gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
-                logSerialStatus("TOUCH_THEME");
-            } else if (gTouchStartX < 100) {
-                // Tapped left third -> previous view
-                gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
-                logSerialStatus("TOUCH_VIEW_PREV");
-            } else if (gTouchStartX > 220) {
-                // Tapped right third -> next view
-                gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
-                logSerialStatus("TOUCH_VIEW_NEXT");
-            } else {
-                // Tapped center area -> scan / wake pet
-                gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
-                logSerialStatus("TOUCH_SCAN");
-            }
-        }
+            break;
+        case Act::NextTheme:
+            gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
+            logSerialStatus("TOUCH_THEME");
+            break;
+        case Act::PrevView:
+            gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
+            logSerialStatus("TOUCH_VIEW_PREV");
+            break;
+        case Act::NextView:
+            gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
+            logSerialStatus("TOUCH_VIEW_NEXT");
+            break;
+        case Act::Scan:
+            gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
+            logSerialStatus("TOUCH_SCAN");
+            break;
+        case Act::CycleMode:
+            gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
+            logSerialStatus("TOUCH_MODE");
+            break;
+        case Act::None:
+            break;
     }
 }
 
@@ -610,6 +539,9 @@ void pollTouch(uint32_t nowMs, LGFX_TDeck& lcd) {
 
 void setup() {
     Serial.begin(115200);
+
+    // Initialize shared 400 kHz I2C bus before GT911 touch init inside gDisplay.init().
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000u);
 
     // Initialize display & peripheral power rails
     gDisplay.init();
@@ -639,14 +571,31 @@ void loop() {
     pollGps(nowMs);
 
     // 2. Step non-blocking radio scanner & periodic telemetry tick
-    if (const char* scanTag = gSession.stepRadio(nowMs, gRadio)) {
+    if (const char* scanTag = gSession.stepRadio(
+            nowMs, gRadio, zd::hal::PlatformSession::kDefaultScanTimeoutMs, &gThemeStore)) {
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);
 
-    // 3. Refresh display only when state changed, animating, or on 1 Hz uptime tick
-    if (gFramePacer.shouldRender(gSession.state(), nowMs)) {
+    // 3. Synchronize keyboard overlay & refresh display when dirty
+    std::string kbOverlay;
+    if (!gKeyboardLine.empty()) {
+        kbOverlay = "> " + gKeyboardLine + "_";
+    } else if (gKbFeedbackUntilMs != 0u &&
+               static_cast<int32_t>(gKbFeedbackUntilMs - nowMs) > 0 &&
+               !gKbFeedback.empty()) {
+        kbOverlay = gKbFeedback;
+    } else {
+        gKbFeedbackUntilMs = 0u;
+    }
+    const bool kbChanged = (kbOverlay != gLastKbOverlay);
+    if (kbChanged) {
+        gLastKbOverlay = kbOverlay;
+        gDisplay.setOverlay(std::move(kbOverlay));
+    }
+    if (kbChanged || gFramePacer.shouldRender(gSession.state(), nowMs)) {
         gSession.renderTo(gDisplay);
+        gFramePacer.markRendered(nowMs);
     }
 
     delay(10);

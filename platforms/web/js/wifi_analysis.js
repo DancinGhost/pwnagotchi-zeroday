@@ -1,4 +1,4 @@
-// Pure functional WiFi scan analysis pipeline (ported from include/wifi_analysis.hpp).
+// Pure functional WiFi scan analysis pipeline (ported from core/include/zd/wifi_analysis.hpp).
 (function (root) {
   'use strict';
 
@@ -133,7 +133,86 @@
     });
   }
 
+  const BleThreatKind = Object.freeze({
+    None: 'None',
+    AirTagTracker: 'AirTagTracker',
+    SmartTagTracker: 'SmartTagTracker',
+    TileTracker: 'TileTracker',
+    MultiToolBle: 'MultiToolBle',
+    BleSpam: 'BleSpam'
+  });
+
+  const SubGhzAnomaly = Object.freeze({
+    None: 'None',
+    ReplayBurst: 'ReplayBurst',
+    JammingCarrier: 'JammingCarrier',
+    RollingCode: 'RollingCode'
+  });
+
+  function classifyBleDevice(mac, name, companyId, serviceUuid, trackerPayload) {
+    const lowerName = String(name || '').toLowerCase();
+    const lowerMac = String(mac || '').toLowerCase();
+    const cid = Math.trunc(companyId || 0);
+    const uuid = Math.trunc(serviceUuid || 0);
+
+    if ((uuid >= 0x3080 && uuid <= 0x3083) ||
+        lowerMac.indexOf('00:80:e1') === 0 ||
+        lowerMac.indexOf('0080e1') === 0 ||
+        lowerName.indexOf('flipper') === 0) {
+      return BleThreatKind.MultiToolBle;
+    }
+    if ((cid === 0x004c && Boolean(trackerPayload)) ||
+        lowerName.indexOf('airtag') >= 0 ||
+        lowerName.indexOf('findmy') >= 0) {
+      return BleThreatKind.AirTagTracker;
+    }
+    if ((cid === 0x0075 && Boolean(trackerPayload)) ||
+        lowerName.indexOf('smarttag') >= 0) {
+      return BleThreatKind.SmartTagTracker;
+    }
+    if (uuid === 0xfeed || lowerName.indexOf('tile') >= 0) {
+      return BleThreatKind.TileTracker;
+    }
+    if (lowerName.indexOf('spam') >= 0) {
+      return BleThreatKind.BleSpam;
+    }
+    return BleThreatKind.None;
+  }
+
+  function bleThreatLabel(kind) {
+    switch (kind) {
+      case BleThreatKind.AirTagTracker: return 'LOC-TAG!';
+      case BleThreatKind.SmartTagTracker: return 'BLE-TAG!';
+      case BleThreatKind.TileTracker: return 'KEY-TAG!';
+      case BleThreatKind.MultiToolBle: return 'RF-TOOL!';
+      case BleThreatKind.BleSpam: return 'SPAM!';
+      default: return 'OK';
+    }
+  }
+
+  function subGhzAnomalyLabel(anomaly) {
+    switch (anomaly) {
+      case SubGhzAnomaly.ReplayBurst: return 'REPLAY!';
+      case SubGhzAnomaly.JammingCarrier: return 'JAMMING!';
+      case SubGhzAnomaly.RollingCode: return 'ROLLING';
+      default: return 'OK';
+    }
+  }
+
+  function formatFreqMhz(freqKhz) {
+    const k = Math.max(0, Math.trunc(freqKhz || 0));
+    const whole = Math.floor(k / 1000);
+    const frac = String(Math.floor((k % 1000) / 10)).padStart(2, '0');
+    return whole + '.' + frac + 'MHz';
+  }
+
   const wifiAnalysis = Object.freeze({
+    BleThreatKind,
+    SubGhzAnomaly,
+    classifyBleDevice,
+    bleThreatLabel,
+    subGhzAnomalyLabel,
+    formatFreqMhz,
     sanitizePrintable,
     sanitizeAccessPoint,
     isStrongerAp,

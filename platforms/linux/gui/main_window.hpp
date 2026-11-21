@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -42,20 +43,23 @@ private slots:
     void onPrevTheme();
     void onCycleTheme();
     void onCycleView();
+    void onCycleMode();
     void onLoadSession();
     void onSaveSession();
+    void onToggleRecord();
     void onAuthToggled(bool on);
     void onAllowSelected();
     void onDeauthSelected();
 
 private:
     void refreshNetworks(bool force = false);
-    void refreshStations();
+    void refreshStations(bool force = false);
     void refreshAlerts();
     void refreshStatus();
-    void refreshChannels();
+    void refreshChannels(bool force = false);
     void pollAsyncResult();
     std::string selectedBssid() const;
+    void resolveSelectedTarget(std::string& bssidOut, std::string& stationOut) const;
 
     linux_app::AppController& app_;
     PetWidget* pet_ = nullptr;
@@ -70,12 +74,17 @@ private:
     QTableWidget* stationsTable_ = nullptr;
     QListWidget* alerts_ = nullptr;
     QCheckBox* authCheck_ = nullptr;
+    QCheckBox* freezeSortCheck_ = nullptr;
     QPushButton* monitorBtn_ = nullptr;
+    QPushButton* modeBtn_ = nullptr;
+    QPushButton* recordBtn_ = nullptr;
     QSpinBox* channelSpin_ = nullptr;
     QPushButton* channelBtn_ = nullptr;
     QPushButton* deauthBtn_ = nullptr;
     QTimer* timer_ = nullptr;
+    std::vector<sec::WifiTarget> displayedTargets_;
     std::uint32_t lastTotalAlerts_ = 0;
+    std::uint32_t lastTableRefreshMs_ = 0;
     std::uint64_t lastNetworksRev_ = UINT64_MAX;
     std::uint64_t lastStationsRev_ = UINT64_MAX;
     std::uint64_t lastChannelsRev_ = UINT64_MAX;

@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: '17 6 * * 1'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,7 +40,7 @@ jobs:
           cmake -B build_cmake -DCMAKE_BUILD_TYPE=Release
           cmake --build build_cmake --config Release -j$(nproc)
           test -x build_cmake/zd-gui
-          ctest --test-dir build_cmake --output-on-failure
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build_cmake --output-on-failure
 
   sanitizers:
     name: ASan + UBSan Host Test Suite
@@ -60,8 +62,51 @@ jobs:
           cmake -B build_san -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build_san --target test_functional_core test_painter test_secops test_linux_parsers test_dot11_frames test_linux_shell -j$(nproc)
-          ctest --test-dir build_san --output-on-failure
+          cmake --build build_san --target test_functional_core test_painter test_secops test_linux_parsers test_dot11_frames test_linux_shell test_esp32_common zd_sim zd-linux -j$(nproc)
+          ctest --test-dir build_san -E "^linux_gui_tests$" --output-on-failure
+
+  security-audit:
+    name: Static Analysis, Supply-Chain & Secret Scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install static analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck python3-pip
+          python3 -m pip install --break-system-packages pip-audit
+
+      - name: Run C++ static analysis (cppcheck)
+        run: |
+          cppcheck --enable=warning,portability --error-exitcode=1 \
+            --suppress=missingIncludeSystem --suppress=unmatchedSuppression --quiet \
+            -I core/include -I render/include -I platforms/linux/backend -I platforms/linux/app -I platforms/common \
+            core render platforms/common platforms/linux platforms/native
+
+      - name: Audit flasher runtime dependency (esptool==4.8.1) & scan for accidental secrets
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, subprocess, sys
+          bad = []
+          pat = re.compile(r"-----BEGIN (?:RSA|EC|OPENSSH|PGP|DSA) PRIVATE KEY-----")
+          for p in pathlib.Path(".").rglob("*"):
+              if ".git" in p.parts or not p.is_file():
+                  continue
+              try:
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+              except Exception:
+                  continue
+              if pat.search(txt):
+                  bad.append(str(p))
+          if bad:
+              print("Private key material detected in:", bad)
+              sys.exit(1)
+          print("Secret pattern scan clean.")
+          PY
+          echo "esptool==4.8.1" > /tmp/flasher-req.txt
+          pip-audit -r /tmp/flasher-req.txt
 
   firmware-compile-check:
     name: ESP32 Firmware Compile Check (${{ matrix.env }})
@@ -71,7 +116,10 @@ jobs:
       matrix:
         env:
           - m5stick-c
+          - m5stick-c-plus2
+          - m5stack-core2
           - cyd-esp32-2432s028
+          - cyd-esp32-2432s028-2usb
           - t-deck-plus
     steps:
       - name: Checkout repository

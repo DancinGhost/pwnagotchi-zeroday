@@ -19,10 +19,43 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------------------------
+  # Job 0: Mandatory Pre-Release Verification Gate
+  # --------------------------------------------------------------------------------------
+  verify-ci:
+    name: Pre-Release Verification Gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libpcap-dev libncurses-dev qt6-base-dev
+
+      - name: Build & run full CMake test suite (including Qt6 offscreen)
+        run: |
+          cmake -B build_verify -DCMAKE_BUILD_TYPE=Release
+          cmake --build build_verify --config Release -j$(nproc)
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build_verify --output-on-failure
+
+      - name: Run ASan + UBSan host test suite
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: |
+          cmake -B build_san -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build_san --target test_functional_core test_painter test_secops test_linux_parsers test_dot11_frames test_linux_shell test_esp32_common zd_sim zd-linux -j$(nproc)
+          ctest --test-dir build_san -E "^linux_gui_tests$" --output-on-failure
+
+  # --------------------------------------------------------------------------------------
   # Job 1: Build Embedded Firmwares (ESP32 / ESP32-S3 via PlatformIO)
   # --------------------------------------------------------------------------------------
   build-firmware:
     name: Build Firmware (${{ matrix.target.name }})
+    needs: [verify-ci]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -105,12 +138,14 @@ jobs:
             "${{ matrix.target.boot_offset }}" "$ENV_DIR/bootloader.bin"
             0x8000 "$ENV_DIR/partitions.bin"
           )
-          BOOT_APP0="$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
-          if [ -f "$BOOT_APP0" ]; then
-            MERGE_ARGS+=(0xe000 "$BOOT_APP0")
+          BOOT_APP0="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
+          if [ ! -f "$BOOT_APP0" ]; then
+            echo "ERROR: boot_app0.bin not found at $BOOT_APP0; refusing unbootable factory image." >&2
+            exit 1
           fi
-          MERGE_ARGS+=(0x10000 "$ENV_DIR/firmware.bin")
+          MERGE_ARGS+=(0xe000 "$BOOT_APP0" 0x10000 "$ENV_DIR/firmware.bin")
           esptool.py "${MERGE_ARGS[@]}"
+          (cd "$DIST_DIR" && sha256sum "$(basename "$FACTORY_BIN")" > "$(basename "$FACTORY_BIN").sha256")
 
           # Include cross-platform one-click flashing utilities explicitly (no __pycache__)
           for f in flash.py flash.sh flash.bat; do
@@ -140,6 +175,7 @@ jobs:
   # --------------------------------------------------------------------------------------
   build-linux:
     name: Build Linux Desktop (x86_64)
+    needs: [verify-ci]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -160,7 +196,7 @@ jobs:
 
       - name: Run automated test suite
         run: |
-          ctest --test-dir build --output-on-failure
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build --output-on-failure
 
       - name: Package Linux binaries
         run: |
@@ -190,6 +226,7 @@ jobs:
   # --------------------------------------------------------------------------------------
   build-web:
     name: Package Web Cyberdeck
+    needs: [verify-ci]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -227,7 +264,7 @@ jobs:
       attestations: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           path: release-assets
           merge-multiple: true

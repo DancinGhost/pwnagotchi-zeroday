@@ -46,6 +46,13 @@
     })
   ]);
 
+  const ActivityScene = Object.freeze({
+    None: 'None',
+    RadarDish: 'RadarDish',
+    SatelliteBeam: 'SatelliteBeam',
+    ThreatShield: 'ThreatShield'
+  });
+
   function screenProfileFromKey(key) {
     for (let i = 0; i < SCREEN_PROFILES.length; i++) {
       if (SCREEN_PROFILES[i].key === key) {
@@ -179,6 +186,13 @@
     const headerDivY = headerH;
     const footerDivY = dims.height - footerH - 1;
     const maxFrameCols = Math.max(12, Math.floor((dims.width - 4) / 6));
+    const effectiveMode = state.offensiveArmed ? logic.OpsMode.Offensive : (state.opsMode || logic.OpsMode.Recon);
+    const modeBadge = state.offensiveArmed
+      ? (compact ? '[ARM]' : '[ARMED]')
+      : '[' + logic.opsModeLabel(effectiveMode, compact) + ']';
+    const armBadgeCols = modeBadge.length + 1;
+    const maxHeaderCols =
+      maxFrameCols > armBadgeCols + 6 ? maxFrameCols - armBadgeCols : maxFrameCols;
 
     const chText = state.isScanning
       ? 'CH:*'
@@ -198,9 +212,11 @@
       headerLine = chText + ' ' + apText + ' ' + formatUptime(state.uptimeMs, true) + ' ' + batText;
     } else {
       const peakPart = '(' + state.peakApCount + ')';
-      headerLine = chText + '  ' + apText + peakPart + '  ' + upText + '  ' + batText;
+      headerLine = maxHeaderCols <= 34
+        ? (chText + ' ' + apText + peakPart + ' ' + formatUptime(state.uptimeMs, false) + ' ' + batText)
+        : (chText + '  ' + apText + peakPart + '  ' + upText + '  ' + batText);
     }
-    headerLine = truncateText(headerLine, maxFrameCols);
+    headerLine = truncateText(headerLine, maxHeaderCols);
 
     let footerLine;
     if (micro) {
@@ -311,14 +327,40 @@
       speechTopY = bodyTop + 6;
       lineStepY = 12;
       speechCols = Math.floor((dims.width - speechX - 4) / 6);
-      speechMaxLines = bodyH >= 92 ? 5 : 4;
+      speechMaxLines = bodyH >= 110 ? 4 : 3;
     }
 
-    const promptLabel = truncateText(state.petName + '>', speechCols);
+    const scene = state.isScanning
+      ? ActivityScene.RadarDish
+      : effectiveMode === logic.OpsMode.Offensive
+        ? ActivityScene.SatelliteBeam
+        : effectiveMode === logic.OpsMode.Defensive || state.mood === logic.Mood.ThreatAlert
+          ? ActivityScene.ThreatShield
+          : ActivityScene.None;
+
+    const promptMaxCols =
+      scene !== ActivityScene.None && speechCols > 5 ? speechCols - (compact ? 4 : 5) : speechCols;
+    const promptLabel = truncateText(state.petName + '>', promptMaxCols);
     const wrappedPhrase = wrapWords(state.phrase, speechCols, speechMaxLines);
 
+    const lvlInfo = logic.deriveLevelInfo(state.xp || 0);
+    const highScore = Math.max(state.highScore || 0, lvlInfo.xp);
+    let rankLine = '';
+    if (!compact) {
+      rankLine = truncateText(
+        'LV' + lvlInfo.level + ' HI:' + highScore,
+        speechCols > 7 ? speechCols - 6 : speechCols
+      );
+    }
+
+    const threatBanner = state.lastThreatLabel
+      ? truncateText('! ' + state.lastThreatLabel, speechCols)
+      : '';
+
     let spotlightLabel = '';
-    if (!compact && state.latestScan.totalAps > 0 && state.latestScan.strongestSsid.length > 0) {
+    if (!compact && threatBanner.length > 0) {
+      spotlightLabel = threatBanner;
+    } else if (!compact && state.latestScan.totalAps > 0 && state.latestScan.strongestSsid.length > 0) {
       const rawSpot =
         '> ' + state.latestScan.strongestSsid + ' (' + state.latestScan.strongestRssi + ')';
       spotlightLabel = truncateText(rawSpot, speechCols);
@@ -383,6 +425,50 @@
         ' OPEN:' +
         state.latestScan.openAps;
 
+    const bleDevs = state.bleDevices || [];
+    const subSigs = state.subGhzSignals || [];
+    let bleThreatCnt = 0;
+    for (let i = 0; i < bleDevs.length; i++) {
+      if (bleDevs[i].threat && bleDevs[i].threat !== wifi.BleThreatKind.None) {
+        bleThreatCnt++;
+      }
+    }
+    const freqStr = wifi.formatFreqMhz(state.subGhzFreqKhz || 433920);
+    const rfGuardSummary = compact
+      ? 'B:' + bleDevs.length + ' T:' + bleThreatCnt + ' ' + freqStr
+      : 'BLE:' + bleDevs.length + ' TAG:' + bleThreatCnt + ' | SUB:' + freqStr;
+
+    const maxGuardRows = Math.max(1, maxRadarRows - 1);
+    const rfGuardRows = [];
+    for (let i = 0; i < bleDevs.length && rfGuardRows.length < maxGuardRows; i++) {
+      const d = bleDevs[i];
+      const isThreat = Boolean(d.threat && d.threat !== wifi.BleThreatKind.None);
+      const baseName = d.name || d.mac || 'BLE';
+      const title = isThreat ? '[' + wifi.bleThreatLabel(d.threat) + '] ' + baseName : baseName;
+      rfGuardRows.push({
+        ssid: truncateText(title, maxSsidChars),
+        details: 'BLE ' + d.rssi,
+        bars: wifi.rssiToBars(d.rssi),
+        secure: isThreat
+      });
+    }
+    for (let i = 0; i < subSigs.length && rfGuardRows.length < maxGuardRows; i++) {
+      const sig = subSigs[i];
+      const isAnom = Boolean(sig.anomaly && sig.anomaly !== wifi.SubGhzAnomaly.None);
+      const title =
+        wifi.formatFreqMhz(sig.freqKhz) +
+        ' ' +
+        sig.protocol +
+        (isAnom ? ' ' + wifi.subGhzAnomalyLabel(sig.anomaly) : '');
+      rfGuardRows.push({
+        ssid: truncateText(title, maxSsidChars),
+        details: 'SUB ' + sig.rssi,
+        bars: wifi.rssiToBars(sig.rssi),
+        secure: isAnom
+      });
+    }
+    const rfGuardEmptyHint = truncateText('RF Guard idle (' + freqStr + ')', maxFrameCols);
+
     const toast = buildThemeToast(state, dims, compact, bodyTop, bodyBottom);
 
     return Object.freeze({
@@ -410,10 +496,23 @@
       chartBaseY,
       chartMaxBarH,
       spectrumSummary,
+      rfGuardRows,
+      rfGuardSummary,
+      rfGuardEmptyHint,
       theme: state.theme,
       themeEffect: themes.themeSpec(state.theme).effect,
       animTick: Math.floor((state.uptimeMs >>> 0) / 140),
-      toast
+      toast,
+      offensiveArmed: Boolean(state.offensiveArmed),
+      opsMode: effectiveMode,
+      modeBadge,
+      level: lvlInfo.level,
+      xp: lvlInfo.xp,
+      highScore,
+      xpProgressPct: lvlInfo.progressPct,
+      rankLine,
+      scene,
+      threatBanner
     });
   }
 
@@ -427,7 +526,7 @@
     const border = '+-' + '-'.repeat(innerW) + '-+\n';
 
     let out = border;
-    out += padLine(frame.headerLine);
+    out += padLine(frame.headerLine + ' ' + frame.modeBadge);
     out += border;
 
     if (frame.toast && frame.toast.visible) {
@@ -439,7 +538,10 @@
       for (let i = 0; i < frame.phraseLines.length; i++) {
         out += padLine('       ' + frame.phraseLines[i]);
       }
-      out += padLine('[' + frame.face.moodLabel + '] ' + frame.spotlightLabel);
+      out += padLine('[' + frame.face.moodLabel + '] ' + (frame.rankLine || ''));
+      if (frame.spotlightLabel) {
+        out += padLine('       ' + frame.spotlightLabel);
+      }
     } else if (frame.page === logic.ScreenPage.NearbyRadar) {
       out += padLine('NEARBY WIFI RADAR');
       if (frame.radarRows.length === 0) {
@@ -451,7 +553,7 @@
           out += padLine(lockChar + row.ssid + ' ' + row.details);
         }
       }
-    } else {
+    } else if (frame.page === logic.ScreenPage.ChannelSpectrum) {
       out += padLine(frame.spectrumSummary);
       const countsRow =
         'CH:' +
@@ -461,6 +563,17 @@
           })
           .join(' ');
       out += padLine(countsRow);
+    } else {
+      out += padLine(frame.rfGuardSummary);
+      if (frame.rfGuardRows.length === 0) {
+        out += padLine(frame.rfGuardEmptyHint);
+      } else {
+        for (let i = 0; i < frame.rfGuardRows.length; i++) {
+          const row = frame.rfGuardRows[i];
+          const alertChar = row.secure ? '!' : ' ';
+          out += padLine(alertChar + row.ssid + ' ' + row.details);
+        }
+      }
     }
 
     out += border;
@@ -470,6 +583,7 @@
   }
 
   const uiModel = Object.freeze({
+    ActivityScene,
     SCREEN_PROFILES,
     screenProfileFromKey,
     rgb565,

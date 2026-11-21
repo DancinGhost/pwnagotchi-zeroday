@@ -13,10 +13,19 @@
 
 #include <pcap/pcap.h>
 
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <deque>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "zd/dot11.hpp"
 #include "zd/secops_hal.hpp"
@@ -26,9 +35,26 @@
 namespace zd {
 namespace linux_backend {
 
+inline void setPcapCloexec(pcap_t* h) {
+    if (h == nullptr) {
+        return;
+    }
+    const int fd = pcap_get_selectable_fd(h);
+    if (fd >= 0) {
+        const int flags = ::fcntl(fd, F_GETFD);
+        if (flags >= 0) {
+            (void)::fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+        }
+    }
+}
+
 class NativeCaptureSource final : public sec::ICaptureSource {
 public:
+    static constexpr std::size_t kMaxQueuedFrames = 4096u;
+
     ~NativeCaptureSource() override { stop(); }
+
+    void setPcapDumpPath(std::string path) { dumpPath_ = std::move(path); }
 
     bool start(const std::string& monitorIface) override {
         if (handle_ != nullptr) {
@@ -46,12 +72,17 @@ public:
         cfg |= pcap_set_timeout(handle_, 50);
         cfg |= pcap_set_immediate_mode(handle_, 1);
         (void)cfg;  // best-effort tuning; activation below is the authoritative check
-        if (pcap_activate(handle_) != 0) {
+        const int actRc = pcap_activate(handle_);
+        if (actRc < 0) {
             lastError_ = pcap_geterr(handle_);
             pcap_close(handle_);
             handle_ = nullptr;
             return false;
         }
+        if (actRc > 0) {
+            lastError_ = pcap_geterr(handle_);  // non-fatal warning (e.g. promisc not supported)
+        }
+        setPcapCloexec(handle_);
         const int dlt = pcap_datalink(handle_);
         if (dlt != DLT_IEEE802_11_RADIO && dlt != DLT_IEEE802_11) {
             lastError_ = "interface is not in monitor mode (unexpected DLT)";
@@ -60,40 +91,100 @@ public:
             return false;
         }
         hasRadiotap_ = (dlt == DLT_IEEE802_11_RADIO);
-        if (pcap_setnonblock(handle_, 1, errbuf) != 0) {
-            lastError_ = errbuf;  // non-fatal: poll still works, just may block briefly
-        }
-        running_ = true;
+        openDumper();
+
+        stopRequested_.store(false, std::memory_order_release);
+        running_.store(true, std::memory_order_release);
+        worker_ = std::thread([this]() { captureLoop(); });
         return true;
     }
 
     std::vector<sec::CapturedFrame> poll() override {
-        pending_.clear();
-        if (handle_ == nullptr) {
-            return pending_;
+        std::deque<sec::CapturedFrame> drained;
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            drained.swap(queue_);
         }
-        // Drain up to a bounded number of frames per poll to keep the UI responsive.
-        const int n = pcap_dispatch(handle_, 64, &NativeCaptureSource::trampoline,
-                                    reinterpret_cast<u_char*>(this));
-        if (n < 0) {
-            lastError_ = pcap_geterr(handle_);
-            stop();
+        std::vector<sec::CapturedFrame> out;
+        out.reserve(drained.size());
+        for (auto& f : drained) {
+            out.push_back(std::move(f));
         }
-        return pending_;
+        return out;
     }
 
     void stop() override {
+        stopRequested_.store(true, std::memory_order_release);
+        if (handle_ != nullptr) {
+            pcap_breakloop(handle_);
+        }
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        running_.store(false, std::memory_order_release);
+        closeDumper();
         if (handle_ != nullptr) {
             pcap_close(handle_);
             handle_ = nullptr;
         }
-        running_ = false;
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        queue_.clear();
     }
 
-    bool running() const override { return running_; }
+    bool running() const override { return running_.load(std::memory_order_acquire); }
     const std::string& lastError() const { return lastError_; }
 
 private:
+    void captureLoop() {
+        while (!stopRequested_.load(std::memory_order_acquire)) {
+            const int n = pcap_dispatch(handle_, 256, &NativeCaptureSource::trampoline,
+                                        reinterpret_cast<u_char*>(this));
+            if (n == PCAP_ERROR_BREAK || stopRequested_.load(std::memory_order_acquire)) {
+                break;
+            }
+            if (n < 0) {
+                lastError_ = pcap_geterr(handle_);
+                break;
+            }
+        }
+        running_.store(false, std::memory_order_release);
+    }
+
+    void openDumper() {
+        closeDumper();
+        if (dumpPath_.empty() || handle_ == nullptr) {
+            return;
+        }
+        const int fd = ::open(dumpPath_.c_str(),
+                              O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            return;
+        }
+        struct stat st {};
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || ::ftruncate(fd, 0) != 0) {
+            ::close(fd);
+            return;
+        }
+        (void)::fchmod(fd, 0600);
+        FILE* fp = ::fdopen(fd, "wb");
+        if (fp == nullptr) {
+            ::close(fd);
+            return;
+        }
+        dumper_ = pcap_dump_fopen(handle_, fp);
+        if (dumper_ == nullptr) {
+            ::fclose(fp);
+        }
+    }
+
+    void closeDumper() {
+        if (dumper_ != nullptr) {
+            pcap_dump_flush(dumper_);
+            pcap_dump_close(dumper_);
+            dumper_ = nullptr;
+        }
+    }
+
     static void trampoline(u_char* user, const struct pcap_pkthdr* h, const u_char* bytes) {
         auto* self = reinterpret_cast<NativeCaptureSource*>(user);
         const uint32_t now = linux_app::nowMs();
@@ -104,14 +195,28 @@ private:
             f = decodeDot11(bytes, h->caplen, now, -100);
         }
         if (f.has_value()) {
-            self->pending_.push_back(*f);
+            if (self->dumper_ != nullptr &&
+                (f->kind == sec::FrameKind::Beacon || f->kind == sec::FrameKind::Eapol ||
+                 f->kind == sec::FrameKind::Pmkid)) {
+                pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+            }
+            std::lock_guard<std::mutex> lock(self->queueMutex_);
+            if (self->queue_.size() >= kMaxQueuedFrames) {
+                self->queue_.pop_front();
+            }
+            self->queue_.push_back(std::move(*f));
         }
     }
 
     pcap_t* handle_ = nullptr;
+    pcap_dumper_t* dumper_ = nullptr;
     bool hasRadiotap_ = true;
-    bool running_ = false;
-    std::vector<sec::CapturedFrame> pending_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> stopRequested_{false};
+    std::thread worker_;
+    std::mutex queueMutex_;
+    std::deque<sec::CapturedFrame> queue_;
+    std::string dumpPath_;
     std::string lastError_;
 };
 
@@ -139,6 +244,11 @@ public:
             res.detail = "bad BSSID";
             return res;
         }
+        if (!sec::isValidClientTarget(client)) {
+            res.transmitted = false;
+            res.detail = "bad client MAC";
+            return res;
+        }
         const bool broadcast = client.empty() || sec::isBroadcastMac(sec::normalizeMac(client));
         if (broadcast) {
             std::memset(sta, 0xFF, 6);
@@ -156,8 +266,8 @@ public:
                 ++sent;
             }
             // client -> AP (targeted only), as aireplay does, to hit both directions.
-            if (!broadcast) {
-                sendDeauth(ap, sta, ap);
+            if (!broadcast && sendDeauth(ap, sta, ap)) {
+                ++sent;
             }
         }
         if (sent == 0) {
@@ -191,6 +301,7 @@ private:
             lastError_ = errbuf;
             return false;
         }
+        setPcapCloexec(handle_);
         openedIface_ = curIface;
         return true;
     }

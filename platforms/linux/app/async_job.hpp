@@ -49,14 +49,23 @@ public:
         }
         running_.store(true, std::memory_order_release);
         thread_ = std::thread([this, fn = std::forward<Fn>(fn)]() mutable {
-            T value = fn();
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                result_ = std::move(value);
+                auto localFn = std::move(fn);
+                T value = localFn();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    result_ = std::move(value);
+                }
             }
             running_.store(false, std::memory_order_release);
         });
         return true;
+    }
+
+    void wait() {
+        if (thread_.joinable()) {
+            thread_.join();
+        }
     }
 
     bool running() const { return running_.load(std::memory_order_acquire); }

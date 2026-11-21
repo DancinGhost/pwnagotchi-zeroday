@@ -192,6 +192,13 @@ struct ChannelBarView {
     int16_t heightPx;
 };
 
+enum class ActivityScene : uint8_t {
+    None = 0,
+    RadarDish,
+    SatelliteBeam,
+    ThreatShield
+};
+
 // Transient overlay announcing the active theme after a switch.
 struct ToastView {
     bool visible = false;
@@ -217,7 +224,8 @@ inline ToastView buildThemeToast(const AppState& state,
     const std::string label = themeLabel(state.theme);
     const std::string position =
         std::to_string(themeIndex(state.theme) + 1u) + "/" + std::to_string(kThemeCount);
-    const std::size_t maxChars = static_cast<std::size_t>((dims.width - 16) / 6);
+    const std::size_t maxChars =
+        static_cast<std::size_t>((std::max)(8, (static_cast<int>(dims.width) - 16) / 6));
     t.text = truncateText(compact ? ("< " + label + " >")
                                   : ("THEME " + position + ": " + label),
                           maxChars);
@@ -269,11 +277,26 @@ struct UiFrame {
     int16_t chartMaxBarH;
     std::string spectrumSummary;
 
-    // Theming
+    // RfGuard (BLE + Sub-GHz) page fields
+    std::vector<RadarRowView> rfGuardRows;
+    std::string rfGuardSummary;
+    std::string rfGuardEmptyHint;
+
+    // Theming & Ops HUD
     ThemeId theme;
     ThemeEffect themeEffect;
     uint32_t animTick;
     ToastView toast;
+    bool offensiveArmed = false;
+    OpsMode opsMode = OpsMode::Recon;
+    std::string modeBadge;
+    uint8_t level = 1;
+    uint32_t xp = 0;
+    uint32_t highScore = 0;
+    uint8_t xpProgressPct = 0;
+    std::string rankLine;
+    ActivityScene scene = ActivityScene::None;
+    std::string threatBanner;
 };
 
 // Pure responsive layout & view-model projection: (AppState, ScreenDimensions) -> UiFrame
@@ -295,8 +318,17 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     const int16_t footerDivY = static_cast<int16_t>(dims.height - footerH - 1);
 
     // Dynamic 6px monospace character budget (20 on 128px, 26 on 160px, 39 on 240px, 52 on 320px).
+    // Always reserve space on the right for the active ops mode badge ([RCN]/[DEF]/[OFF]/[ARMED]).
     const std::size_t maxFrameCols =
         static_cast<std::size_t>((std::max)(12, (static_cast<int>(dims.width) - 4) / 6));
+    const OpsMode effectiveMode = state.offensiveArmed ? OpsMode::Offensive : state.opsMode;
+    const std::string modeBadge =
+        state.offensiveArmed
+            ? (compact ? std::string("[ARM]") : std::string("[ARMED]"))
+            : ("[" + std::string(opsModeLabel(effectiveMode, compact)) + "]");
+    const std::size_t armBadgeCols = modeBadge.size() + 1u;
+    const std::size_t maxHeaderCols =
+        (maxFrameCols > armBadgeCols + 6u) ? (maxFrameCols - armBadgeCols) : maxFrameCols;
 
     // Header text
     const std::string chText =
@@ -319,9 +351,12 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     } else {
         const std::string peakPart =
             "(" + std::to_string(state.peakApCount) + ")";
-        headerLine = chText + "  " + apText + peakPart + "  " + upText + "  " + batText;
+        headerLine = (maxHeaderCols <= 34u)
+                         ? (chText + " " + apText + peakPart + " " +
+                            formatUptime(state.uptimeMs, false) + " " + batText)
+                         : (chText + "  " + apText + peakPart + "  " + upText + "  " + batText);
     }
-    headerLine = truncateText(headerLine, maxFrameCols);
+    headerLine = truncateText(headerLine, maxHeaderCols);
 
     // Footer text
     std::string footerLine;
@@ -435,15 +470,42 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         speechTopY = static_cast<int16_t>(bodyTop + 6);
         lineStepY = 12;
         speechCols = static_cast<std::size_t>((dims.width - speechX - 4) / 6);
-        speechMaxLines = (bodyH >= 92) ? 5u : 4u;
+        speechMaxLines = (bodyH >= 110) ? 4u : 3u;
     }
 
-    const std::string promptLabel = truncateText(state.petName + ">", speechCols);
+    const ActivityScene scene =
+        state.isScanning
+            ? ActivityScene::RadarDish
+            : ((effectiveMode == OpsMode::Offensive)
+                   ? ActivityScene::SatelliteBeam
+                   : ((effectiveMode == OpsMode::Defensive || state.mood == Mood::ThreatAlert)
+                          ? ActivityScene::ThreatShield
+                          : ActivityScene::None));
+
+    const std::size_t promptMaxCols =
+        (scene != ActivityScene::None && speechCols > 5u) ? (speechCols - (compact ? 4u : 5u))
+                                                          : speechCols;
+    const std::string promptLabel = truncateText(state.petName + ">", promptMaxCols);
     const std::vector<std::string> wrappedPhrase =
         wrapWords(state.phrase, speechCols, speechMaxLines);
 
+    const LevelInfo lvlInfo = deriveLevelInfo(state.xp);
+    std::string rankLine;
+    if (!compact) {
+        rankLine = truncateText(
+            "LV" + std::to_string(lvlInfo.level) + " HI:" + std::to_string(state.highScore),
+            speechCols > 7u ? (speechCols - 6u) : speechCols);
+    }
+
+    std::string threatBanner;
+    if (!state.lastThreatLabel.empty()) {
+        threatBanner = truncateText("! " + state.lastThreatLabel, speechCols);
+    }
+
     std::string spotlightLabel;
-    if (!compact && state.latestScan.totalAps > 0u && !state.latestScan.strongestSsid.empty()) {
+    if (!compact && !threatBanner.empty()) {
+        spotlightLabel = threatBanner;
+    } else if (!compact && state.latestScan.totalAps > 0u && !state.latestScan.strongestSsid.empty()) {
         const std::string rawSpot =
             "> " + state.latestScan.strongestSsid + " (" +
             std::to_string(state.latestScan.strongestRssi) + ")";
@@ -511,6 +573,60 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
             : ("2.4GHz CH 1-13 | SEC:" + std::to_string(state.latestScan.secureAps) +
                " OPEN:" + std::to_string(state.latestScan.openAps));
 
+    // RfGuard (BLE + Sub-GHz CC1101) rows
+    std::size_t bleThreatCnt = 0u;
+    for (const BleDevice& d : state.bleDevices) {
+        if (d.threat != BleThreatKind::None) {
+            ++bleThreatCnt;
+        }
+    }
+    const std::string rfGuardSummary =
+        compact
+            ? ("B:" + std::to_string(state.bleDevices.size()) +
+               " T:" + std::to_string(bleThreatCnt) + " " +
+               formatFreqMhz(state.subGhzFreqKhz))
+            : ("BLE:" + std::to_string(state.bleDevices.size()) +
+               " TAG:" + std::to_string(bleThreatCnt) + " | SUB:" +
+               formatFreqMhz(state.subGhzFreqKhz));
+
+    const std::size_t maxGuardRows = (maxRadarRows > 1u) ? (maxRadarRows - 1u) : 1u;
+    std::vector<RadarRowView> rfGuardRows;
+    for (const BleDevice& d : state.bleDevices) {
+        if (rfGuardRows.size() >= maxGuardRows) {
+            break;
+        }
+        const bool isThreat = (d.threat != BleThreatKind::None);
+        const std::string title = isThreat
+                                      ? ("[" + std::string(bleThreatLabel(d.threat)) + "] " +
+                                         (d.name.empty() ? d.mac : d.name))
+                                      : (d.name.empty() ? d.mac : d.name);
+        const std::string detail = "BLE " + std::to_string(d.rssi);
+        rfGuardRows.push_back(RadarRowView{
+            truncateText(title, maxSsidChars),
+            detail,
+            rssiToBars(d.rssi),
+            isThreat
+        });
+    }
+    for (const SubGhzSignal& sig : state.subGhzSignals) {
+        if (rfGuardRows.size() >= maxGuardRows) {
+            break;
+        }
+        const bool isAnom = (sig.anomaly != SubGhzAnomaly::None);
+        const std::string title =
+            formatFreqMhz(sig.freqKhz) + " " + sig.protocol +
+            (isAnom ? (" " + std::string(subGhzAnomalyLabel(sig.anomaly))) : "");
+        const std::string detail = "SUB " + std::to_string(sig.rssi);
+        rfGuardRows.push_back(RadarRowView{
+            truncateText(title, maxSsidChars),
+            detail,
+            rssiToBars(sig.rssi),
+            isAnom
+        });
+    }
+    const std::string rfGuardEmptyHint = truncateText(
+        "RF Guard idle (" + formatFreqMhz(state.subGhzFreqKhz) + ")", maxFrameCols);
+
     return UiFrame{
         dims,
         compact,
@@ -536,10 +652,23 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         chartBaseY,
         chartMaxBarH,
         spectrumSummary,
+        rfGuardRows,
+        rfGuardSummary,
+        rfGuardEmptyHint,
         state.theme,
         themeSpec(state.theme).effect,
         state.uptimeMs / 140u,
-        buildThemeToast(state, dims, compact, bodyTop, bodyBottom)
+        buildThemeToast(state, dims, compact, bodyTop, bodyBottom),
+        state.offensiveArmed,
+        effectiveMode,
+        modeBadge,
+        lvlInfo.level,
+        lvlInfo.xp,
+        state.highScore,
+        lvlInfo.progressPct,
+        rankLine,
+        scene,
+        threatBanner
     };
 }
 
@@ -556,7 +685,7 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
     const std::string border = "+-" + std::string(innerW, '-') + "-+\n";
 
     std::string out = border;
-    out += padLine(frame.headerLine);
+    out += padLine(frame.headerLine + " " + frame.modeBadge);
     out += border;
 
     if (frame.toast.visible) {
@@ -568,7 +697,10 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
         for (const auto& line : frame.phraseLines) {
             out += padLine("       " + line);
         }
-        out += padLine("[" + std::string(frame.face.moodLabel) + "] " + frame.spotlightLabel);
+        out += padLine("[" + std::string(frame.face.moodLabel) + "] " + frame.rankLine);
+        if (!frame.spotlightLabel.empty()) {
+            out += padLine("       " + frame.spotlightLabel);
+        }
     } else if (frame.page == ScreenPage::NearbyRadar) {
         out += padLine("NEARBY WIFI RADAR");
         if (frame.radarRows.empty()) {
@@ -579,7 +711,7 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
                 out += padLine(lockChar + row.ssid + " " + row.details);
             }
         }
-    } else {
+    } else if (frame.page == ScreenPage::ChannelSpectrum) {
         out += padLine(frame.spectrumSummary);
         std::string countsRow = "CH:";
         for (std::size_t i = 0; i < 13u; ++i) {
@@ -587,6 +719,16 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
             if (i + 1u < 13u) countsRow += " ";
         }
         out += padLine(countsRow);
+    } else {
+        out += padLine(frame.rfGuardSummary);
+        if (frame.rfGuardRows.empty()) {
+            out += padLine(frame.rfGuardEmptyHint);
+        } else {
+            for (const auto& row : frame.rfGuardRows) {
+                const std::string alertChar = row.secure ? "!" : " ";
+                out += padLine(alertChar + row.ssid + " " + row.details);
+            }
+        }
     }
 
     out += border;

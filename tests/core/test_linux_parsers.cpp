@@ -206,7 +206,7 @@ void testMalformedAndTruncatedFrames() {
         "0.0.0.0, 12, Coffee, Tea, \r\n";
     const AirodumpDump cd = parseAirodumpCsv(commaCsv);
     assert(cd.aps.size() == 1u);
-    assert(cd.aps[0].ssid == "Coffee,Tea");
+    assert(cd.aps[0].ssid == "Coffee, Tea");
     assert(cd.aps[0].beacons == 0u);
 }
 
@@ -226,20 +226,44 @@ void testEapolPmkidAndRsnOui() {
     };
     assert(encryptionFromRsn(ieeeSaeRsn, sizeof(ieeeSaeRsn)) == zd::sec::Encryption::Wpa3);
 
-    // 2. EAPOL-Key frame whose MAC address happens to contain 00:0F:AC:04 must NOT trigger PMKID.
+    // 2. EAPOL-Key M1 vs M2, station extraction, Protected/NullData rejection & extended Radiotap.
     std::vector<uint8_t> eapolNoPmkid = minimalRadiotap();
     append(eapolNoPmkid, {0x08, 0x02, 0x00, 0x00});                 // Data, FromDS
-    append(eapolNoPmkid, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66});     // addr1 DA
+    append(eapolNoPmkid, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66});     // addr1 DA (STA)
     append(eapolNoPmkid, {0x00, 0x0F, 0xAC, 0x04, 0xAA, 0xBB});     // addr2 BSSID has 00:0F:AC:04!
     append(eapolNoPmkid, {0x00, 0x0F, 0xAC, 0x04, 0xAA, 0xBB});     // addr3 SA
     append(eapolNoPmkid, {0x00, 0x00});
     append(eapolNoPmkid, {0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8E});  // LLC/SNAP EAPOL
     append(eapolNoPmkid, {0x02, 0x03, 0x00, 0x5F});                 // EAPOL v2, type=Key(3), len=95
-    eapolNoPmkid.insert(eapolNoPmkid.end(), 95u, 0x00);             // 95-byte EAPOL-Key body, keyDataLen=0
+    // 95-byte EAPOL-Key body: descType=2, keyInfo=0x008A (Ack+Pairwise -> M1!)
+    eapolNoPmkid.push_back(0x02);
+    eapolNoPmkid.push_back(0x00);
+    eapolNoPmkid.push_back(0x8A);
+    eapolNoPmkid.insert(eapolNoPmkid.end(), 92u, 0x00);
     const auto d1 = decodeRadiotapFrame(eapolNoPmkid.data(), eapolNoPmkid.size(), 100u);
     assert(d1.has_value());
     assert(d1->kind == zd::sec::FrameKind::Eapol);
     assert(d1->bssid == "00:0f:ac:04:aa:bb");
+    assert(d1->hasStation && d1->station == "11:22:33:44:55:66");
+    assert(d1->eapolMsg == 1u);
+
+    // Protected bit (0x40) must NOT look like unencrypted LLC/SNAP EAPOL.
+    std::vector<uint8_t> protectedData = eapolNoPmkid;
+    protectedData[8u + 1u] = 0x42;  // FromDS + Protected
+    const auto dProt = decodeRadiotapFrame(protectedData.data(), protectedData.size(), 110u);
+    assert(dProt.has_value());
+    assert(dProt->kind == zd::sec::FrameKind::Data);
+
+    // Radiotap with extended-present bit31 skips 4-byte extended present word safely.
+    std::vector<uint8_t> extRt = {0x00, 0x00, 12, 0, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00};
+    append(extRt, {0xC0, 0x00, 0x00, 0x00});
+    append(extRt, {0x99, 0x88, 0x77, 0x66, 0x55, 0x44});
+    append(extRt, {0x00, 0x11, 0x22, 0x33, 0x44, 0x55});
+    append(extRt, {0x00, 0x11, 0x22, 0x33, 0x44, 0x55});
+    append(extRt, {0x00, 0x00});
+    const auto dExt = decodeRadiotapFrame(extRt.data(), extRt.size(), 120u);
+    assert(dExt.has_value());
+    assert(dExt->kind == zd::sec::FrameKind::Deauth);
 
     // 3. EAPOL-Key frame with a real non-zero PMKID KDE in Key Data triggers FrameKind::Pmkid.
     std::vector<uint8_t> eapolWithPmkid = eapolNoPmkid;
@@ -256,6 +280,25 @@ void testEapolPmkidAndRsnOui() {
     assert(d2->kind == zd::sec::FrameKind::Pmkid);
 }
 
+void testBleAndSubGhzParsers() {
+    const auto b1 = parseBluezBleLine("7A:3C:91:04:88:12|-54|Tracker_Tag|0x004C|0x0000|1");
+    assert(b1.has_value());
+    assert(b1->mac == "7a:3c:91:04:88:12");
+    assert(b1->threat == zd::BleThreatKind::AirTagTracker);
+
+    const auto b2 = parseBluezBleLine("Device 00:80:E1:11:22:33 MultiTool_Unit");
+    assert(b2.has_value());
+    assert(b2->threat == zd::BleThreatKind::MultiToolBle);
+
+    const auto s1 = parseRtl433Line("SUBGHZ|433920|-52|OOK|6|0");
+    assert(s1.has_value());
+    assert(s1->freqKhz == 433920u && s1->burstCount == 6u && !s1->continuousCarrier);
+
+    const auto s2 = parseRtl433Line("868.35MHz|-45|FSK|10|1");
+    assert(s2.has_value());
+    assert(s2->freqKhz == 868350u && s2->continuousCarrier);
+}
+
 }  // namespace
 
 int main() {
@@ -267,6 +310,7 @@ int main() {
     testDecodedFrameFeedsEngine();
     testMalformedAndTruncatedFrames();
     testEapolPmkidAndRsnOui();
+    testBleAndSubGhzParsers();
     std::cout << "[linux-parsers] all backend parser/decoder tests passed\n";
     return 0;
 }

@@ -11,7 +11,7 @@ pwnagotchi-zeroday/
 ├── core/include/zd/              # Layer 1: Zero-dependency C++17 Functional Core + HAL
 │   ├── fp.hpp                    # Pure higher-order combinators & stateless xorshift32 PRNG
 │   ├── domain.hpp                # Immutable AppState, ThemeId, and semantic AppEvents
-│   ├── theme.hpp                 # 14-theme RGB888 catalog, effects & RGB565 / Luma helpers
+│   ├── theme.hpp                 # 6-theme RGB888 catalog, effects & RGB565 / Luma helpers
 │   ├── wifi_analysis.hpp         # Pure SSID sanitization, mesh deduplication & histograms
 │   ├── pet_logic.hpp             # Pure reducer: reduce(AppState, AppEvent) -> AppState
 │   ├── ui_model.hpp              # Multi-device responsive layout (128x64 up to 320x240+)
@@ -64,14 +64,17 @@ Include [`zd/hal.hpp`](../core/include/zd/hal.hpp) and create a `platforms/<your
    - *Raw SPI TFT / Linux `/dev/fb0` / SDL*: render into `zd::render::Rgb565Surface surf(w, h); zd::render::paintUiFrame(surf, frame);` and blit `surf.pixels()` or `surf.toRgb888Buffer()`.
    - *1-Bit Monochrome OLED / Waveshare e-Paper*: render into `zd::render::Rgb565Surface`, then call `surf.toMono1BitPacked(frame.palette.bg)` for a ready-to-clock MSB-first 1-bit bitmap!
 3. **`zd::hal::IPowerSensor`** *(optional)* — return `{batteryPercent, isCharging}`, or use `zd::hal::FixedPowerSensor` on USB-powered boards.
-4. **`zd::hal::IThemeStore`** *(optional)* — persist `std::string_view key` (`"neon"`, `"operator"`, ...) to NVS, LittleFS, EEPROM, or `~/.config/`, or use `zd::hal::MemoryThemeStore`. `zd::hal::PlatformSession` only writes when the theme actually changes to avoid flash wear.
+4. **`zd::hal::IThemeStore`** *(optional)* — persist `std::string_view key` (`"cyan"`, `"blueteam"`, ...) and `highScore` (`loadHighScore`/`saveHighScore`) to NVS, LittleFS, EEPROM, or `~/.config/`, or use `zd::hal::MemoryThemeStore`. `zd::hal::PlatformSession` only writes when values change to avoid flash wear.
+5. **`zd::hal::IBleScanner` / `zd::hal::ISubGhzRadio`** *(optional)* — passive BLE tracker/multi-tool advertisements and CC1101 Sub-GHz burst/carrier telemetry fed via `PlatformSession::stepMultiRadio()`.
 
 ### Mapping Diverse Input Controls
 
 Devices are not limited to 2 buttons — map physical buttons, D-pads, rotary encoders, touchscreens, or keyboards onto semantic events in [`core/include/zd/domain.hpp`](../core/include/zd/domain.hpp):
 
-- `zd::CyclePageEvent{nowMs, +1}` / `zd::CyclePageEvent{nowMs, -1}` / `zd::SetPageEvent{nowMs, page}`
+- `zd::CyclePageEvent{nowMs, +1}` / `zd::CyclePageEvent{nowMs, -1}` / `zd::SetPageEvent{nowMs, page}` (`PetFace`, `NearbyRadar`, `ChannelSpectrum`, `RfGuard`)
 - `zd::CycleThemeEvent{nowMs, +1}` / `zd::CycleThemeEvent{nowMs, -1}` / `zd::SetThemeEvent{nowMs, theme}`
+- `zd::CycleOpsModeEvent{nowMs}` / `zd::SetOpsModeEvent{nowMs, mode}` (`Recon`, `Defensive`, `Offensive`)
+- `zd::SetSubGhzFreqEvent{nowMs, freqKhz}` (`315000` / `433920` / `868350` / `915000`)
 - `zd::ButtonBPressedEvent{nowMs}` (request immediate scan)
 
 Finally, add a PlatformIO `[env:<your-board>]` section in [`platformio.ini`](../platformio.ini) with `build_src_filter = -<*> +<<your_device>/*>` (or a CMake executable target in [`CMakeLists.txt`](../CMakeLists.txt)).

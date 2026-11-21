@@ -8,6 +8,8 @@
 # Local host test binaries
 build/
 build_cmake/
+build_san/
+build_verify/
 dist/
 dist_release/
 test_runner

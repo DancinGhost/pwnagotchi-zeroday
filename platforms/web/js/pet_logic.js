@@ -1,5 +1,5 @@
 // Pure domain state, Pwnagotchi moods/faces, phrase PRNG & reducer
-// (ported from include/domain.hpp & include/pet_logic.hpp + playful hacker toy extensions).
+// (ported from core/include/zd/domain.hpp & core/include/zd/pet_logic.hpp + playful hacker toy extensions).
 (function (root) {
   'use strict';
 
@@ -11,6 +11,26 @@
     (root.ZD && root.ZD.themes) ||
     (typeof require === 'function' ? require('./themes.js') : null);
 
+  const OpsMode = Object.freeze({
+    Recon: 'Recon',
+    Defensive: 'Defensive',
+    Offensive: 'Offensive'
+  });
+
+  function opsModeLabel(mode, compact) {
+    switch (mode) {
+      case OpsMode.Defensive: return compact ? 'DEF' : 'DEFENSE';
+      case OpsMode.Offensive: return compact ? 'OFF' : 'OFFENSE';
+      default: return compact ? 'RCN' : 'RECON';
+    }
+  }
+
+  function cycleOpsMode(current) {
+    if (current === OpsMode.Recon) return OpsMode.Defensive;
+    if (current === OpsMode.Defensive) return OpsMode.Offensive;
+    return OpsMode.Recon;
+  }
+
   const Mood = Object.freeze({
     Awake: 'Awake',
     LookingLeft: 'LookingLeft',
@@ -21,15 +41,20 @@
     Lonely: 'Lonely',
     Bored: 'Bored',
     Sleepy: 'Sleepy',
-    // Playful web-toy bonus moods
     Grateful: 'Grateful',
-    Mischief: 'Mischief'
+    Mischief: 'Mischief',
+    ScanningDish: 'ScanningDish',
+    CyberAttack: 'CyberAttack',
+    ShieldGuard: 'ShieldGuard',
+    ThreatAlert: 'ThreatAlert',
+    LevelUp: 'LevelUp'
   });
 
   const ScreenPage = Object.freeze({
     PetFace: 'PetFace',
     NearbyRadar: 'NearbyRadar',
-    ChannelSpectrum: 'ChannelSpectrum'
+    ChannelSpectrum: 'ChannelSpectrum',
+    RfGuard: 'RfGuard'
   });
 
   const ThemeId = themes.ThemeId;
@@ -44,7 +69,11 @@
     SadDroop: 'SadDroop',
     HalfLid: 'HalfLid',
     SleepingLine: 'SleepingLine',
-    CyberWink: 'CyberWink'
+    CyberWink: 'CyberWink',
+    LaserVisor: 'LaserVisor',
+    ShieldVisor: 'ShieldVisor',
+    StarEyes: 'StarEyes',
+    AlertRing: 'AlertRing'
   });
 
   const MouthGlyph = Object.freeze({
@@ -52,7 +81,8 @@
     BigGrin: 'BigGrin',
     Smirk: 'Smirk',
     FlatLine: 'FlatLine',
-    SadWave: 'SadWave'
+    SadWave: 'SadWave',
+    Fangs: 'Fangs'
   });
 
   function faceForMood(mood) {
@@ -160,12 +190,62 @@
       case Mood.Mischief:
         return {
           eyes: EyeGlyph.CyberWink,
-          mouth: MouthGlyph.Smirk,
+          mouth: MouthGlyph.Fangs,
           showBlush: true,
           showTear: false,
           showZzz: false,
           asciiFace: '(>_*)',
           moodLabel: 'PWN!'
+        };
+      case Mood.ScanningDish:
+        return {
+          eyes: EyeGlyph.RoundLeft,
+          mouth: MouthGlyph.FlatLine,
+          showBlush: false,
+          showTear: false,
+          showZzz: false,
+          asciiFace: '((o_o))',
+          moodLabel: 'DISH'
+        };
+      case Mood.CyberAttack:
+        return {
+          eyes: EyeGlyph.LaserVisor,
+          mouth: MouthGlyph.Fangs,
+          showBlush: false,
+          showTear: false,
+          showZzz: false,
+          asciiFace: '[>_<]',
+          moodLabel: 'STRIKE'
+        };
+      case Mood.ShieldGuard:
+        return {
+          eyes: EyeGlyph.ShieldVisor,
+          mouth: MouthGlyph.FlatLine,
+          showBlush: false,
+          showTear: false,
+          showZzz: false,
+          asciiFace: '[O_O]',
+          moodLabel: 'GUARD'
+        };
+      case Mood.ThreatAlert:
+        return {
+          eyes: EyeGlyph.AlertRing,
+          mouth: MouthGlyph.SadWave,
+          showBlush: false,
+          showTear: false,
+          showZzz: false,
+          asciiFace: '(!_!)',
+          moodLabel: 'ALERT!'
+        };
+      case Mood.LevelUp:
+        return {
+          eyes: EyeGlyph.StarEyes,
+          mouth: MouthGlyph.BigGrin,
+          showBlush: true,
+          showTear: false,
+          showZzz: false,
+          asciiFace: '(*v*)',
+          moodLabel: 'LVL UP'
         };
       default:
         return {
@@ -183,7 +263,8 @@
   const PAGE_ORDER = Object.freeze([
     ScreenPage.PetFace,
     ScreenPage.NearbyRadar,
-    ScreenPage.ChannelSpectrum
+    ScreenPage.ChannelSpectrum,
+    ScreenPage.RfGuard
   ]);
 
   function cyclePage(current, step) {
@@ -332,6 +413,46 @@
         ];
         return fp.pickFrom(seed, kPhrases);
       }
+      case Mood.ScanningDish: {
+        const kPhrases = [
+          'Dish locked! Sweeping RF spectrum...',
+          'Listening across WiFi, BLE & Sub-GHz!',
+          'Parabolic sweep active... ping!'
+        ];
+        return fp.pickFrom(seed, kPhrases);
+      }
+      case Mood.CyberAttack: {
+        const kPhrases = [
+          'OFFENSE ARMED! Satellite uplink hot.',
+          'Authorized strike mode standing by.',
+          'Orbital beam locked on allow-list.'
+        ];
+        return fp.pickFrom(seed, kPhrases);
+      }
+      case Mood.ShieldGuard: {
+        const kPhrases = [
+          'DEFENSE UP! Watching BLE & Sub-GHz.',
+          'Shield grid active. Scanning for tags.',
+          'Guarding airwaves against rogue gear.'
+        ];
+        return fp.pickFrom(seed, kPhrases);
+      }
+      case Mood.ThreatAlert: {
+        const kPhrases = [
+          'ALERT! Suspicious RF/tracker spotted!',
+          'Guard ping! Check RF Guard view!',
+          'Warning: unknown beacon or burst!'
+        ];
+        return fp.pickFrom(seed, kPhrases);
+      }
+      case Mood.LevelUp: {
+        const kPhrases = [
+          'LEVEL UP! New RF rank unlocked!',
+          'XP milestone reached! Highscore up!',
+          'Power-up! Antenna sensitivity boosted!'
+        ];
+        return fp.pickFrom(seed, kPhrases);
+      }
       default:
         return { value: 'Ready.', nextSeed: fp.nextSeed(seed) };
     }
@@ -344,8 +465,12 @@
       { level: 2, minXp: 40, title: 'Beacon Pup' },
       { level: 3, minXp: 110, title: 'Channel Surfer' },
       { level: 4, minXp: 220, title: 'Frame Ninja' },
-      { level: 5, minXp: 380, title: '802.11 Wizard' },
-      { level: 6, minXp: 600, title: 'ZeroDay Legend' }
+      { level: 5, minXp: 380, title: 'Spectrum Scout' },
+      { level: 6, minXp: 600, title: 'BLE Tracker' },
+      { level: 7, minXp: 900, title: 'SubGHz Stalker' },
+      { level: 8, minXp: 1300, title: 'RF Sentinel' },
+      { level: 9, minXp: 1850, title: '802.11 Wizard' },
+      { level: 10, minXp: 2500, title: 'ZeroDay Legend' }
     ];
     let current = tiers[0];
     let nextTier = tiers[1];
@@ -369,6 +494,29 @@
       nextXp,
       progressPct
     };
+  }
+
+  function applyXpFields(state, gain, nowMs) {
+    const prevLevel = state.level || deriveLevelInfo(state.xp).level;
+    const nextXp = (state.xp || 0) + Math.max(0, Math.trunc(gain || 0));
+    const info = deriveLevelInfo(nextXp);
+    const highScore = Math.max(state.highScore || 0, nextXp);
+    let levelUpUntilMs = state.levelUpUntilMs || 0;
+    if (info.level > prevLevel) {
+      levelUpUntilMs = ((nowMs >>> 0) + 2400) >>> 0;
+      if (levelUpUntilMs === 0) levelUpUntilMs = 1;
+    }
+    return { xp: nextXp, highScore, level: info.level, levelUpUntilMs };
+  }
+
+  function idleMoodForState(s) {
+    if (s.offensiveArmed || s.opsMode === OpsMode.Offensive) {
+      return Mood.CyberAttack;
+    }
+    if (s.opsMode === OpsMode.Defensive) {
+      return s.lastThreatLabel ? Mood.ThreatAlert : Mood.ShieldGuard;
+    }
+    return s.hasScannedOnce ? deriveMoodFromScan(s.latestScan) : Mood.Awake;
   }
 
   function sanitizePetName(rawName) {
@@ -402,6 +550,17 @@
       petName: 'zeroday',
       phrase: 'Hello world! Ready to scan.',
       latestScan: wifi.emptyScanSummary(),
+      offensiveArmed: false,
+      // Progression, multi-radio & defensive guard state
+      highScore: 0,
+      level: 1,
+      levelUpUntilMs: 0,
+      opsMode: OpsMode.Recon,
+      bleDevices: Object.freeze([]),
+      subGhzSignals: Object.freeze([]),
+      subGhzFreqKhz: 433920,
+      threatsDetected: 0,
+      lastThreatLabel: '',
       // Playful hacker toy counters
       toyHandshakes: 0,
       snacksFed: 0,
@@ -451,7 +610,7 @@
       page: validPage
     });
     if (!next.isScanning && next.mood === Mood.Sleepy) {
-      next.mood = next.hasScannedOnce ? deriveMoodFromScan(next.latestScan) : Mood.Awake;
+      next.mood = idleMoodForState(next);
       const picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
       next.phrase = picked.value;
       next.rngSeed = picked.nextSeed;
@@ -499,11 +658,33 @@
         if (next.isScanning) {
           const phase = Math.floor((next.uptimeMs - next.lastScanStartMs) / 450) % 2;
           next.scanAnimTick = phase;
-          next.mood = phase === 0 ? Mood.LookingLeft : Mood.LookingRight;
+          next.mood =
+            next.opsMode === OpsMode.Defensive
+              ? Mood.ScanningDish
+              : phase === 0
+                ? Mood.LookingLeft
+                : Mood.LookingRight;
           return Object.freeze(next);
         }
 
-        const quietArea = next.latestScan.totalAps <= 2;
+        if (themes.isThemeToastVisible(next.levelUpUntilMs || 0, next.uptimeMs)) {
+          if (next.mood !== Mood.LevelUp) {
+            next.mood = Mood.LevelUp;
+            const picked = selectPhrase(Mood.LevelUp, next.latestScan, next.rngSeed);
+            next.phrase = picked.value;
+            next.rngSeed = picked.nextSeed;
+            next.lastPhraseChangeMs = next.uptimeMs;
+          }
+          return Object.freeze(next);
+        } else if (next.mood === Mood.LevelUp) {
+          next.levelUpUntilMs = 0;
+          next.mood = idleMoodForState(next);
+        }
+
+        const quietArea =
+          next.latestScan.totalAps <= 2 &&
+          next.opsMode === OpsMode.Recon &&
+          !next.offensiveArmed;
         const idleLong =
           next.uptimeMs - next.lastInteractionMs >= 60000 && next.uptimeMs >= 60000;
 
@@ -514,9 +695,9 @@
           next.rngSeed = picked.nextSeed;
           next.lastPhraseChangeMs = next.uptimeMs;
         } else if (next.uptimeMs - next.lastPhraseChangeMs >= 9000 && next.hasScannedOnce) {
-          // Settle back to natural scan-derived mood after temporary toy excitement
+          // Settle back to natural scan/mode-derived mood after temporary toy excitement
           if (next.mood === Mood.Grateful || next.mood === Mood.Mischief) {
-            next.mood = deriveMoodFromScan(next.latestScan);
+            next.mood = idleMoodForState(next);
           }
           const picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
           next.phrase = picked.value;
@@ -564,7 +745,9 @@
 
       case 'ScanStarted': {
         const now = event.nowMs >>> 0;
-        const picked = selectPhrase(Mood.LookingLeft, state.latestScan, state.rngSeed);
+        const scanMood =
+          state.opsMode === OpsMode.Defensive ? Mood.ScanningDish : Mood.LookingLeft;
+        const picked = selectPhrase(scanMood, state.latestScan, state.rngSeed);
         return Object.freeze(
           Object.assign({}, state, {
             uptimeMs: now,
@@ -572,7 +755,7 @@
             manualScanRequested: false,
             lastScanStartMs: now,
             scanAnimTick: 0,
-            mood: Mood.LookingLeft,
+            mood: scanMood,
             phrase: picked.value,
             rngSeed: picked.nextSeed,
             lastPhraseChangeMs: now
@@ -583,27 +766,164 @@
       case 'ScanCompleted': {
         const now = event.nowMs >>> 0;
         const summary = wifi.summarizeScan(event.rawNetworks || [], 12);
-        const mood = deriveMoodFromScan(summary);
-        const picked = selectPhrase(mood, summary, state.rngSeed);
         const xpGain = summary.totalAps > 0 ? 3 + Math.min(12, Math.floor(summary.totalAps / 2)) : 1;
-
+        const xpFields = applyXpFields(state, xpGain, now);
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          isScanning: false,
+          manualScanRequested: false,
+          hasScannedOnce: true,
+          lastScanCompleteMs: now,
+          completedScans: state.completedScans + 1,
+          peakApCount: Math.max(state.peakApCount, summary.totalAps),
+          latestScan: summary
+        }, xpFields);
+        const mood = idleMoodForState(nextBase);
+        const picked = selectPhrase(mood, summary, state.rngSeed);
         return Object.freeze(
-          Object.assign({}, state, {
-            uptimeMs: now,
-            isScanning: false,
-            manualScanRequested: false,
-            hasScannedOnce: true,
-            lastScanCompleteMs: now,
-            completedScans: state.completedScans + 1,
-            peakApCount: Math.max(state.peakApCount, summary.totalAps),
-            latestScan: summary,
+          Object.assign(nextBase, {
             mood,
             phrase: picked.value,
             rngSeed: picked.nextSeed,
-            lastPhraseChangeMs: now,
-            xp: state.xp + xpGain
+            lastPhraseChangeMs: now
           })
         );
+      }
+
+      case 'CycleOpsMode': {
+        const now = event.nowMs >>> 0;
+        const nextMode = cycleOpsMode(state.opsMode);
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          opsMode: nextMode,
+          offensiveArmed: nextMode === OpsMode.Offensive
+        });
+        if (!nextBase.isScanning) {
+          nextBase.mood = idleMoodForState(nextBase);
+          const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+          nextBase.phrase = picked.value;
+          nextBase.rngSeed = picked.nextSeed;
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SetOpsMode': {
+        const now = event.nowMs >>> 0;
+        const nextMode = Object.values(OpsMode).includes(event.mode) ? event.mode : state.opsMode;
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          opsMode: nextMode,
+          offensiveArmed: nextMode === OpsMode.Offensive
+        });
+        if (!nextBase.isScanning) {
+          nextBase.mood = idleMoodForState(nextBase);
+          const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+          nextBase.phrase = picked.value;
+          nextBase.rngSeed = picked.nextSeed;
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'BleScanCompleted': {
+        const now = event.nowMs >>> 0;
+        const rawDevs = Array.isArray(event.devices) ? event.devices : [];
+        let threatCount = 0;
+        let topThreat = '';
+        let topThreatRssi = -120;
+        const normalized = rawDevs.map(function (d) {
+          const threat =
+            d.threat && d.threat !== wifi.BleThreatKind.None
+              ? d.threat
+              : wifi.classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid, d.trackerPayload);
+          if (threat !== wifi.BleThreatKind.None) {
+            threatCount++;
+            if ((d.rssi || -100) > topThreatRssi) {
+              topThreatRssi = d.rssi || -100;
+              topThreat = wifi.bleThreatLabel(threat) + ' ' + topThreatRssi + 'dB';
+            }
+          }
+          return Object.freeze(Object.assign({}, d, { threat }));
+        });
+        normalized.sort(function (a, b) {
+          const ta = a.threat !== wifi.BleThreatKind.None ? 1 : 0;
+          const tb = b.threat !== wifi.BleThreatKind.None ? 1 : 0;
+          if (ta !== tb) return tb - ta;
+          return (b.rssi || -100) - (a.rssi || -100);
+        });
+        const trimmed = normalized.slice(0, 16);
+        const xpGain = threatCount > 0 ? 25 : trimmed.length > 0 ? 4 : 1;
+        const xpFields = applyXpFields(state, xpGain, now);
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          bleDevices: Object.freeze(trimmed),
+          threatsDetected: (state.threatsDetected || 0) + threatCount,
+          lastThreatLabel: topThreat || state.lastThreatLabel
+        }, xpFields);
+        if (threatCount > 0 && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
+          nextBase.mood = Mood.ThreatAlert;
+          nextBase.phrase = 'DEFENSE! ' + topThreat + ' nearby!';
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SubGhzObserved': {
+        const now = event.nowMs >>> 0;
+        const sig = Object.freeze(Object.assign({
+          freqKhz: 433920,
+          rssi: -60,
+          protocol: 'OOK',
+          burstCount: 1,
+          anomaly: wifi.SubGhzAnomaly.None
+        }, event.signal || {}));
+        const list = [sig].concat(state.subGhzSignals || []).slice(0, 12);
+        const isAnom = sig.anomaly && sig.anomaly !== wifi.SubGhzAnomaly.None;
+        const xpFields = applyXpFields(state, isAnom ? 25 : 10, now);
+        const threatLbl = isAnom
+          ? wifi.formatFreqMhz(sig.freqKhz) + ' ' + wifi.subGhzAnomalyLabel(sig.anomaly)
+          : state.lastThreatLabel;
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          subGhzFreqKhz: sig.freqKhz,
+          subGhzSignals: Object.freeze(list),
+          threatsDetected: (state.threatsDetected || 0) + (isAnom ? 1 : 0),
+          lastThreatLabel: threatLbl
+        }, xpFields);
+        if (isAnom && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
+          nextBase.mood = Mood.ThreatAlert;
+          nextBase.phrase = 'SUBGHZ! ' + threatLbl;
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SetSubGhzFreq': {
+        const now = event.nowMs >>> 0;
+        const freq = Math.trunc(event.freqKhz || 433920);
+        if (freq < 300000 || freq > 928000) return state;
+        return Object.freeze(Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          subGhzFreqKhz: freq,
+          phrase: 'CC1101 tuned to ' + wifi.formatFreqMhz(freq),
+          lastPhraseChangeMs: now
+        }));
+      }
+
+      case 'SetHighScore': {
+        const now = event.nowMs >>> 0;
+        const xp = Math.max(state.xp || 0, Math.trunc(event.xp || 0));
+        const hi = Math.max(state.highScore || 0, Math.trunc(event.highScore || 0), xp);
+        return Object.freeze(Object.assign({}, state, {
+          uptimeMs: now,
+          xp,
+          highScore: hi,
+          level: deriveLevelInfo(xp).level
+        }));
       }
 
       // --- Playful Web-Toy Events ---
@@ -625,9 +945,8 @@
             phrase: picked.value,
             rngSeed: picked.nextSeed,
             lastPhraseChangeMs: now,
-            pokesCount: state.pokesCount + 1,
-            xp: state.xp + 5
-          })
+            pokesCount: state.pokesCount + 1
+          }, applyXpFields(state, 5, now))
         );
       }
 
@@ -649,9 +968,8 @@
             phrase: picked.value,
             rngSeed: picked.nextSeed,
             lastPhraseChangeMs: now,
-            snacksFed: state.snacksFed + 1,
-            xp: state.xp + 10
-          })
+            snacksFed: state.snacksFed + 1
+          }, applyXpFields(state, 10, now))
         );
       }
 
@@ -677,9 +995,8 @@
             phrase: picked.value,
             rngSeed: picked.nextSeed,
             lastPhraseChangeMs: now,
-            toyHandshakes: count,
-            xp: state.xp + 25
-          })
+            toyHandshakes: count
+          }, applyXpFields(state, 25, now))
         );
       }
 
@@ -704,9 +1021,8 @@
             rngSeed: picked.nextSeed,
             lastPhraseChangeMs: now,
             peersMet: state.peersMet + 1,
-            lastPeerName: peer,
-            xp: state.xp + 20
-          })
+            lastPeerName: peer
+          }, applyXpFields(state, 20, now))
         );
       }
 
@@ -738,6 +1054,9 @@
   }
 
   const petLogic = Object.freeze({
+    OpsMode,
+    opsModeLabel,
+    cycleOpsMode,
     Mood,
     ScreenPage,
     ThemeId,

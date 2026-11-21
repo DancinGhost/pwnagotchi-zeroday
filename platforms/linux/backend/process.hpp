@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -66,14 +67,28 @@ inline std::string resolveTrustedExecutable(const std::string& prog) {
     if (prog.empty()) {
         return {};
     }
+    static constexpr const char* kTrustedDirs[] = {"/usr/sbin", "/sbin", "/usr/bin", "/bin"};
     if (prog.front() == '/') {
+        if (prog.find("..") != std::string::npos) {
+            return {};
+        }
+        bool inTrusted = false;
+        for (const char* dir : kTrustedDirs) {
+            const std::string prefix = std::string(dir) + "/";
+            if (prog.rfind(prefix, 0) == 0 && prog.find('/', prefix.size()) == std::string::npos) {
+                inTrusted = true;
+                break;
+            }
+        }
+        if (!inTrusted) {
+            return {};
+        }
         return isTrustedExecutable(prog) ? prog : std::string{};
     }
     // Reject relative paths containing '/'.
     if (prog.find('/') != std::string::npos) {
         return {};
     }
-    static constexpr const char* kTrustedDirs[] = {"/usr/sbin", "/sbin", "/usr/bin", "/bin"};
     for (const char* dir : kTrustedDirs) {
         const std::string candidate = std::string(dir) + "/" + prog;
         if (isTrustedExecutable(candidate)) {
@@ -81,6 +96,36 @@ inline std::string resolveTrustedExecutable(const std::string& prog) {
         }
     }
     return {};
+}
+
+// Async-signal-safe minimal environment for privileged subprocesses.
+inline char* const* safeEnviron() noexcept {
+    static char envPath[] = "PATH=/usr/sbin:/sbin:/usr/bin:/bin";
+    static char envLc[]   = "LC_ALL=C";
+    static char envLang[] = "LANG=C";
+    static char envTerm[] = "TERM=dumb";
+    static char* const kEnv[] = {envPath, envLc, envLang, envTerm, nullptr};
+    return kEnv;
+}
+
+inline int safeMaxFd() noexcept {
+    long m = ::sysconf(_SC_OPEN_MAX);
+    if (m < 256 || m > 4096) {
+        m = 1024;
+    }
+    return static_cast<int>(m);
+}
+
+// Async-signal-safe close of all FDs >= 3 before execve().
+inline void closeNonStdioFds(int maxFd) noexcept {
+#if defined(__linux__) && defined(SYS_close_range)
+    if (::syscall(SYS_close_range, 3u, ~0u, 0u) == 0) {
+        return;
+    }
+#endif
+    for (int fd = 3; fd < maxFd; ++fd) {
+        ::close(fd);
+    }
 }
 
 inline pid_t waitpidNoIntr(pid_t pid, int* status, int options) {
@@ -95,6 +140,7 @@ inline void terminateChild(pid_t pid) {
     if (pid <= 0) {
         return;
     }
+    ::kill(-pid, SIGTERM);
     ::kill(pid, SIGTERM);
     for (int i = 0; i < 10; ++i) {
         int st = 0;
@@ -103,6 +149,7 @@ inline void terminateChild(pid_t pid) {
         }
         ::usleep(20 * 1000);
     }
+    ::kill(-pid, SIGKILL);
     ::kill(pid, SIGKILL);
     int st = 0;
     waitpidNoIntr(pid, &st, 0);
@@ -142,6 +189,8 @@ inline CommandResult runCapture(const std::vector<std::string>& argv,
     cargv.push_back(nullptr);
     const char* const execPath = resolved.c_str();
     char* const* const execArgv = cargv.data();
+    char* const* const execEnv = detail::safeEnviron();
+    const int maxFd = detail::safeMaxFd();
 
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -152,11 +201,15 @@ inline CommandResult runCapture(const std::vector<std::string>& argv,
 
     if (pid == 0) {
         // Child: async-signal-safe calls only.
+        ::setpgid(0, 0);
+        const int devnull = ::open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            ::dup2(devnull, STDIN_FILENO);
+        }
         ::dup2(pipefd[1], STDOUT_FILENO);
         ::dup2(pipefd[1], STDERR_FILENO);
-        ::close(pipefd[0]);
-        ::close(pipefd[1]);
-        ::execv(execPath, execArgv);
+        detail::closeNonStdioFds(maxFd);
+        ::execve(execPath, execArgv, execEnv);
         ::_exit(127);
     }
 
@@ -258,21 +311,23 @@ public:
         cargv.push_back(nullptr);
         const char* const execPath = resolved.c_str();
         char* const* const execArgv = cargv.data();
+        char* const* const execEnv = detail::safeEnviron();
+        const int maxFd = detail::safeMaxFd();
 
         const pid_t pid = ::fork();
         if (pid < 0) {
             return false;
         }
         if (pid == 0) {
-            const int devnull = ::open("/dev/null", O_WRONLY);
+            ::setpgid(0, 0);
+            const int devnull = ::open("/dev/null", O_RDWR);
             if (devnull >= 0) {
+                ::dup2(devnull, STDIN_FILENO);
                 ::dup2(devnull, STDOUT_FILENO);
                 ::dup2(devnull, STDERR_FILENO);
-                if (devnull > STDERR_FILENO) {
-                    ::close(devnull);
-                }
             }
-            ::execv(execPath, execArgv);
+            detail::closeNonStdioFds(maxFd);
+            ::execve(execPath, execArgv, execEnv);
             ::_exit(127);
         }
         pid_ = pid;
@@ -296,6 +351,7 @@ public:
         if (!running_.load()) {
             return;
         }
+        ::kill(-pid_, SIGTERM);
         ::kill(pid_, SIGTERM);
         for (int i = 0; i < 20; ++i) {
             int status = 0;
@@ -306,6 +362,7 @@ public:
             }
             ::usleep(50 * 1000);  // 50ms
         }
+        ::kill(-pid_, SIGKILL);
         ::kill(pid_, SIGKILL);
         int status = 0;
         detail::waitpidNoIntr(pid_, &status, 0);

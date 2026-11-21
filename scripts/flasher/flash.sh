@@ -7,7 +7,7 @@ cd "$SCRIPT_DIR"
 
 if command -v python3 &> /dev/null; then
     python3 flash.py
-elif command -v python &> /dev/null; then
+elif command -v python &> /dev/null && python -c "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)" &> /dev/null; then
     python flash.py
 else
     echo "Python 3 is required to run the flasher."

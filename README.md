@@ -11,13 +11,14 @@ A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner wri
 
 ## Features
 
-- **14 Original, Trademark-Clean Themes (with Zero-RAM Animated Backdrops)**: Cycle forward and backward through `Paper Ink`, `Dark Ink`, `ZeroDay`, `Phosphor`, `Neon Noir`, `Neon Volt`, `Operator`, `Red Team`, `Amber CRT`, `Sunset Grid`, `Code Rain` (cascading emerald digital rain), `Crimson Ops` (Team Red tactical HUD + radar sweep), `Red Rain` (Team Red cascading crimson rain), and `Blue Team` (defensive ops HUD) — all built into every binary with zero extra imports or compile flags, complete with on-screen toasts, pet reactions, and NVS/local persistence. See [docs/THEMES.md](docs/THEMES.md).
-- **Expressive Pwnagotchi-Style Faces**: Crisp vector/pixel expressions (`Awake`, `LookingLeft`, `LookingRight`, `Happy`, `Excited`, `Cool`, `Lonely`, `Bored`, `Sleepy`) rendered tear-free via `zd::render::paintUiFrame`.
-- **Non-Blocking WiFi Scanning**: Pure functional scan pipeline sanitizes SSIDs, deduplicates mesh BSSIDs, builds channel 1–13 histograms, and drives mood & commentary without blocking animations or inputs.
-- **Three Switchable Views**:
-  1. **Pet Face View**: Split layout with animated face, mood badge, word-wrapped `zeroday>` status phrase, strongest SSID spotlight, and telemetry bars.
+- **6 Original, Trademark-Clean Themes (with Zero-RAM Animated Backdrops)**: Cycle forward and backward through `Paper Ink`, `ZeroDay`, `Storm Rain`, `Amber Pulse`, `Red Team`, and `Blue Team` (plus backward-compatible key aliases such as `neon`, `volt`, `operator`, `crimson`) with procedural backdrops (`RadarDish`, `LightningStorm`, `SatelliteBeam`, `TacticalHud`), on-screen toasts, pet reactions, and NVS/local persistence. See [docs/THEMES.md](docs/THEMES.md).
+- **Expressive 16-Mood Faces, Pixel-Art Scenes & Leveling**: 16 pet moods (`Awake`, `LookingLeft`, `LookingRight`, `Happy`, `Excited`, `Cool`, `Lonely`, `Bored`, `Sleepy`, `Grateful`, `Mischief`, `ScanningDish`, `CyberAttack`, `ShieldGuard`, `ThreatAlert`, `LevelUp`), procedural pixel-art scenes (`RadarDish`, `SatelliteBeam`, `ThreatShield`, `LightningStorm`), and a 10-tier XP rank + persistent highscore system rendered tear-free via `zd::render::paintUiFrame`.
+- **Non-Blocking Multi-Radio Scanning**: Pure functional scan pipeline aggregates 2.4 GHz WiFi APs, passive BLE tracker/multi-tool signatures, and optional CC1101 Sub-GHz (`315`/`433.92`/`868.35`/`915 MHz`) bursts/jamming without blocking animations or inputs.
+- **Four Switchable Views**:
+  1. **Pet Face View**: Split layout with animated face, mood badge, word-wrapped `zeroday>` status phrase, XP rank bar, live OpsMode HUD (`[RECON]` / `[DEFENSE]` / `[OFFENSE]` / `[ARMED]`), and strongest SSID / threat spotlight.
   2. **Nearby WiFi Radar**: Top deduplicated access points sorted by RSSI with 4-bar signal meters, security indicator (`*`), channel, and dBm readout.
   3. **Channel Spectrum**: 2.4 GHz channels 1–13 bar histogram with open vs. secured AP counts.
+  4. **RF Guard**: BLE tracker / RF tool signature monitor and Sub-GHz CC1101 frequency/anomaly feed.
 - **Multi-Device Responsive Layout**: Automatically scales from `128×64` micro OLEDs and `160×80` M5StickC up through `240×135` StickC Plus2 / Cardputer, `250×122` 2.13" e-Paper HATs, and `320×240`+ QVGA cyberdecks (`M5Stack Core2`, `CYD`, `T-Deck`), including built-in RGB565, RGB888, and 1-bit monochrome framebuffer export. See [docs/PORTING.md](docs/PORTING.md).
 - **Linux Desktop App — Real Offensive & Defensive WiFi Tooling**: A CLI/ncurses TUI (`zd-linux`) and a Qt6 GUI (`zd-gui`) over a shared controller. Unprivileged recon (nmcli/iw), live **defensive monitors** (deauth-flood, evil-twin, open-downgrade, karma-beacon detection), and **authorization-gated offensive** capture (WPA handshakes / PMKIDs) and deauth injection via a hybrid **libpcap + aircrack-ng** backend. Every transmit is gated by an explicit authorization + per-BSSID allow-list and written to an audit log. See [docs/LINUX.md](docs/LINUX.md).
 
@@ -29,7 +30,7 @@ A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner wri
 core/include/zd/              # Zero-dependency C++17 Functional Core & HAL
   ├── fp.hpp                  # Higher-order combinators & stateless xorshift32 PRNG
   ├── domain.hpp              # Immutable AppState, ThemeId & semantic AppEvents
-  ├── theme.hpp               # Single-source-of-truth 14-theme catalog, effects & color helpers
+  ├── theme.hpp               # Single-source-of-truth 6-theme catalog, effects & color helpers
   ├── wifi_analysis.hpp       # Pure scan sanitization, deduplication & histograms
   ├── pet_logic.hpp           # Pure Elm/Redux reducer: reduce(AppState, AppEvent)
   ├── ui_model.hpp            # Responsive multi-device layout & ASCII frame renderer
@@ -62,7 +63,8 @@ docs/                         # Theme design rules (THEMES.md) & porting guide (
 ### M5Stack / M5Stick Handhelds
 | Input | Action |
 | :--- | :--- |
-| **Button A (Front `M5`)** / `A` | Cycle screen views (`Pet Face` -> `WiFi Radar` -> `Channel Spectrum`) & wake pet |
+| **Button A (Short press)** / `A` | Cycle screen views (`Pet Face` -> `WiFi Radar` -> `Ch Spectrum` -> `RF Guard`) & wake pet |
+| **Button A (Hold ~0.7s)** / `M` | Cycle operational posture (`RECON` -> `DEFENSE` -> `OFFENSE`) |
 | **Button B (Short press)** / `B` | Trigger an immediate WiFi scan |
 | **Button B (Hold ~0.7s)** / `T` | Cycle to **next** theme (shows toast & persists to flash/storage) |
 | **Power Click or Button C** / `Shift+T` | Cycle to **previous** theme |
@@ -70,23 +72,23 @@ docs/                         # Theme design rules (THEMES.md) & porting guide (
 ### LILYGO T-Deck / T-Deck Plus Portable Cyberdecks
 | Input | Action |
 | :--- | :--- |
-| **Trackball Click (GPIO 0)** / `Space` | Cycle screen views (`Pet Face` -> `WiFi Radar` -> `Channel Spectrum`) & wake pet |
+| **Trackball Click (GPIO 0)** / `Space` | Cycle screen views (`Pet Face` -> `WiFi Radar` -> `Ch Spectrum` -> `RF Guard`) & wake pet |
 | **Trackball Hold (~0.6s)** / `Enter` | Trigger an immediate WiFi scan |
 | **Trackball Up / Down** | Cycle screen views backward / forward |
 | **Trackball Left / Right** | Cycle themes backward / forward (shows toast & persists to NVS) |
-| **GT911 Touchscreen** (T-Deck Plus) | Tap top bar for **next** theme; hold top bar (~0.6s) for **previous** theme; tap left/right third to cycle views; tap center to scan/wake |
-| **QWERTY Keyboard Hotkeys** | `Space`/`Tab`: cycle views; `Enter`: immediate scan; `1`/`2`/`3`: jump to Face/Radar/Spectrum |
-| **Keyboard / Serial CLI** | Interactive typing: `theme neon`, `theme prev`, `themes`, `view next`, `scan`, `status`, `gps` |
+| **GT911 Touchscreen** (T-Deck Plus) | Tap header for **next** theme (top-right `[MODE]` badge cycles OpsMode); hold header (~0.6s) for **previous** theme; tap left/right third for **prev/next** view; tap center to scan; hold center (~0.6s) to cycle OpsMode |
+| **QWERTY Keyboard Hotkeys** | `Space`/`Tab`: cycle views; `Enter`: scan; `1`–`4`: Face/Radar/Spectrum/RF Guard; `[`/`]`: prev/next theme |
+| **Keyboard / Serial CLI** | `theme <key>`, `mode [recon|def|off]`, `subghz [315|433|868|915]`, `ble`, `score`, `view <1-4>`, `scan`, `gps` |
 | **MIA-M10Q GPS** (T-Deck Plus) | Real-time GNSS coordinate & satellite acquisition; queried via `gps` command or telemetry |
 
 ### CYD ESP32-2432S028 ("Cheap Yellow Display")
 | Input | Action |
 | :--- | :--- |
-| **XPT2046 Resistive Touch — Top Bar** | Tap to cycle to **next** theme; hold (~0.6s) to cycle to **previous** theme (persists to NVS) |
+| **XPT2046 Resistive Touch — Top Bar** | Tap for **next** theme (top-right badge cycles OpsMode); hold (~0.6s) for **previous** theme |
 | **XPT2046 Resistive Touch — Left / Right Third** | Tap left third for **previous** view; tap right third for **next** view |
-| **XPT2046 Resistive Touch — Center** | Tap center area to trigger an immediate WiFi scan & wake pet |
+| **XPT2046 Resistive Touch — Center** | Tap center to trigger immediate WiFi scan; hold (~0.6s) to cycle OpsMode |
 | **BOOT Button (GPIO 0)** | Short press: cycle screen views & wake pet; Hold (~0.6s): immediate WiFi scan |
-| **Serial CLI (`115200` baud)** | Standard commands (`themes`, `theme <key>`, `view`, `scan`, `status`, `ascii`) plus `bl <10-255>`, `rot <1\|3>`, `ldr` |
+| **Serial CLI (`115200` baud)** | Standard commands (`themes`, `theme <key>`, `mode`, `subghz`, `ble`, `score`, `view`, `scan`, `status`, `ascii`) plus `bl <10-255>`, `rot <1\|3>`, `ldr` |
 
 ---
 

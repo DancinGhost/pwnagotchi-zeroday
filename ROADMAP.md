@@ -67,6 +67,9 @@ not yet implemented.
 
 ## M5Stick / ESP32
 
+- [ ] **ESP-IDF 5.x / Arduino-ESP32 3.x (PIOArduino) migration**: move off pinned
+  `espressif32 @ 6.9.0` (ESP-IDF 4.4) onto maintained PIOArduino / ESP-IDF 5.x releases for
+  long-term WiFi/SDK security fixes while validating `M5Unified` and `LovyanGFX` compatibility.
 - [ ] **BLE scanning** alongside WiFi — the hardware already has the radio; a
   `BleObserved` event + a BLE radar view would be a natural sibling to the WiFi radar.
 - [ ] **Known-network memory in NVS**: remember trusted BSSIDs across reboot so the pet is

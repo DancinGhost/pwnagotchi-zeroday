@@ -75,12 +75,14 @@ for env_dir in "$ROOT_DIR/.pio/build"/*; do
                 "$BOOT_OFFSET" "$env_dir/bootloader.bin"
                 0x8000 "$env_dir/partitions.bin"
             )
-            BOOT_APP0="$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
-            if [ -f "$BOOT_APP0" ]; then
-                MERGE_ARGS+=(0xe000 "$BOOT_APP0")
+            BOOT_APP0="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
+            if [ ! -f "$BOOT_APP0" ]; then
+                echo "[!] Error: boot_app0.bin not found at $BOOT_APP0; refusing incomplete factory.bin merge for $target" >&2
+                exit 1
             fi
-            MERGE_ARGS+=(0x10000 "$env_dir/firmware.bin")
+            MERGE_ARGS+=(0xe000 "$BOOT_APP0" 0x10000 "$env_dir/firmware.bin")
             "${ESPTOOL_CMD[@]}" "${MERGE_ARGS[@]}"
+            (cd "$TEMP_FW" && sha256sum "pwnagotchi-zd-${target}-factory.bin" > "pwnagotchi-zd-${target}-factory.bin.sha256")
         else
             echo "[!] Warning: esptool unavailable or bootloader/partitions missing; skipping factory.bin merge for $target" >&2
         fi

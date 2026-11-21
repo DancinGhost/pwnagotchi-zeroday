@@ -5,6 +5,7 @@
   --bg-elevated: #1c2536;
   --border-dim: #253047;
   --border-bright: #38496b;
+  --border-control: #5b7094;
   --text-main: #e6edf7;
   --text-muted: #9aa8c2;
   --text-dim: #8b9bb4;
@@ -86,9 +87,28 @@ select {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-[tabindex="0"]:focus-visible {
+[tabindex="0"]:focus-visible,
+[tabindex="-1"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 8px;
+  z-index: 1000;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--bg-panel);
+  border: 2px solid var(--accent);
+  color: var(--text-main);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  left: 12px;
 }
 
 .sr-only {
@@ -177,7 +197,7 @@ select:focus-visible,
   gap: 6px;
   padding: 5px 10px;
   border-radius: 6px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-panel-alt);
   color: var(--text-main);
   cursor: pointer;
@@ -203,7 +223,7 @@ select:focus-visible,
 .tool-select {
   padding: 5px 8px;
   border-radius: 6px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-panel-alt);
   color: var(--text-main);
   font-size: 12px;
@@ -363,7 +383,7 @@ select:focus-visible,
   justify-content: space-between;
   font-size: 10px;
   letter-spacing: 0.09em;
-  color: #7b869c;
+  color: #94a3bd;
   padding: 0 2px;
 }
 
@@ -584,7 +604,7 @@ body[data-shell="atomic"] .hw-front-btn {
   background: var(--bg-deep);
   padding: 3px;
   border-radius: 8px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   gap: 3px;
 }
 
@@ -616,7 +636,7 @@ body[data-shell="atomic"] .hw-front-btn {
   background: var(--bg-deep);
   padding: 3px;
   border-radius: 8px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   gap: 4px;
 }
 
@@ -665,7 +685,7 @@ body[data-shell="atomic"] .hw-front-btn {
   width: 24px;
   height: 24px;
   border-radius: 6px;
-  border: 2px solid var(--border-dim);
+  border: 2px solid var(--border-control);
   cursor: pointer;
   padding: 0;
   transition: transform 0.1s, border-color 0.15s;
@@ -724,7 +744,7 @@ body[data-shell="atomic"] .hw-front-btn {
   width: 130px;
   padding: 4px 8px;
   border-radius: 6px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-deep);
   color: var(--text-main);
   font-weight: 700;
@@ -802,13 +822,17 @@ body[data-shell="atomic"] .hw-front-btn {
   gap: 6px;
   padding: 9px 11px;
   border-radius: 8px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-panel-alt);
   color: var(--text-main);
   font-weight: 600;
   font-size: 12px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, transform 0.08s;
+}
+
+.toy-btn-wide {
+  grid-column: 1 / -1;
 }
 
 .toy-btn:hover {
@@ -846,7 +870,7 @@ body[data-shell="atomic"] .hw-front-btn {
   text-align: left;
   padding: 8px 9px;
   border-radius: 8px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-deep);
   cursor: pointer;
   transition: border-color 0.14s, background 0.14s;
@@ -919,7 +943,7 @@ input[type="range"] {
   min-width: 140px;
   padding: 6px 9px;
   border-radius: 6px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-deep);
 }
 
@@ -928,13 +952,55 @@ input[type="range"] {
 }
 
 .mini-btn {
+  min-width: 24px;
+  min-height: 24px;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px solid var(--border-dim);
+  border: 1px solid var(--border-control);
   background: var(--bg-panel-alt);
   cursor: pointer;
   font-size: 11.5px;
   font-weight: 600;
+}
+
+.mini-btn-compact {
+  padding: 4px 9px;
+  font-size: 10.5px;
+}
+
+.charging-toggle {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.beacon-row-split {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.beacon-controls-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.beacon-control-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rssi-slider {
+  width: 78px;
+}
+
+.beacon-sec-label {
+  cursor: pointer;
 }
 
 .mini-btn:hover {
@@ -1023,6 +1089,22 @@ input[type="range"] {
   display: inline-block;
 }
 
+.term-dot-red {
+  background: #ff5f56;
+}
+
+.term-dot-amber {
+  background: #ffbd2e;
+}
+
+.term-dot-green {
+  background: #27c93f;
+}
+
+.term-title {
+  margin-left: 6px;
+}
+
 .term-log {
   height: 165px;
   overflow-y: auto;
@@ -1086,6 +1168,14 @@ input[type="range"] {
 .terminal-input-row:focus-within {
   box-shadow: inset 0 0 0 2px var(--accent);
   background: rgba(0, 229, 255, 0.05);
+}
+
+body.reduce-motion *,
+body.reduce-motion *::before,
+body.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

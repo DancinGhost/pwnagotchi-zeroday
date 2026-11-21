@@ -140,7 +140,7 @@ function testStateReducerAndPlayfulEvents() {
   assert.strictEqual(sWoken.page, logic.ScreenPage.NearbyRadar);
 
   const sThemed = logic.reduce(sWoken, { type: 'ButtonBLongPressed', nowMs: 96500 });
-  assert.strictEqual(sThemed.theme, logic.ThemeId.DarkInk);
+  assert.strictEqual(sThemed.theme, logic.ThemeId.ZeroDayCyan);
 
   const sManual = logic.reduce(sThemed, { type: 'ButtonBPressed', nowMs: 97000 });
   assert.strictEqual(sManual.manualScanRequested, true);
@@ -158,6 +158,7 @@ function testStateReducerAndPlayfulEvents() {
   });
   assert.strictEqual(sPwn.mood, logic.Mood.Mischief);
   assert.strictEqual(sPwn.toyHandshakes, 1);
+  assert.strictEqual(sPwn.highScore, sPwn.xp);
 
   const sPeer = logic.reduce(sPwn, {
     type: 'PeerSpotted',
@@ -175,6 +176,26 @@ function testStateReducerAndPlayfulEvents() {
     petName: 'n3k0_pwn!'
   });
   assert.strictEqual(sNamed.petName, 'n3k0_pwn');
+
+  // OpsMode, BLE tracker & Sub-GHz guard + 10-tier levels
+  assert.strictEqual(logic.deriveLevelInfo(0).level, 1);
+  assert.strictEqual(logic.deriveLevelInfo(2500).level, 10);
+  const sDef = logic.reduce(sNamed, { type: 'CycleOpsMode', nowMs: 102000 });
+  assert.strictEqual(sDef.opsMode, logic.OpsMode.Defensive);
+  assert.strictEqual(sDef.mood, logic.Mood.ShieldGuard);
+  const sBle = logic.reduce(sDef, {
+    type: 'BleScanCompleted',
+    nowMs: 103000,
+    devices: [{ mac: '7a:3c:91:04:88:12', name: 'Tracker_Tag', rssi: -52, companyId: 0x004c, serviceUuid: 0, trackerPayload: true }]
+  });
+  assert.strictEqual(sBle.threatsDetected, 1);
+  assert.strictEqual(sBle.mood, logic.Mood.ThreatAlert);
+  const sSub = logic.reduce(sBle, {
+    type: 'SubGhzObserved',
+    nowMs: 104000,
+    signal: { freqKhz: 915000, rssi: -48, protocol: 'OOK', burstCount: 6, anomaly: wifi.SubGhzAnomaly.ReplayBurst }
+  });
+  assert.strictEqual(sSub.threatsDetected, 2);
 }
 
 function testResponsiveUiAndPixelRasterizer() {
@@ -239,9 +260,9 @@ function testResponsiveUiAndPixelRasterizer() {
 }
 
 function testThemesMultiDeviceAndCppParity() {
-  assert.strictEqual(themes.THEME_COUNT, 14);
+  assert.strictEqual(themes.THEME_COUNT, 6);
 
-  // Bidirectional cycling visits all 14 themes and wraps cleanly
+  // Bidirectional cycling visits all 6 themes and wraps cleanly
   let cur = themes.ThemeId.PaperInk;
   const seen = new Set();
   for (let i = 0; i < themes.THEME_COUNT; i++) {
@@ -252,14 +273,18 @@ function testThemesMultiDeviceAndCppParity() {
   assert.strictEqual(seen.size, themes.THEME_COUNT);
   assert.strictEqual(themes.prevTheme(themes.ThemeId.PaperInk), themes.ThemeId.BlueTeam);
   assert.strictEqual(themes.themeFromKey('rain'), themes.ThemeId.CodeRain);
-  assert.strictEqual(themes.themeFromKey('crimson'), themes.ThemeId.CrimsonOps);
-  assert.strictEqual(themes.themeFromKey('redrain'), themes.ThemeId.RedRain);
+  assert.strictEqual(themes.themeFromKey('redteam'), themes.ThemeId.RedTeam);
   assert.strictEqual(themes.themeFromKey('blueteam'), themes.ThemeId.BlueTeam);
+  // Legacy aliases
+  assert.strictEqual(themes.themeFromKey('neon'), themes.ThemeId.ZeroDayCyan);
+  assert.strictEqual(themes.themeFromKey('crimson'), themes.ThemeId.RedTeam);
+  assert.strictEqual(themes.themeFromKey('redrain'), themes.ThemeId.RedTeam);
+  assert.strictEqual(themes.themeFromKey('operator'), themes.ThemeId.BlueTeam);
 
   // Toast lifecycle & multi-device rendering across all 5 screen profiles
   let s = logic.initialState(77);
   s = logic.reduce(s, { type: 'SetTheme', nowMs: 5000, theme: 'operator' });
-  assert.strictEqual(s.theme, themes.ThemeId.OperatorBlue);
+  assert.strictEqual(s.theme, themes.ThemeId.BlueTeam);
   assert.ok(s.themeToastUntilMs === 5000 + themes.THEME_TOAST_MS);
 
   for (const prof of ui.SCREEN_PROFILES) {
@@ -305,8 +330,34 @@ function testThemesMultiDeviceAndCppParity() {
     'nintendo',
     'apple',
     'microsoft',
-    'matrix'
+    'matrix',
+    'airtag',
+    'findmy',
+    'smarttag'
   ];
+  for (const kind of Object.values(wifi.BleThreatKind)) {
+    const lbl = wifi.bleThreatLabel(kind).toLowerCase();
+    for (const term of bannedTerms) {
+      assert.strictEqual(
+        lbl.includes(term),
+        false,
+        'bleThreatLabel("' + kind + '") must not contain restricted brand term "' + term + '"'
+      );
+    }
+  }
+  for (const presetId of Object.keys(sim.PRESETS)) {
+    const bleSnap = sim.generateBleSnapshot(presetId, 777, 5000);
+    for (const dev of bleSnap.devices) {
+      const lowerDev = String(dev.name || '').toLowerCase();
+      for (const term of bannedTerms) {
+        assert.strictEqual(
+          lowerDev.includes(term),
+          false,
+          'Simulated BLE device "' + dev.name + '" must not contain restricted brand term "' + term + '"'
+        );
+      }
+    }
+  }
   for (const spec of themes.THEME_CATALOG) {
     const combined = (spec.id + ' ' + spec.key + ' ' + spec.name + ' ' + spec.blurb).toLowerCase();
     for (const term of bannedTerms) {
@@ -397,6 +448,17 @@ function testThemesMultiDeviceAndCppParity() {
       c.highlight
     );
   }
+  // Verify animated scenes & storm/dish/satellite backdrops render visibly across ticks
+  for (const fxTheme of [themes.ThemeId.ZeroDayCyan, themes.ThemeId.CodeRain, themes.ThemeId.RedTeam]) {
+    const fA = ui.buildUiFrame(logic.reduce(s, { type: 'SetTheme', nowMs: 140, theme: fxTheme }), { width: 240, height: 135 });
+    const fB = ui.buildUiFrame(logic.reduce(s, { type: 'SetTheme', nowMs: 12 * 140, theme: fxTheme }), { width: 240, height: 135 });
+    const bufA = gfxMod.createPixelBuffer(240, 135);
+    const bufB = gfxMod.createPixelBuffer(240, 135);
+    gfxMod.paintUiFrame(bufA, fA);
+    gfxMod.paintUiFrame(bufB, fB);
+    assert.notDeepStrictEqual(bufA.data, bufB.data, 'Backdrop effect must animate for ' + fxTheme);
+  }
+
   testWebAccessibilityMarkup();
 }
 
@@ -407,18 +469,138 @@ function testWebAccessibilityMarkup() {
   assert.ok(html.includes('<h1 class="brand-logo">'), 'Page must include an <h1> heading');
   assert.ok(!html.includes('1/10'), 'Initial theme counter must not be stale 1/10');
   assert.ok(html.includes('1/' + themes.THEME_COUNT), 'Initial theme counter must match THEME_COUNT');
+  assert.ok(html.includes('Content-Security-Policy') && !html.includes("'unsafe-inline'"),
+    'index.html must include a strict CSP meta tag without unsafe-inline');
+  assert.strictEqual(/\sstyle="/.test(html), false,
+    'index.html must not contain inline style= attributes (required by strict CSP)');
+  assert.ok(html.includes('class="skip-link" href="#main-workbench"'),
+    'Must include keyboard skip link to main workbench');
   assert.ok(html.includes('id="btn-hotkeys"'), 'Must expose WCAG 2.1.4 hotkey toggle button');
+  assert.ok(html.includes('id="btn-motion"'), 'Must expose animation motion toggle button');
+  assert.ok(html.includes('id="act-boop"'), 'Must expose keyboard-accessible Boop ZeroDay button');
+  assert.strictEqual(/id="screen-viewport"[^>]*role="button"/.test(html), false,
+    '#screen-viewport must not wrap canvas role="img" inside a role="button"');
+  assert.ok(html.includes('<label class="prompt-prefix" for="input-pet-name">'),
+    'HANDLE prompt must be a semantic <label for="input-pet-name">');
+  assert.ok(html.includes('id="xp-track"') && html.includes('role="progressbar"') &&
+    html.includes('aria-valuenow="0"'),
+    'XP track must expose ARIA progressbar attributes');
+  assert.ok(html.includes('value="2"') && html.includes('value="13"'),
+    'Custom beacon channel selector must support all 2.4 GHz channels 1..13');
   assert.ok(html.includes('id="sr-status"') && html.includes('aria-live="polite"'),
     'Must expose screen-reader aria-live status region');
   assert.ok(html.includes('id="pwn-screen"') && html.includes('role="img"'),
     'Canvas must expose role="img" and accessible fallback');
-  assert.ok(html.includes('id="term-log"') && html.includes('role="log"'),
-    'Terminal log must expose role="log"');
+  assert.ok(html.includes('id="term-log"') && html.includes('role="log"') &&
+    html.includes('aria-live="off"'),
+    'Terminal log must expose role="log" with aria-live="off" so continuous logs do not chatter');
   assert.ok(html.includes('id="select-resolution"') && html.includes('aria-label="Target Hardware Display Profile"'),
     'Select controls must have explicit aria-label');
-  assert.ok(css.includes(':focus-visible'), 'CSS must define visible :focus-visible rings');
+  assert.ok(css.includes('--border-control:'), 'CSS must define >= 3:1 interactive control border token');
+  assert.ok(css.includes(':focus-visible') && css.includes('.skip-link:focus'),
+    'CSS must define visible :focus-visible rings and skip-link focus reveal');
+  assert.ok(css.includes('body.reduce-motion'), 'CSS must support reduced-motion toggle class');
   assert.ok(css.includes('min-width: 24px') && css.includes('min-height: 24px'),
     'Remove button targets must meet WCAG 2.5.8 24x24px minimum');
+
+  // Verify canvas_gfx zero-copy backing buffer & cross-product fillArc parity.
+  const gfxSrc = fs.readFileSync(path.resolve(__dirname, './js/canvas_gfx.js'), 'utf8');
+  assert.strictEqual(gfxSrc.includes('Math.atan2'), false,
+    'canvas_gfx.js fillArc should use cross-product half-plane test matching surface_rgb565.hpp');
+  const shared = new Uint8ClampedArray(128 * 64 * 4);
+  const directBuf = gfxMod.createPixelBuffer(128, 64, shared);
+  assert.strictEqual(directBuf.data, shared, 'createPixelBuffer must write directly into backing array');
+
+  // Lightweight DOM harness smoke-test of app.js interactions & CSP-safe behavior.
+  const vm = require('vm');
+  const appSrc = fs.readFileSync(path.resolve(__dirname, './js/app.js'), 'utf8');
+  const makeFakeEl = (id) => {
+    const attrs = { id: id || '' };
+    const listeners = {};
+    const cls = new Set();
+    return {
+      id: id || '',
+      tagName: 'DIV',
+      value: '',
+      checked: false,
+      textContent: '',
+      title: '',
+      style: {},
+      childNodes: [],
+      classList: {
+        add: (c) => cls.add(c),
+        remove: (c) => cls.delete(c),
+        toggle: (c, f) => (f === undefined ? (cls.has(c) ? cls.delete(c) : cls.add(c)) : (f ? cls.add(c) : cls.delete(c))),
+        contains: (c) => cls.has(c)
+      },
+      setAttribute: (k, v) => { attrs[k] = String(v); },
+      getAttribute: (k) => (k in attrs ? attrs[k] : null),
+      appendChild: function (c) { this.childNodes.push(c); return c; },
+      removeChild: function (c) { const i = this.childNodes.indexOf(c); if (i >= 0) this.childNodes.splice(i, 1); },
+      addEventListener: (ev, fn) => { (listeners[ev] = listeners[ev] || []).push(fn); },
+      dispatch: (ev, obj) => (listeners[ev] || []).forEach((fn) => fn(obj || {})),
+      getContext: () => ({
+        imageSmoothingEnabled: false,
+        createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+        putImageData: () => {},
+        drawImage: () => {}
+      }),
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 240, height: 135 }),
+      toDataURL: () => 'data:image/png;base64,'
+    };
+  };
+  const els = {};
+  const getEl = (id) => (els[id] = els[id] || makeFakeEl(id));
+  const bodyEl = makeFakeEl('body');
+  const store = { zd_web_shell: 'INVALID_SHELL', zd_web_fx: 'INVALID_FX' };
+  const docObj = {
+    body: bodyEl,
+    hidden: false,
+    activeElement: null,
+    getElementById: getEl,
+    querySelectorAll: () => [],
+    createElement: (tag) => Object.assign(makeFakeEl(''), { tagName: tag.toUpperCase() }),
+    createTextNode: (t) => ({ textContent: t }),
+    addEventListener: () => {}
+  };
+  const sandbox = {
+    window: null,
+    document: docObj,
+    navigator: {},
+    performance: { now: () => 1000 },
+    localStorage: {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); }
+    },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    console
+  };
+  sandbox.window = sandbox;
+  sandbox.ZD = {
+    fp: fp,
+    wifiAnalysis: wifi,
+    themes: themes,
+    petLogic: logic,
+    uiModel: ui,
+    airwavesSim: sim,
+    canvasGfx: gfxMod,
+    createBuzzer: () => ({ clickA() {}, clickB() {}, themeSwap() {}, boop() {}, pwn() {}, peer() {}, toggle() { return true; } })
+  };
+  sandbox.requestAnimationFrame = () => 1;
+  sandbox.cancelAnimationFrame = () => {};
+  sandbox.addEventListener = () => {};
+  vm.runInNewContext(appSrc, sandbox);
+  assert.strictEqual(bodyEl.getAttribute('data-shell'), 'orange', 'Invalid stored shell must sanitize to orange');
+  assert.strictEqual(els['screen-viewport'].getAttribute('data-fx'), 'grid', 'Invalid stored fx must sanitize to grid');
+  els['act-boop'].dispatch('click');
+  assert.ok(els['term-log'].childNodes.some((n) => JSON.stringify(n).includes('[BOOP]')),
+    'Clicking #act-boop must dispatch PetPoked and log [BOOP]');
+  els['btn-motion'].dispatch('click');
+  assert.strictEqual(els['btn-motion'].textContent, 'MOTION: OFF');
+  assert.strictEqual(bodyEl.classList.contains('reduce-motion'), true);
 }
 
 testFunctionalCombinators();

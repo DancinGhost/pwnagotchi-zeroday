@@ -6,16 +6,19 @@
 // accessible name/description for assistive technologies.
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
 #include <QColor>
 #include <QImage>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
 #include <QString>
 #include <QWidget>
 
+#include "../app/clock.hpp"
 #include "zd/render/painter.hpp"
 #include "zd/render/surface_rgb565.hpp"
 #include "zd/secops.hpp"
@@ -61,27 +64,66 @@ public:
             }
         }
 
-        // Update screen-reader description whenever the rendered screen content changes.
-        std::string desc = std::string(frame.face.moodLabel) + " — " + frame.headerLine;
-        if (!frame.phraseLines.empty()) {
-            desc += " — ";
-            for (std::size_t i = 0; i < frame.phraseLines.size(); ++i) {
-                if (i != 0u) desc += " ";
-                desc += frame.phraseLines[i];
-            }
-        }
-        setAccessibleDescription(QString::fromStdString(desc));
+        lastFrame_ = frame;
+        lastFrameValid_ = true;
+        syncAccessibleDescription();
         update();
     }
 
     void setSecMood(sec::SecMood mood) {
         if (secMood_ != mood) {
             secMood_ = mood;
+            syncAccessibleDescription();
             update();
         }
     }
 
+    void setEventCallback(std::function<void(const AppEvent&)> cb) {
+        onEvent_ = std::move(cb);
+        if (onEvent_) {
+            setCursor(Qt::PointingHandCursor);
+            setToolTip("Body: next view (Right-click: prev) | Header: cycle theme / right badge: OpsMode | Footer right: Scan");
+        }
+    }
+
 protected:
+    void mousePressEvent(QMouseEvent* ev) override {
+        if (!onEvent_ || !lastFrameValid_ || image_.isNull()) {
+            QWidget::mousePressEvent(ev);
+            return;
+        }
+        const QSize target = image_.size().scaled(size(), Qt::KeepAspectRatio);
+        const QRect dst(QPoint((width() - target.width()) / 2, (height() - target.height()) / 2),
+                        target);
+        if (target.width() <= 0 || target.height() <= 0 || !dst.contains(ev->pos())) {
+            QWidget::mousePressEvent(ev);
+            return;
+        }
+        const double lx =
+            ((ev->pos().x() - dst.x()) * static_cast<double>(lastFrame_.dims.width)) / target.width();
+        const double ly =
+            ((ev->pos().y() - dst.y()) * static_cast<double>(lastFrame_.dims.height)) / target.height();
+        const uint32_t now = linux_app::nowMs();
+        const bool rightClick = (ev->button() == Qt::RightButton);
+        const int8_t step = static_cast<int8_t>(rightClick ? -1 : 1);
+        if (ly <= lastFrame_.headerDividerY) {
+            if (lx >= lastFrame_.dims.width * 0.72) {
+                onEvent_(CycleOpsModeEvent{now});
+            } else {
+                onEvent_(CycleThemeEvent{now, step});
+            }
+        } else if (ly >= lastFrame_.footerDividerY) {
+            if (lx >= lastFrame_.dims.width * 0.72) {
+                onEvent_(ButtonBPressedEvent{now});
+            } else {
+                onEvent_(CyclePageEvent{now, 1});
+            }
+        } else {
+            onEvent_(CyclePageEvent{now, step});
+        }
+        ev->accept();
+    }
+
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.fillRect(rect(), Qt::black);
@@ -105,13 +147,46 @@ protected:
     }
 
 private:
+    void syncAccessibleDescription() {
+        if (!lastFrameValid_) {
+            return;
+        }
+        // Exclude ticking uptime clock from accessibility signature so screen readers are not
+        // interrupted every second when only uptime changes.
+        std::string sig = std::to_string(static_cast<int>(lastFrame_.page)) + "|" +
+                          std::to_string(static_cast<int>(lastFrame_.theme)) + "|" +
+                          lastFrame_.face.moodLabel + "|" +
+                          sec::secMoodLabel(secMood_) + "|" +
+                          std::to_string(lastFrame_.radarRows.size()) + "|";
+        for (const auto& l : lastFrame_.phraseLines) {
+            sig += l + "/";
+        }
+        if (sig == lastAccessibleSig_) {
+            return;
+        }
+        lastAccessibleSig_ = sig;
+
+        std::string desc = std::string("Security ") + sec::secMoodLabel(secMood_) + " — Pet " +
+                           lastFrame_.face.moodLabel;
+        if (!lastFrame_.phraseLines.empty()) {
+            desc += " — ";
+            for (std::size_t i = 0; i < lastFrame_.phraseLines.size(); ++i) {
+                if (i != 0u) desc += " ";
+                desc += lastFrame_.phraseLines[i];
+            }
+        }
+        setAccessibleDescription(QString::fromStdString(desc));
+    }
+
     static std::string frameSignature(const UiFrame& f) {
         std::string s;
         s.reserve(256);
         s += std::to_string(f.dims.width) + "x" + std::to_string(f.dims.height) + "|";
         s += std::to_string(static_cast<int>(f.page)) + "|";
         s += std::to_string(static_cast<int>(f.theme)) + "|";
-        if (f.themeEffect != ThemeEffect::None) {
+        s += std::to_string(static_cast<int>(f.opsMode)) + "|" + f.modeBadge + "|";
+        s += std::to_string(static_cast<int>(f.scene)) + "|" + f.rankLine + "|";
+        if (f.themeEffect != ThemeEffect::None || f.scene != ActivityScene::None) {
             s += std::to_string(f.animTick) + "|";
         }
         s += f.headerLine + "|" + f.footerLine + "|";
@@ -126,10 +201,15 @@ private:
             for (const auto& r : f.radarRows) {
                 s += r.ssid + ":" + r.details + ";";
             }
-        } else {
+        } else if (f.page == ScreenPage::ChannelSpectrum) {
             s += f.spectrumSummary + "|";
             for (const auto& b : f.channelBars) {
                 s += std::to_string(b.count) + ",";
+            }
+        } else {
+            s += f.rfGuardSummary + "|";
+            for (const auto& r : f.rfGuardRows) {
+                s += r.ssid + ":" + r.details + ";";
             }
         }
         return s;
@@ -138,7 +218,11 @@ private:
     std::unique_ptr<render::Rgb565Surface> surface_;
     QImage image_;
     std::string lastFrameSig_;
+    std::string lastAccessibleSig_;
+    UiFrame lastFrame_{};
+    bool lastFrameValid_ = false;
     sec::SecMood secMood_ = sec::SecMood::Calm;
+    std::function<void(const AppEvent&)> onEvent_;
 };
 
 }  // namespace linux_gui

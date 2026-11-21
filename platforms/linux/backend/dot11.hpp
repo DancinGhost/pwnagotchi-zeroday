@@ -41,7 +41,6 @@ inline RadiotapInfo parseRadiotap(const uint8_t* data, std::size_t len) {
     if (rtLen < 8 || rtLen > len) {
         return info;
     }
-    info.length = rtLen;
 
     const uint32_t firstPresent =
         static_cast<uint32_t>(data[4]) |
@@ -62,6 +61,7 @@ inline RadiotapInfo parseRadiotap(const uint8_t* data, std::size_t len) {
             (static_cast<uint32_t>(data[off + 3]) << 24u);
         off += 4;
     }
+    info.length = rtLen;
 
     auto advanceField = [&](std::size_t a, std::size_t sz) noexcept -> bool {
         off = (off + (a - 1u)) & ~(a - 1u);
@@ -176,9 +176,15 @@ inline std::size_t eapolKeyPayloadOffset(const uint8_t* f, std::size_t len) {
         return 0u;
     }
     const uint8_t fc1 = f[1];
+    if ((fc1 & 0x40) != 0) {  // Protected (encrypted) frame cannot carry plaintext EAPOL
+        return 0u;
+    }
     const bool toDs = (fc1 & 0x01) != 0;
     const bool fromDs = (fc1 & 0x02) != 0;
     const uint8_t subtype = static_cast<uint8_t>((f[0] >> 4) & 0xF);
+    if ((subtype & 0x04) != 0) {  // Null / CF-Ack / CF-Poll data subtypes carry no body
+        return 0u;
+    }
     std::size_t hdr = (toDs && fromDs) ? 30 : 24;
     if ((subtype & 0x08) != 0) {  // QoS data: +2 byte QoS control
         hdr += 2;
@@ -209,6 +215,43 @@ inline std::size_t eapolKeyPayloadOffset(const uint8_t* f, std::size_t len) {
 // True if a data frame carries an EAPOL-Key (0x888E, type 3) payload.
 inline bool looksLikeEapol(const uint8_t* f, std::size_t len) {
     return eapolKeyPayloadOffset(f, len) != 0u;
+}
+
+// Classify an EAPOL-Key frame into 4-way handshake message 1..4 via IEEE 802.11 Key Info
+// bits (big-endian at eapol[5..6]). Returns 1..4, or 255 if unclassifiable/group/invalid.
+inline uint8_t classifyEapolKeyMessage(const uint8_t* f, std::size_t len) {
+    const std::size_t eapolOff = eapolKeyPayloadOffset(f, len);
+    if (eapolOff == 0u || eapolOff + 4u + 95u > len) {
+        return 255u;
+    }
+    const uint8_t* eapol = f + eapolOff;
+    const uint8_t descType = eapol[4];
+    if (descType != 2u && descType != 254u) {  // RSN (2) or WPA1 (254)
+        return 255u;
+    }
+    const uint16_t keyInfo =
+        static_cast<uint16_t>((static_cast<uint16_t>(eapol[5]) << 8u) | eapol[6]);
+    const bool pairwise = (keyInfo & 0x0008u) != 0u;
+    const bool install  = (keyInfo & 0x0040u) != 0u;
+    const bool ack      = (keyInfo & 0x0080u) != 0u;
+    const bool mic      = (keyInfo & 0x0100u) != 0u;
+    const bool secure   = (keyInfo & 0x0200u) != 0u;
+    if (!pairwise) {
+        return 255u;
+    }
+    if (ack && !mic && !install) {
+        return 1u;
+    }
+    if (!ack && mic && !install && !secure) {
+        return 2u;
+    }
+    if (ack && mic && (install || secure)) {
+        return 3u;
+    }
+    if (!ack && mic && !install && secure) {
+        return 4u;
+    }
+    return 255u;
 }
 
 // Parses the EAPOL-Key Key Data TLV list for an RSN PMKID KDE (tag 0xDD, len >= 20,
@@ -309,23 +352,30 @@ inline std::optional<sec::CapturedFrame> decodeDot11(const uint8_t* f, std::size
     }
 
     if (type == 2) {  // data
+        out.hasStation = true;
         if (!toDs && !fromDs) {
             out.bssid = macToString(addr3);
             out.source = macToString(addr2);
             out.dest = macToString(addr1);
+            out.station = out.source;
         } else if (!toDs && fromDs) {
             out.bssid = macToString(addr2);
             out.dest = macToString(addr1);
             out.source = macToString(addr3);
+            out.station = out.dest;
         } else if (toDs && !fromDs) {
             out.bssid = macToString(addr1);
             out.source = macToString(addr2);
             out.dest = macToString(addr3);
+            out.station = out.source;
         } else {
             out.bssid = macToString(addr1);
             out.source = macToString(addr2);
+            out.dest = macToString(addr3);
+            out.station.clear();
         }
         if (looksLikeEapol(f, len)) {
+            out.eapolMsg = classifyEapolKeyMessage(f, len);
             out.kind = carriesPmkid(f, len) ? sec::FrameKind::Pmkid : sec::FrameKind::Eapol;
             return out;
         }

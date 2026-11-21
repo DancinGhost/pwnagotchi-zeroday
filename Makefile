@@ -1,5 +1,7 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
+HARDEN_CXXFLAGS := -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fstack-clash-protection -Wformat -Wformat-security -fPIE
+HARDEN_LDFLAGS  := -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 INCLUDES := -Icore/include -Irender/include
 LINUX_INCLUDES := $(INCLUDES) -Iplatforms/linux/backend -Iplatforms/linux/app
 BUILD    := build
@@ -18,7 +20,8 @@ endif
 .PHONY: all test sim demo linux web-serve clean dist
 
 all: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops \
-     $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell $(BUILD)/zd_sim
+     $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell \
+     $(BUILD)/test_esp32_common $(BUILD)/zd_sim
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -41,25 +44,30 @@ $(BUILD)/test_dot11_frames: tests/core/test_dot11_frames.cpp core/include/zd/*.h
 $(BUILD)/test_linux_shell: tests/core/test_linux_shell.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp platforms/linux/app/*.hpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) -UNDEBUG $(LINUX_INCLUDES) tests/core/test_linux_shell.cpp -lpthread -o $@
 
+$(BUILD)/test_esp32_common: tests/core/test_esp32_common.cpp core/include/zd/*.hpp platforms/common/*.hpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) -fno-exceptions -fno-rtti -UNDEBUG -Icore/include -Iplatforms/common tests/core/test_esp32_common.cpp -o $@
+
 $(BUILD)/zd_sim: platforms/native/main.cpp core/include/zd/*.hpp render/include/zd/render/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) platforms/native/main.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) $(INCLUDES) platforms/native/main.cpp $(HARDEN_LDFLAGS) -o $@
 
 # Linux desktop CLI/TUI (hybrid backend; native libpcap capture/injection + CLI fallback).
 # The Qt6 GUI (zd-gui) is built via CMake: cmake -B build_cmake && cmake --build build_cmake
 $(BUILD)/zd-linux: platforms/linux/cli/main.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp platforms/linux/app/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) $(if $(filter 1,$(HAVE_PCAP)),-DZD_WITH_LIBPCAP) $(LINUX_INCLUDES) $(PCAP_CFLAGS) \
-		platforms/linux/cli/main.cpp -lncurses -lpthread $(PCAP_LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) $(if $(filter 1,$(HAVE_PCAP)),-DZD_WITH_LIBPCAP) $(LINUX_INCLUDES) $(PCAP_CFLAGS) \
+		platforms/linux/cli/main.cpp $(HARDEN_LDFLAGS) -lncurses -lpthread $(PCAP_LIBS) -o $@
 
 linux: $(BUILD)/zd-linux
 
-test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell
+test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell $(BUILD)/test_esp32_common $(BUILD)/zd-linux $(BUILD)/zd_sim
 	./$(BUILD)/test_functional_core
 	./$(BUILD)/test_painter
 	./$(BUILD)/test_secops
 	./$(BUILD)/test_linux_parsers
 	./$(BUILD)/test_dot11_frames
 	./$(BUILD)/test_linux_shell
+	./$(BUILD)/test_esp32_common
 	python3 tests/scripts/test_flasher.py
+	python3 tests/scripts/test_linux_cli.py --zd-linux ./$(BUILD)/zd-linux --zd-sim ./$(BUILD)/zd_sim
 	node platforms/web/test_web_core.js
 
 sim: $(BUILD)/zd_sim

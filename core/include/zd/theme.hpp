@@ -87,8 +87,11 @@ struct ThemePalette {
 // existing Gfx primitives (no extra bitmaps, heap buffers, or compile flags).
 enum class ThemeEffect : uint8_t {
     None = 0,
-    DigitalRain,  // Stateless cascading ASCII code-rain columns in the muted palette color
-    TacticalHud   // Corner targeting reticles + animated divider sweep pip
+    DigitalRain,     // Stateless cascading ASCII code-rain columns in the muted palette color
+    TacticalHud,     // Corner targeting reticles + animated divider sweep pip
+    LightningStorm,  // Slanted rain + digital rain + jagged forked lightning strike art
+    RadarDish,       // Parabolic radio dish sweeping wave arcs
+    SatelliteBeam    // Orbital satellite shooting beam down to Earth horizon
 };
 
 struct ThemeSpec {
@@ -107,56 +110,24 @@ inline constexpr std::array<ThemeSpec, kThemeCount> kThemeCatalog = {{
      "Classic e-paper: charcoal ink on warm paper", true, ThemeEffect::None,
      {{242, 240, 230}, {22, 24, 28}, {48, 58, 92}, {155, 152, 142}, {215, 95, 110}}},
 
-    {ThemeId::DarkInk, "dark", "Dark Ink",
-     "High-contrast white ink on deep black", false, ThemeEffect::None,
-     {{10, 12, 16}, {244, 246, 250}, {165, 195, 255}, {72, 78, 92}, {255, 130, 150}}},
-
     {ThemeId::ZeroDayCyan, "cyan", "ZeroDay",
-     "Signature cyber cyan on midnight blue", false, ThemeEffect::None,
+     "Signature cyber cyan and dish wave scanner", false, ThemeEffect::RadarDish,
      {{6, 12, 22}, {0, 238, 255}, {120, 255, 200}, {30, 68, 96}, {255, 90, 180}}},
 
-    {ThemeId::PhosphorGreen, "green", "Phosphor",
-     "Retro green-phosphor CRT terminal", false, ThemeEffect::None,
-     {{6, 12, 6}, {56, 255, 96}, {175, 255, 175}, {26, 86, 36}, {120, 255, 120}}},
+    {ThemeId::CodeRain, "rain", "Storm Rain",
+     "Cascading digital rain and lightning strikes", false, ThemeEffect::LightningStorm,
+     {{2, 8, 4}, {36, 255, 112}, {190, 255, 210}, {24, 96, 48}, {235, 255, 140}}},
 
-    {ThemeId::NeonNoir, "neon", "Neon Noir",
-     "Rain-slick neon city: hot magenta and electric cyan", false, ThemeEffect::None,
-     {{14, 6, 26}, {255, 72, 196}, {0, 232, 255}, {104, 52, 150}, {255, 196, 56}}},
-
-    {ThemeId::NeonVolt, "volt", "Neon Volt",
-     "High-voltage visor: acid yellow and electric cyan", false, ThemeEffect::None,
-     {{12, 14, 20}, {245, 240, 56}, {40, 240, 232}, {76, 84, 104}, {255, 72, 148}}},
-
-    {ThemeId::OperatorBlue, "operator", "Operator",
-     "Pentest workstation: steel text, cobalt blue, red alerts", false, ThemeEffect::None,
-     {{14, 18, 28}, {216, 226, 240}, {78, 150, 255}, {66, 80, 110}, {240, 76, 92}}},
-
-    {ThemeId::RedTeam, "redteam", "Red Team",
-     "Night-ops red that keeps your eyes dark-adapted", false, ThemeEffect::None,
-     {{16, 4, 6}, {255, 86, 86}, {255, 164, 104}, {124, 40, 44}, {255, 220, 150}}},
-
-    {ThemeId::AmberCrt, "amber", "Amber CRT",
-     "Vintage amber monochrome terminal glow", false, ThemeEffect::None,
+    {ThemeId::AmberCrt, "amber", "Amber Pulse",
+     "Warm amber-orange pocket deck monochrome glow", false, ThemeEffect::None,
      {{16, 10, 2}, {255, 178, 0}, {255, 216, 128}, {100, 64, 10}, {255, 124, 40}}},
 
-    {ThemeId::SunsetGrid, "sunset", "Sunset Grid",
-     "Synthwave sunset: warm orange and pink on deep purple", false, ThemeEffect::None,
-     {{28, 10, 46}, {255, 156, 96}, {255, 92, 178}, {96, 52, 136}, {90, 220, 255}}},
-
-    {ThemeId::CodeRain, "rain", "Code Rain",
-     "Cascading emerald digital rain on pitch-black void", false, ThemeEffect::DigitalRain,
-     {{2, 8, 4}, {36, 255, 112}, {190, 255, 210}, {24, 96, 48}, {110, 255, 160}}},
-
-    {ThemeId::CrimsonOps, "crimson", "Crimson Ops",
-     "Team Red tactical HUD: scarlet ink and radar sweep", false, ThemeEffect::TacticalHud,
+    {ThemeId::RedTeam, "redteam", "Red Team",
+     "Offensive ops HUD: orbital satellite beam", false, ThemeEffect::SatelliteBeam,
      {{12, 4, 6}, {255, 68, 82}, {255, 188, 196}, {132, 34, 48}, {255, 146, 56}}},
 
-    {ThemeId::RedRain, "redrain", "Red Rain",
-     "Team Red cascading crimson code rain on obsidian", false, ThemeEffect::DigitalRain,
-     {{10, 2, 4}, {255, 58, 76}, {255, 196, 196}, {126, 26, 38}, {255, 128, 128}}},
-
     {ThemeId::BlueTeam, "blueteam", "Blue Team",
-     "Defensive ops HUD: crisp ice blue and shield grid", false, ThemeEffect::TacticalHud,
+     "Defensive ops HUD: crisp ice blue shield grid", false, ThemeEffect::TacticalHud,
      {{6, 12, 24}, {96, 192, 255}, {188, 232, 255}, {36, 76, 128}, {82, 255, 188}}},
 }};
 // clang-format on
@@ -253,25 +224,35 @@ constexpr ThemeId prevTheme(ThemeId current) {
 }
 
 // Case-insensitive key lookup (persistence, serial CLI, web, config files).
+// Includes legacy aliases for condensed themes so saved NVS/config keys remain valid.
 inline std::optional<ThemeId> themeFromKey(std::string_view key) {
     const auto lower = [](char c) {
         return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
     };
+    std::string norm;
+    norm.reserve(key.size());
+    for (char c : key) {
+        norm.push_back(lower(c));
+    }
     for (const ThemeSpec& t : kThemeCatalog) {
-        const std::string_view k(t.key);
-        if (k.size() != key.size()) {
-            continue;
-        }
-        bool match = true;
-        for (std::size_t i = 0; i < k.size(); ++i) {
-            if (lower(key[i]) != k[i]) {
-                match = false;
-                break;
-            }
-        }
-        if (match) {
+        if (norm == t.key) {
             return t.id;
         }
+    }
+    if (norm == "dark" || norm == "neon" || norm == "volt" || norm == "sunset") {
+        return ThemeId::ZeroDayCyan;
+    }
+    if (norm == "green" || norm == "storm") {
+        return ThemeId::CodeRain;
+    }
+    if (norm == "orange") {
+        return ThemeId::AmberCrt;
+    }
+    if (norm == "crimson" || norm == "redrain") {
+        return ThemeId::RedTeam;
+    }
+    if (norm == "operator") {
+        return ThemeId::BlueTeam;
     }
     return std::nullopt;
 }

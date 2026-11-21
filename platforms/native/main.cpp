@@ -127,7 +127,9 @@ void runInstantScan(zd::hal::PlatformSession& session, SimulatedRadioScanner& ra
     session.stepRadio(t + 1u, radio);
 }
 
-bool parseOptions(int argc, char** argv, Options& opt) {
+enum class ParseStatus { Ok, ExitZero, ExitError };
+
+ParseStatus parseOptions(int argc, char** argv, Options& opt) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--demo") {
@@ -136,34 +138,53 @@ bool parseOptions(int argc, char** argv, Options& opt) {
             opt.dims = {160, 80};
         } else if (a == "--no-color") {
             opt.color = false;
-        } else if (a == "--theme" && i + 1 < argc) {
+        } else if (a == "--theme") {
+            if (i + 1 >= argc) {
+                std::cerr << "--theme requires an argument\n";
+                return ParseStatus::ExitError;
+            }
             opt.theme = argv[++i];
-        } else if (a == "--ppm" && i + 1 < argc) {
+        } else if (a == "--ppm") {
+            if (i + 1 >= argc) {
+                std::cerr << "--ppm requires an argument\n";
+                return ParseStatus::ExitError;
+            }
             opt.ppmPath = argv[++i];
-        } else if (a == "--size" && i + 1 < argc) {
+        } else if (a == "--size") {
+            if (i + 1 >= argc) {
+                std::cerr << "--size requires an argument\n";
+                return ParseStatus::ExitError;
+            }
             const std::string key = argv[++i];
             if (const auto prof = zd::screenProfileFromKey(key)) {
                 opt.dims = prof->dims;
             } else {
                 std::cerr << "Unknown screen profile '" << key
                           << "'. Choose: micro | compact | plus | epaper | wide\n";
-                return false;
+                return ParseStatus::ExitError;
             }
         } else if (a == "--help" || a == "-h") {
             std::cout << "Usage: zd_sim [--demo] [--theme <key>] "
                          "[--size <micro|compact|plus|epaper|wide>] [--ppm <out.ppm>] [--no-color]\n";
-            return false;
+            return ParseStatus::ExitZero;
+        } else {
+            std::cerr << "Unknown option '" << a << "'\n";
+            return ParseStatus::ExitError;
         }
     }
-    return true;
+    return ParseStatus::Ok;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     Options opt;
-    if (!parseOptions(argc, argv, opt)) {
+    const ParseStatus parsed = parseOptions(argc, argv, opt);
+    if (parsed == ParseStatus::ExitZero) {
         return 0;
+    }
+    if (parsed == ParseStatus::ExitError) {
+        return 2;
     }
 
     zd::hal::MemoryThemeStore store(opt.theme);

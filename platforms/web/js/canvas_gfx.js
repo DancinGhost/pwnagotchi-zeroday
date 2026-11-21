@@ -1,5 +1,5 @@
 // Crisp pixel-buffer M5GFX software rasterizer + 5x7 Font0 bitmap glyphs
-// (ported directly from src/main.cpp so the webpage canvas matches M5Stick pixel-for-pixel).
+// (ported from core/include/zd/ui_model.hpp and render/include/zd/render/{painter,surface_rgb565}.hpp).
 (function (root) {
   'use strict';
 
@@ -108,10 +108,13 @@
   ];
 
   // Headless-safe RGBA pixel buffer mimicking M5Canvas / M5GFX primitives.
-  function createPixelBuffer(width, height) {
+  // Accepts an optional pre-allocated Uint8ClampedArray (e.g. ImageData.data) for zero-copy blitting.
+  function createPixelBuffer(width, height, backingData) {
     const w = Math.max(1, Math.trunc(width));
     const h = Math.max(1, Math.trunc(height));
-    const data = new Uint8ClampedArray(w * h * 4);
+    const data = backingData && backingData.length === w * h * 4
+      ? backingData
+      : new Uint8ClampedArray(w * h * 4);
     let textFg = { r: 255, g: 255, b: 255 };
     let textBg = null;
 
@@ -218,32 +221,47 @@
 
     // M5GFX fillArc convention: 0 deg = +X (right), 90 deg = +Y (down),
     // 180 deg = -X (left), 270 deg = -Y (up), sweeping clockwise deg0 -> deg1.
+    // Uses trig + cross-product half-plane tests matching surface_rgb565.hpp.
     function fillArc(cxIn, cyIn, r0In, r1In, deg0In, deg1In, col) {
       const cx = Math.trunc(cxIn);
       const cy = Math.trunc(cyIn);
       const rOuter = Math.max(r0In, r1In);
       const rInner = Math.max(0, Math.min(r0In, r1In));
-      const d0 = ((deg0In % 360) + 360) % 360;
-      const d1 = ((deg1In % 360) + 360) % 360;
-      const wraps = d0 > d1;
+      if (rOuter <= 0) {
+        return;
+      }
+      const normDeg = function (d) {
+        const m = d % 360;
+        return m < 0 ? m + 360 : m;
+      };
+      const a0 = normDeg(deg0In);
+      const a1 = normDeg(deg1In);
+      const span = a0 > a1 ? 360 - a0 + a1 : a1 - a0;
+      const fullCircle = Math.abs(deg1In - deg0In) >= 360;
+      const reflex = span > 180;
+      const degToRad = Math.PI / 180;
+      const c0x = Math.cos(a0 * degToRad);
+      const c0y = Math.sin(a0 * degToRad);
+      const c1x = Math.cos(a1 * degToRad);
+      const c1y = Math.sin(a1 * degToRad);
 
-      const bound = Math.ceil(rOuter) + 1;
+      const outerSq = rOuter * rOuter;
+      const innerSq = rInner * rInner;
+      const bound = Math.ceil(rOuter);
+
       for (let dy = -bound; dy <= bound; dy++) {
         for (let dx = -bound; dx <= bound; dx++) {
-          const dist = Math.hypot(dx, dy);
-          const inRadius =
-            rInner === 0
-              ? dist <= rOuter + 0.3
-              : dist > rInner + 0.05 && dist <= rOuter + 0.28;
-          if (!inRadius) continue;
-
-          if (dx === 0 && dy === 0) {
-            if (rInner === 0) setPixel(cx, cy, col);
+          const dSq = dx * dx + dy * dy;
+          if (dSq > outerSq || dSq < innerSq) continue;
+          if (fullCircle || (dx === 0 && dy === 0)) {
+            setPixel(cx + dx, cy + dy, col);
             continue;
           }
-
-          const deg = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
-          const inAngle = wraps ? deg >= d0 || deg <= d1 : deg >= d0 && deg <= d1;
+          const cross0 = c0x * dy - c0y * dx;
+          const cross1 = c1x * dy - c1y * dx;
+          const inAngle = reflex
+            ? cross0 >= -1e-4 || cross1 <= 1e-4
+            : cross0 >= -1e-4 && cross1 <= 1e-4;
           if (inAngle) {
             setPixel(cx + dx, cy + dy, col);
           }
@@ -299,7 +317,7 @@
     };
   }
 
-  // --- Exact pwnagotchi-zeroday UI Painting Primitives (ported from src/main.cpp) ---
+  // --- Exact pwnagotchi-zeroday UI Painting Primitives (ported from painter.hpp) ---
 
   function drawFaceBrackets(gfx, g, color, compact) {
     const r = g.bracketHalfHeight + (compact ? 4 : 6);
@@ -311,7 +329,7 @@
     gfx.fillArc(rightArcCenterX, g.centerY, r, r - thickness, 322.0, 38.0, color);
   }
 
-  function drawSingleEye(gfx, cx, cy, r, style, pal, compact, isRightEye) {
+  function drawSingleEye(gfx, cx, cy, r, style, pal, compact, animTick, isRightEye) {
     const stroke = compact ? 2 : 3;
 
     switch (style) {
@@ -391,16 +409,60 @@
         break;
       }
       case logic.EyeGlyph.CyberWink: {
-        // Left eye winks '>', right eye sparkles '*'
         if (!isRightEye) {
-          const span = Math.max(3, r - 1);
-          for (let t = 0; t < stroke; t++) {
-            gfx.drawLine(cx - span, cy - span + t, cx + span - 1, cy + t, pal.fg);
-            gfx.drawLine(cx - span, cy + span - t, cx + span - 1, cy - t, pal.fg);
+          const span = Math.max(2, r - 1);
+          gfx.drawLine(cx - span, cy - span, cx + span - 1, cy, pal.fg);
+          gfx.drawLine(cx - span, cy + span, cx + span - 1, cy, pal.fg);
+          if (stroke > 1) {
+            gfx.drawLine(cx - span, cy - span + 1, cx + span - 2, cy, pal.fg);
+            gfx.drawLine(cx - span, cy + span - 1, cx + span - 2, cy, pal.fg);
           }
         } else {
-          gfx.fillCircle(cx, cy, r + 1, pal.fg);
-          gfx.fillCircle(cx, cy, Math.max(2, r - stroke), pal.bg);
+          gfx.fillCircle(cx, cy, r, pal.fg);
+          gfx.fillCircle(cx, cy, Math.max(1, r - stroke), pal.bg);
+          gfx.fillCircle(cx, cy, Math.max(1, Math.trunc(r / 3)), pal.highlight);
+        }
+        break;
+      }
+      case logic.EyeGlyph.LaserVisor: {
+        const vw = r * 2 + 1;
+        const vh = Math.max(4, r);
+        const vx = cx - r;
+        const vy = cy - Math.trunc(vh / 2);
+        gfx.fillRoundRect(vx, vy, vw, vh, 1, pal.fg);
+        const gw = Math.max(2, Math.trunc(r / 2));
+        const travel = Math.max(1, vw - gw - 2);
+        const gx = vx + 1 + (((animTick >>> 0) * 2) % travel);
+        gfx.fillRect(gx, cy - 1, gw, 2, pal.highlight);
+        break;
+      }
+      case logic.EyeGlyph.ShieldVisor: {
+        const vw = r * 2;
+        const vh = Math.max(4, r * 2 - 1);
+        const vx = cx - r;
+        const vy = cy - r + 1;
+        gfx.fillRoundRect(vx, vy, vw, vh, 2, pal.fg);
+        if (vw > 4 && vh > 4) {
+          gfx.fillRoundRect(vx + 2, vy + 2, vw - 4, vh - 4, 1, pal.bg);
+        }
+        gfx.fillRect(cx - 1, cy - 1, 2, 2, pal.accent);
+        break;
+      }
+      case logic.EyeGlyph.StarEyes: {
+        const sr = Math.max(2, r);
+        gfx.drawLine(cx, cy - sr, cx, cy + sr, pal.fg);
+        gfx.drawLine(cx - sr, cy, cx + sr, cy, pal.fg);
+        gfx.drawLine(cx - Math.trunc(sr / 2), cy - Math.trunc(sr / 2), cx + Math.trunc(sr / 2), cy + Math.trunc(sr / 2), pal.fg);
+        gfx.drawLine(cx - Math.trunc(sr / 2), cy + Math.trunc(sr / 2), cx + Math.trunc(sr / 2), cy - Math.trunc(sr / 2), pal.fg);
+        gfx.fillCircle(cx, cy, Math.max(1, Math.trunc(r / 3)), pal.highlight);
+        break;
+      }
+      case logic.EyeGlyph.AlertRing: {
+        gfx.fillCircle(cx, cy, r, pal.highlight);
+        gfx.fillCircle(cx, cy, Math.max(1, r - stroke), pal.bg);
+        if ((animTick & 1) === 0) {
+          gfx.fillRect(cx - 1, cy - Math.max(1, Math.trunc(r / 2)), 2, Math.max(2, r - 1), pal.fg);
+        } else {
           gfx.fillCircle(cx, cy, Math.max(1, Math.trunc(r / 3)), pal.highlight);
         }
         break;
@@ -460,6 +522,13 @@
         gfx.fillArc(g.centerX, g.mouthY + r, r + 1, r + 1 - stroke, 205.0, 335.0, pal.fg);
         break;
       }
+      case logic.MouthGlyph.Fangs: {
+        gfx.fillRect(g.centerX - r, g.mouthY, r * 2, stroke, pal.fg);
+        const fh = compact ? 2 : 3;
+        gfx.fillRect(g.centerX - r + 1, g.mouthY + stroke, 2, fh, pal.fg);
+        gfx.fillRect(g.centerX + r - 3, g.mouthY + stroke, 2, fh, pal.fg);
+        break;
+      }
     }
   }
 
@@ -478,14 +547,15 @@
     const f = frame.face;
     const blink = Boolean(opts && opts.blink) && canBlinkStyle(f.eyes);
     const eyeStyle = blink ? logic.EyeGlyph.SleepingLine : f.eyes;
+    const animTick = frame.animTick >>> 0;
 
     drawFaceBrackets(gfx, g, pal.fg, frame.compact);
 
     const leftEyeX = g.centerX - g.eyeOffsetX;
     const rightEyeX = g.centerX + g.eyeOffsetX;
 
-    drawSingleEye(gfx, leftEyeX, g.eyeY, g.eyeRadius, eyeStyle, pal, frame.compact, false);
-    drawSingleEye(gfx, rightEyeX, g.eyeY, g.eyeRadius, eyeStyle, pal, frame.compact, true);
+    drawSingleEye(gfx, leftEyeX, g.eyeY, g.eyeRadius, eyeStyle, pal, frame.compact, animTick, false);
+    drawSingleEye(gfx, rightEyeX, g.eyeY, g.eyeRadius, eyeStyle, pal, frame.compact, animTick, true);
 
     if (eyeStyle === logic.EyeGlyph.Sunglasses) {
       gfx.fillRect(
@@ -527,7 +597,7 @@
 
     const badge = '[' + f.moodLabel + ']';
     const badgeW = badge.length * 6;
-    gfx.setTextColor(pal.muted, pal.bg);
+    gfx.setTextColor(pal.accent, pal.bg);
     gfx.drawString(badge, Math.max(2, g.centerX - Math.trunc(badgeW / 2)), g.moodBadgeY);
   }
 
@@ -546,8 +616,90 @@
     }
   }
 
+  function drawPixelArtDish(gfx, sx, sy, sw, sh, pal, animTick) {
+    const bx = sx + 4;
+    const by = sy + sh - 1;
+    gfx.drawLine(bx, by - 3, bx - 2, by, pal.accent);
+    gfx.drawLine(bx, by - 3, bx + 2, by, pal.accent);
+    const tilt = animTick % 3 === 1 ? 1 : 0;
+    const dr = Math.min(5, Math.trunc(sh / 2) - 1);
+    const dcx = sx + 5;
+    const dcy = sy + sh - 4;
+    gfx.fillArc(dcx, dcy, dr, Math.max(1, dr - 2), 115.0 + tilt * 10.0, 225.0 + tilt * 10.0, pal.fg);
+    const fx = dcx + 2;
+    const fy = dcy - 2 - tilt;
+    gfx.drawLine(dcx, dcy, fx, fy, pal.accent);
+    gfx.fillRect(fx, fy, 2, 2, pal.highlight);
+    const maxWr = Math.min(sx + sw - 2 - fx, fy - sy);
+    const phase = animTick % 3;
+    for (let step = 0; step < 3; step++) {
+      const wr = 3 + step * 3;
+      if (wr > maxWr || wr <= 1) continue;
+      gfx.fillArc(fx, fy, wr, wr - 1, 290.0, 355.0, step === phase ? pal.highlight : pal.accent);
+    }
+  }
+
+  function drawPixelArtSatellite(gfx, sx, sy, sw, sh, pal, animTick) {
+    const ey = sy + sh - 1;
+    gfx.fillRect(sx + 2, ey - 1, Math.max(4, sw - 4), 2, pal.accent);
+    if (sw >= 18) {
+      gfx.fillRect(sx + 5, ey - 2, sw - 10, 1, pal.accent);
+    }
+    const drift = animTick % 4 === 1 ? 1 : animTick % 4 === 3 ? -1 : 0;
+    const satX = sx + Math.trunc(sw / 2) + drift;
+    const satY = sy + 2;
+    const wingW = sw >= 24 ? 5 : 2;
+    gfx.fillRect(satX - 1, satY - 1, 3, 3, pal.fg);
+    gfx.fillRect(satX - 2 - wingW, satY, wingW, 2, pal.accent);
+    gfx.fillRect(satX + 3, satY, wingW, 2, pal.accent);
+    const beamTop = satY + 2;
+    const beamBot = ey - 2;
+    if (beamBot > beamTop) {
+      gfx.drawLine(satX, beamTop, satX, beamBot, pal.muted);
+      const span = beamBot - beamTop;
+      const py = beamTop + ((animTick * 2) % span);
+      gfx.fillRect(satX, py, 1, Math.min(2, beamBot - py + 1), pal.highlight);
+    }
+    if ((animTick & 1) === 0) {
+      gfx.fillRect(satX - 2, ey - 2, 5, 1, pal.highlight);
+    }
+  }
+
+  function drawPixelArtShield(gfx, sx, sy, sw, sh, pal, animTick, alertActive) {
+    const cx = sx + Math.trunc(sw / 2);
+    const cy = sy + Math.trunc(sh / 2);
+    const sr = Math.max(3, Math.trunc(Math.min(sw, sh) / 2) - 1);
+    const col = alertActive ? pal.highlight : pal.accent;
+    gfx.fillRoundRect(cx - sr, cy - sr, sr * 2, sr * 2, 2, col);
+    if (sr > 2) {
+      gfx.fillRoundRect(cx - sr + 2, cy - sr + 2, sr * 2 - 4, sr * 2 - 4, 1, pal.bg);
+    }
+    const ox = animTick % 4 === 0 || animTick % 4 === 3 ? -1 : 1;
+    const oy = animTick % 4 < 2 ? -1 : 1;
+    gfx.fillRect(cx + ox - 1, cy + oy - 1, 2, 2, alertActive ? pal.highlight : pal.fg);
+  }
+
+  function drawActivitySceneWidget(gfx, frame) {
+    if (!frame.scene || frame.scene === 'None') return;
+    const micro = frame.dims.width < 150 || frame.dims.height < 72;
+    const sw = micro ? 14 : frame.compact ? 20 : frame.dims.width >= 300 ? 36 : 28;
+    const sh = micro ? 10 : frame.compact ? 12 : frame.dims.width >= 300 ? 18 : 16;
+    const sx = frame.dims.width - sw - (micro || frame.compact ? 3 : 4);
+    const sy = frame.headerDividerY + (micro || frame.compact ? 2 : 3);
+    const animTick = frame.animTick >>> 0;
+
+    if (frame.scene === 'RadarDish') {
+      drawPixelArtDish(gfx, sx, sy, sw, sh, frame.palette, animTick);
+    } else if (frame.scene === 'SatelliteBeam') {
+      drawPixelArtSatellite(gfx, sx, sy, sw, sh, frame.palette, animTick);
+    } else if (frame.scene === 'ThreatShield') {
+      drawPixelArtShield(gfx, sx, sy, sw, sh, frame.palette, animTick, Boolean(frame.threatBanner));
+    }
+  }
+
   function drawPetFacePage(gfx, frame, opts) {
     drawPwnagotchiFace(gfx, frame, opts);
+    drawActivitySceneWidget(gfx, frame);
 
     if (!frame.compact) {
       gfx.drawLine(
@@ -569,15 +721,31 @@
       y += frame.lineStepY;
     }
 
+    if (!frame.compact && frame.rankLine && frame.rankLine.length > 0) {
+      gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+      gfx.drawString(frame.rankLine, frame.speechX, frame.footerDividerY - 21);
+      const barW = 28;
+      const barX = frame.dims.width - barW - 4;
+      const barY = frame.footerDividerY - 19;
+      if (barX > frame.speechX + frame.rankLine.length * 6 + 2) {
+        gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
+        const fillW = Math.trunc((barW * (frame.xpProgressPct || 0)) / 100);
+        if (fillW > 0) {
+          gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
+        }
+      }
+    }
+
     if (frame.spotlightLabel && frame.spotlightLabel.length > 0) {
-      gfx.setTextColor(frame.palette.muted, frame.palette.bg);
-      gfx.drawString(frame.spotlightLabel, frame.speechX, frame.footerDividerY - 12);
+      const spotCol = frame.threatBanner ? frame.palette.highlight : frame.palette.accent;
+      gfx.setTextColor(spotCol, frame.palette.bg);
+      gfx.drawString(frame.spotlightLabel, frame.speechX, frame.footerDividerY - 11);
     }
   }
 
   function drawRadarPage(gfx, frame) {
     if (frame.radarRows.length === 0) {
-      gfx.setTextColor(frame.palette.muted, frame.palette.bg);
+      gfx.setTextColor(frame.palette.fg, frame.palette.bg);
       const textW = frame.radarEmptyHint.length * 6;
       const cx = Math.max(4, Math.trunc((frame.dims.width - textW) / 2));
       const cy = Math.trunc((frame.headerDividerY + frame.footerDividerY) / 2) - 4;
@@ -626,9 +794,42 @@
         ? bar.channel === 1 || bar.channel === 6 || bar.channel === 11 || bar.channel === 13
         : bar.channel % 2 === 1;
       if (showLabel) {
-        gfx.setTextColor(frame.palette.muted, frame.palette.bg);
+        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
         gfx.drawString(String(bar.channel), bx, frame.chartBaseY + (frame.dims.height < 72 ? 1 : 2));
       }
+    }
+  }
+
+  function drawRfGuardPage(gfx, frame) {
+    gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+    gfx.drawString(frame.rfGuardSummary || '', 4, frame.headerDividerY + (frame.compact ? 2 : 4));
+
+    const rows = frame.rfGuardRows || [];
+    if (rows.length === 0) {
+      gfx.setTextColor(frame.palette.fg, frame.palette.bg);
+      const hint = frame.rfGuardEmptyHint || '';
+      const cx = Math.max(4, Math.trunc((frame.dims.width - hint.length * 6) / 2));
+      const cy = Math.trunc((frame.headerDividerY + frame.footerDividerY) / 2) - 2;
+      gfx.drawString(hint, cx, cy);
+      return;
+    }
+
+    const rowStep = frame.compact ? 11 : 14;
+    let y = frame.headerDividerY + (frame.compact ? 12 : 16);
+    for (let i = 0; i < rows.length; i++) {
+      if (y + 9 >= frame.footerDividerY) break;
+      const row = rows[i];
+      drawSignalMeter(gfx, 4, y + (frame.compact ? 7 : 8), row.bars, frame.palette, frame.compact);
+
+      const textX = frame.compact ? 19 : 24;
+      const prefix = row.secure ? '!' : ' ';
+      gfx.setTextColor(row.secure ? frame.palette.highlight : frame.palette.fg, frame.palette.bg);
+      gfx.drawString(prefix + row.ssid, textX, y);
+
+      const detailW = row.details.length * 6;
+      gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+      gfx.drawString(row.details, frame.dims.width - detailW - 4, y);
+      y += rowStep;
     }
   }
 
@@ -728,16 +929,87 @@
     }
   }
 
+  function drawLightningStormBackdrop(gfx, frame) {
+    drawDigitalRainBackdrop(gfx, frame);
+    const top = frame.headerDividerY + 2;
+    const bottom = frame.footerDividerY - 2;
+    if (bottom - top < 12 || frame.dims.width < 96) return;
+
+    const animTick = frame.animTick >>> 0;
+    const stepX = frame.compact ? 24 : 20;
+    const spanY = Math.max(8, bottom - top - 5);
+    for (let rx = 8; rx + 3 < frame.dims.width - 2; rx += stepX) {
+      const h = Math.imul(rx, 2654435761) >>> 0;
+      const ry = top + ((animTick * 3 + (h >>> 8)) % spanY);
+      if (frame.page === logic.ScreenPage.PetFace) {
+        const g = frame.faceGeom;
+        const fL = g.centerX - g.bracketOffsetX - 6;
+        const fR = g.centerX + g.bracketOffsetX + 6;
+        if (rx >= fL && rx - 2 <= fR) continue;
+      }
+      gfx.drawLine(rx, ry, rx - 2, ry + 4, frame.palette.muted);
+    }
+
+    if (animTick % 12 < 2) {
+      const bx = frame.dims.width - (frame.compact ? 12 : 20);
+      const midY = Math.trunc((top + bottom) / 2);
+      gfx.drawLine(bx, top, bx - 4, midY, frame.palette.highlight);
+      gfx.drawLine(bx - 4, midY, bx + 2, midY, frame.palette.highlight);
+      gfx.drawLine(bx + 2, midY, bx - 3, bottom, frame.palette.fg);
+      const forkY = midY + Math.trunc((bottom - midY) / 2);
+      if (bx >= 10 && forkY <= bottom) {
+        gfx.drawLine(bx - 4, midY, bx - 8, forkY, frame.palette.accent);
+      }
+      if (bx >= 6 && bx + 1 < frame.dims.width) {
+        gfx.fillRect(bx - 5, bottom - 1, 5, 1, frame.palette.highlight);
+      }
+    }
+  }
+
+  function drawRadarDishBackdrop(gfx, frame) {
+    const top = frame.headerDividerY + 2;
+    const bottom = frame.footerDividerY - 2;
+    if (bottom - top < 16 || frame.dims.width < 96) return;
+
+    const ox = frame.dims.width - 6;
+    const oy = bottom - 2;
+    const maxR = Math.min(frame.compact ? 18 : 30, oy - top - 1);
+    const phase = (frame.animTick >>> 0) % 3;
+    for (let k = 0; k < 3; k++) {
+      const r = 6 + k * (frame.compact ? 5 : 9);
+      if (r > maxR || ox - r < 2) continue;
+      gfx.fillArc(ox, oy, r, r - 1, 185.0, 260.0, k === phase ? frame.palette.accent : frame.palette.muted);
+    }
+  }
+
+  function drawSatelliteBeamBackdrop(gfx, frame) {
+    drawTacticalHudBackdrop(gfx, frame);
+    const top = frame.headerDividerY + 3;
+    const bottom = frame.footerDividerY - 3;
+    if (bottom - top < 12) return;
+    const bx = frame.dims.width - 5;
+    gfx.drawLine(bx, top, bx, bottom, frame.palette.muted);
+    const span = bottom - top;
+    const py = top + (((frame.animTick >>> 0) * 3) % span);
+    gfx.fillRect(bx - 1, py, 3, Math.min(3, bottom - py + 1), frame.palette.highlight);
+  }
+
   function drawThemeBackdrop(gfx, frame) {
     if (frame.themeEffect === 'DigitalRain') {
       drawDigitalRainBackdrop(gfx, frame);
     } else if (frame.themeEffect === 'TacticalHud') {
       drawTacticalHudBackdrop(gfx, frame);
+    } else if (frame.themeEffect === 'LightningStorm') {
+      drawLightningStormBackdrop(gfx, frame);
+    } else if (frame.themeEffect === 'RadarDish') {
+      drawRadarDishBackdrop(gfx, frame);
+    } else if (frame.themeEffect === 'SatelliteBeam') {
+      drawSatelliteBeamBackdrop(gfx, frame);
     }
   }
 
   function drawThemeDividerAccent(gfx, frame) {
-    if (frame.themeEffect !== 'TacticalHud') {
+    if (frame.themeEffect !== 'TacticalHud' && frame.themeEffect !== 'SatelliteBeam') {
       return;
     }
     const pipW = frame.compact ? 6 : 10;
@@ -769,9 +1041,27 @@
     // Optional zero-RAM procedural theme backdrop (mirrors render/include/zd/render/painter.hpp)
     drawThemeBackdrop(gfx, frame);
 
-    // Top telemetry bar
+    // Top telemetry bar + ops mode badge
     gfx.setTextColor(frame.palette.fg, frame.palette.bg);
     gfx.drawString(frame.headerLine, 4, frame.headerTextY);
+    if (frame.modeBadge && frame.modeBadge.length > 0) {
+      const bw = frame.modeBadge.length * 6;
+      const bx = frame.dims.width - bw - 2;
+      const by = Math.max(0, frame.headerTextY - 1);
+      const bh = Math.min(10, frame.headerDividerY - by);
+      const isOff = frame.offensiveArmed || frame.opsMode === logic.OpsMode.Offensive;
+      const isDef = frame.opsMode === logic.OpsMode.Defensive;
+      if (isOff || isDef) {
+        const badgeBg = isOff ? frame.palette.highlight : frame.palette.accent;
+        if (bh > 0 && bx >= 1) {
+          gfx.fillRect(bx - 1, by, bw + 2, bh, badgeBg);
+        }
+        gfx.setTextColor(frame.palette.bg, badgeBg);
+      } else {
+        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+      }
+      gfx.drawString(frame.modeBadge, bx, frame.headerTextY);
+    }
     gfx.drawLine(0, frame.headerDividerY, frame.dims.width - 1, frame.headerDividerY, frame.palette.muted);
     drawThemeDividerAccent(gfx, frame);
 
@@ -785,6 +1075,9 @@
         break;
       case logic.ScreenPage.ChannelSpectrum:
         drawSpectrumPage(gfx, frame);
+        break;
+      case logic.ScreenPage.RfGuard:
+        drawRfGuardPage(gfx, frame);
         break;
     }
 

@@ -208,12 +208,75 @@
     };
   }
 
+  function generateBleSnapshot(presetId, seed, nowMs) {
+    let s = fp.nextSeed(seed);
+    const effectiveId = presetId === 'roam' ? resolveRoamSubPreset(nowMs || 0) : presetId;
+    if (effectiveId === 'bunker') {
+      return { devices: [], nextSeed: s };
+    }
+    const devices = [
+      { mac: '44:12:aa:bb:10:01', name: 'SmartWatch_BT', rssi: -68, companyId: 0x0000, serviceUuid: 0x180d, trackerPayload: false }
+    ];
+    if (effectiveId === 'cafe' || effectiveId === 'con') {
+      devices.push({
+        mac: '7a:3c:91:04:88:12',
+        name: 'Tracker_Tag',
+        rssi: -54 - (s % 12),
+        companyId: 0x004c,
+        serviceUuid: 0x0000,
+        trackerPayload: true
+      });
+    }
+    if (effectiveId === 'con' || effectiveId === 'lab') {
+      devices.push({
+        mac: '00:80:e1:42:13:37',
+        name: 'SubGHz_Tool',
+        rssi: -49 - (s % 10),
+        companyId: 0x0000,
+        serviceUuid: 0x3082,
+        trackerPayload: false
+      });
+    }
+    if (effectiveId === 'quiet') {
+      devices.push({
+        mac: 'c2:11:22:33:44:55',
+        name: 'Key_Beacon',
+        rssi: -76,
+        companyId: 0x0000,
+        serviceUuid: 0xfeed,
+        trackerPayload: true
+      });
+    }
+    s = fp.nextSeed(s);
+    return { devices, nextSeed: s };
+  }
+
+  function generateSubGhzEvent(presetId, freqKhz, seed) {
+    const s = fp.nextSeed(seed);
+    const protos = ['OOK_Keyfob', 'Keeloq', 'Weather433', 'TPMS_FSK'];
+    const protocol = protos[s % protos.length];
+    const rssi = -46 - (s % 30);
+    const isReplay = presetId === 'con' || (s % 4 === 0);
+    return {
+      signal: {
+        freqKhz: freqKhz || 433920,
+        rssi,
+        protocol,
+        burstCount: isReplay ? 6 : 1,
+        anomaly: isReplay ? 'ReplayBurst' : 'None'
+      },
+      nextSeed: s
+    };
+  }
+
   const airwavesSim = Object.freeze({
     PRESETS,
     FUNNY_HACKER_SSIDS,
     PEER_ROSTER,
     resolveRoamSubPreset,
     generateAirwaveSnapshot,
+    generateBleSnapshot,
+    generateSubGhzEvent,
     randomHackerBeacon,
     randomPeerEncounter
   });

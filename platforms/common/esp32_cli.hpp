@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 
+#include "frame_pacer.hpp"
 #include "zd/hal.hpp"
 #include "zd/theme.hpp"
 
@@ -37,54 +38,91 @@ inline void pollSerialLines(std::string& lineBuf, OnLineFn&& onLine, std::size_t
     }
 }
 
-// Tracks whether the display actually needs an SPI push this tick:
-// - 20 FPS (50 ms) while scanning, while a theme toast is visible, or on animated themes.
-// - Immediate redraw when state changes (page, theme, mood, phrase, scan count, battery).
-// - 1 Hz (1000 ms) fallback for the uptime clock when idle on static themes.
-class DirtyFramePacer {
-public:
-    bool shouldRender(const zd::AppState& st, uint32_t nowMs) {
-        const bool animated = st.isScanning ||
-                              zd::isThemeToastVisible(st.themeToastUntilMs, nowMs) ||
-                              zd::themeSpec(st.theme).effect != zd::ThemeEffect::None;
-        const bool stateChanged =
-            !initialized_ || st.page != lastPage_ || st.theme != lastTheme_ ||
-            st.mood != lastMood_ || st.completedScans != lastScans_ ||
-            st.batteryPercent != lastBat_ || st.isCharging != lastCharging_ ||
-            st.phrase != lastPhrase_;
+inline void printSerialStatus(const zd::hal::PlatformSession& session,
+                              const char* eventTag,
+                              const char* extraSuffix = nullptr) {
+    const zd::AppState& st = session.state();
+    const zd::FaceDescriptor face = zd::faceForMood(st.mood);
+    Serial.printf("[%s] %s %s> \"%s\" | APs:%u | BusiestCh:%d | Theme:%s%s\n",
+                  eventTag,
+                  face.asciiFace,
+                  st.petName.c_str(),
+                  st.phrase.c_str(),
+                  static_cast<unsigned>(st.latestScan.totalAps),
+                  static_cast<int>(st.latestScan.busiestChannel),
+                  zd::themeSpec(st.theme).key,
+                  extraSuffix != nullptr ? extraSuffix : "");
+}
 
-        const uint32_t minInterval = animated ? 50u : 1000u;
-        if (!stateChanged && (nowMs - lastRenderMs_) < minInterval) {
-            return false;
-        }
-        if (stateChanged && (nowMs - lastRenderMs_) < 25u && initialized_) {
-            return false;
-        }
+// Shared resistive/capacitive touch zone gesture recognizer with release debounce & cooldown.
+struct TouchZoneGesture {
+    enum class Action : uint8_t {
+        None = 0,
+        PrevTheme,
+        NextTheme,
+        PrevView,
+        NextView,
+        Scan,
+        CycleMode
+    };
 
-        initialized_ = true;
-        lastRenderMs_ = nowMs;
-        lastPage_ = st.page;
-        lastTheme_ = st.theme;
-        lastMood_ = st.mood;
-        lastScans_ = st.completedScans;
-        lastBat_ = st.batteryPercent;
-        lastCharging_ = st.isCharging;
-        lastPhrase_ = st.phrase;
-        return true;
+    Action update(bool isTouched, uint16_t tx, uint16_t ty, uint32_t nowMs, uint32_t releaseDebounceMs) {
+        if (cooldownUntilMs_ != 0u && static_cast<int32_t>(cooldownUntilMs_ - nowMs) > 0) {
+            return Action::None;
+        }
+        if (isTouched) {
+            lastSeenMs_ = nowMs;
+            if (!active_) {
+                active_ = true;
+                longHandled_ = false;
+                startMs_ = nowMs;
+                startX_ = tx;
+                startY_ = ty;
+            } else if (!longHandled_ && (nowMs - startMs_) >= 600u) {
+                if (startY_ < 42) {
+                    longHandled_ = true;
+                    cooldownUntilMs_ = nowMs + 250u;
+                    return Action::PrevTheme;
+                }
+                if (startX_ >= 100 && startX_ <= 220) {
+                    longHandled_ = true;
+                    cooldownUntilMs_ = nowMs + 250u;
+                    return Action::CycleMode;
+                }
+            }
+            return Action::None;
+        }
+        if (active_ && (nowMs - lastSeenMs_) >= releaseDebounceMs) {
+            active_ = false;
+            if (longHandled_) {
+                return Action::None;
+            }
+            const uint32_t duration = lastSeenMs_ - startMs_;
+            if (duration < 600u) {
+                cooldownUntilMs_ = nowMs + 150u;
+                if (startY_ < 42) {
+                    return (startX_ >= 250) ? Action::CycleMode : Action::NextTheme;
+                }
+                if (startX_ < 100) {
+                    return Action::PrevView;
+                }
+                if (startX_ > 220) {
+                    return Action::NextView;
+                }
+                return Action::Scan;
+            }
+        }
+        return Action::None;
     }
 
-    void markRendered(uint32_t nowMs) { lastRenderMs_ = nowMs; }
-
 private:
-    bool initialized_ = false;
-    uint32_t lastRenderMs_ = 0;
-    zd::ScreenPage lastPage_ = zd::ScreenPage::PetFace;
-    zd::ThemeId lastTheme_ = zd::ThemeId::PaperInk;
-    zd::Mood lastMood_ = zd::Mood::Awake;
-    uint32_t lastScans_ = 0;
-    int32_t lastBat_ = -1;
-    bool lastCharging_ = false;
-    std::string lastPhrase_;
+    bool active_ = false;
+    bool longHandled_ = false;
+    uint32_t startMs_ = 0;
+    uint32_t lastSeenMs_ = 0;
+    uint32_t cooldownUntilMs_ = 0;
+    uint16_t startX_ = 0;
+    uint16_t startY_ = 0;
 };
 
 }  // namespace esp32_common

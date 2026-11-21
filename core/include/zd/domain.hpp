@@ -34,6 +34,58 @@ struct ScanSummary {
     ChannelHistogram histogram{};
 };
 
+// Operational security posture displayed in the HUD and reflected by pet faces/scenes.
+enum class OpsMode : uint8_t {
+    Recon = 0,
+    Defensive,
+    Offensive
+};
+
+constexpr const char* opsModeLabel(OpsMode m, bool compact = false) {
+    switch (m) {
+        case OpsMode::Recon:     return compact ? "RCN" : "RECON";
+        case OpsMode::Defensive: return compact ? "DEF" : "DEFENSE";
+        case OpsMode::Offensive: return compact ? "OFF" : "OFFENSE";
+    }
+    return compact ? "RCN" : "RECON";
+}
+
+// Defensive BLE tracker & multi-tool classification.
+enum class BleThreatKind : uint8_t {
+    None = 0,
+    AirTagTracker,
+    SmartTagTracker,
+    TileTracker,
+    MultiToolBle,
+    BleSpam
+};
+
+struct BleDevice {
+    std::string mac;
+    std::string name;
+    int32_t rssi = -100;
+    uint16_t companyId = 0;
+    uint16_t serviceUuid = 0;
+    bool trackerPayload = false;
+    BleThreatKind threat = BleThreatKind::None;
+};
+
+// Sub-GHz (CC1101) signal classification & anomaly flags.
+enum class SubGhzAnomaly : uint8_t {
+    None = 0,
+    ReplayBurst,
+    JammingCarrier,
+    RollingCode
+};
+
+struct SubGhzSignal {
+    uint32_t freqKhz = 433920u;
+    int32_t rssi = -100;
+    std::string protocol = "OOK";
+    uint32_t burstCount = 1u;
+    SubGhzAnomaly anomaly = SubGhzAnomaly::None;
+};
+
 // Pet emotional states driving faces and status phrases.
 enum class Mood : uint8_t {
     Awake = 0,
@@ -44,14 +96,22 @@ enum class Mood : uint8_t {
     Cool,
     Lonely,
     Bored,
-    Sleepy
+    Sleepy,
+    Grateful,
+    Mischief,
+    ScanningDish,
+    CyberAttack,
+    ShieldGuard,
+    ThreatAlert,
+    LevelUp
 };
 
 // Active display screen cycled via Button A.
 enum class ScreenPage : uint8_t {
     PetFace = 0,
     NearbyRadar,
-    ChannelSpectrum
+    ChannelSpectrum,
+    RfGuard
 };
 
 // Color palette themes cycled via Button B long-press.
@@ -59,20 +119,12 @@ enum class ScreenPage : uint8_t {
 // themes immediately before `Count_` and add a matching row to `kThemeCatalog`.
 // Persist themes by their string `key` (not this numeric value) so reordering is safe.
 enum class ThemeId : uint8_t {
-    PaperInk = 0,     // High-contrast e-paper look (dark ink on warm light canvas)
-    DarkInk,          // Crisp white ink on deep black
-    ZeroDayCyan,      // Cyber cyan on midnight background
-    PhosphorGreen,    // Retro CRT green phosphor on black
-    NeonNoir,         // Rain-soaked neon city vibe: hot magenta + electric cyan on violet-black
-    NeonVolt,         // High-voltage visor vibe: acid yellow + electric cyan on carbon-black
-    OperatorBlue,     // Pentest-workstation vibe: cool steel text, cobalt blue accents, red alerts
-    RedTeam,          // Night-ops red on black (preserves dark-adapted vision)
-    AmberCrt,         // Vintage amber monochrome terminal
-    SunsetGrid,       // Retro synthwave sunset: warm orange + pink on deep purple
-    CodeRain,         // Cascading emerald digital rain on pitch-black void
-    CrimsonOps,       // Team Red tactical HUD: scarlet ink, rose telemetry & radar sweep
-    RedRain,          // Team Red cascading crimson code rain on obsidian black
-    BlueTeam,         // Defensive ops HUD: crisp ice blue, sapphire grid & radar sweep
+    PaperInk = 0,     // Classic e-paper: charcoal ink on warm paper
+    ZeroDayCyan,      // Signature cyber cyan with sweeping dish effect
+    CodeRain,         // Storm Rain: cascading digital rain & lightning strike
+    AmberCrt,         // Warm amber/orange monochrome glow
+    RedTeam,          // Offensive ops HUD: scarlet ink & orbital satellite beam
+    BlueTeam,         // Defensive shield HUD: crisp ice blue & tactical radar
     Count_            // Sentinel: number of themes (not a real theme)
 };
 
@@ -101,6 +153,19 @@ struct AppState {
     std::string petName = "zeroday";
     std::string phrase = "Hello world! Ready to scan.";
     ScanSummary latestScan{};
+    bool offensiveArmed = false;
+
+    // Progression, multi-radio telemetry & defensive guard state
+    uint32_t xp = 0;
+    uint32_t highScore = 0;
+    uint8_t level = 1;
+    uint32_t levelUpUntilMs = 0;
+    OpsMode opsMode = OpsMode::Recon;
+    std::vector<BleDevice> bleDevices{};
+    std::vector<SubGhzSignal> subGhzSignals{};
+    uint32_t subGhzFreqKhz = 433920u;
+    uint32_t threatsDetected = 0;
+    std::string lastThreatLabel{};
 };
 
 // --- Algebraic Sum Type of Events fed from the Imperative Shell into the Pure Reducer ---
@@ -162,6 +227,42 @@ struct SetThemeEvent {
     bool announce = true;
 };
 
+// Update the runtime offensive arming indicator shown on hardware displays.
+struct SetOffensiveArmedEvent {
+    uint32_t nowMs;
+    bool armed;
+};
+
+struct CycleOpsModeEvent {
+    uint32_t nowMs;
+};
+
+struct SetOpsModeEvent {
+    uint32_t nowMs;
+    OpsMode mode;
+};
+
+struct BleScanCompletedEvent {
+    uint32_t nowMs;
+    std::vector<BleDevice> devices;
+};
+
+struct SubGhzObservedEvent {
+    uint32_t nowMs;
+    SubGhzSignal signal;
+};
+
+struct SetSubGhzFreqEvent {
+    uint32_t nowMs;
+    uint32_t freqKhz;
+};
+
+struct SetHighScoreEvent {
+    uint32_t nowMs;
+    uint32_t highScore;
+    uint32_t xp = 0;
+};
+
 using AppEvent = std::variant<
     TickEvent,
     ButtonAPressedEvent,
@@ -172,6 +273,13 @@ using AppEvent = std::variant<
     CyclePageEvent,
     SetPageEvent,
     CycleThemeEvent,
-    SetThemeEvent>;
+    SetThemeEvent,
+    SetOffensiveArmedEvent,
+    CycleOpsModeEvent,
+    SetOpsModeEvent,
+    BleScanCompletedEvent,
+    SubGhzObservedEvent,
+    SetSubGhzFreqEvent,
+    SetHighScoreEvent>;
 
 }  // namespace zd

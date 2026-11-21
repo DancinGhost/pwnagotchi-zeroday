@@ -85,20 +85,37 @@ void testAuditLogAndSessionFileHardening() {
     assert(tmpDir != nullptr);
     const std::string base(tmpDir);
 
-    // 1. FileAuditLog writes 0600 file and returns true.
+    // 1. FileAuditLog writes 0600 file, strips CR/LF/ESC log-injection chars, and returns true.
     const std::string auditPath = base + "/audit.log";
     FileAuditLog audit(auditPath);
     assert(audit.record("TEST_ENTRY ok=true"));
+    assert(audit.record("BAD\nFAKE_ALLOWED\r\x1b[31m"));
     struct stat st {};
     assert(::stat(auditPath.c_str(), &st) == 0);
     assert((st.st_mode & 0777) == 0600);
-    assert(readFileToString(auditPath).find("TEST_ENTRY ok=true") != std::string::npos);
+    const std::string auditContents = readFileToString(auditPath);
+    assert(auditContents.find("TEST_ENTRY ok=true") != std::string::npos);
+    assert(auditContents.find('\x1b') == std::string::npos);
+    std::size_t nlCount = 0u;
+    for (char ch : auditContents) {
+        assert(ch != '\r');
+        if (ch == '\n') {
+            ++nlCount;
+        }
+    }
+    assert(nlCount == 2u);  // exactly two log entries, no injected line break
 
-    // 2. FileAuditLog refuses symlinks (O_NOFOLLOW) and fails closed (returns false).
+    // 2. FileAuditLog & makeDirRecursive refuse symlinks cleanly.
     const std::string symAudit = base + "/sym_audit.log";
     assert(::symlink(auditPath.c_str(), symAudit.c_str()) == 0);
     FileAuditLog symLog(symAudit);
     assert(!symLog.record("SHOULD_FAIL"));
+
+    const std::string realSubDir = base + "/real_dir";
+    assert(makeDirRecursive(realSubDir));
+    const std::string symDir = base + "/sym_dir";
+    assert(::symlink(realSubDir.c_str(), symDir.c_str()) == 0);
+    assert(!makeDirRecursive(symDir + "/child"));
 
     // 3. saveEventsToFile / loadEventsFromFile round-trip + symlink & size-cap rejection.
     const std::string sessPath = base + "/session.zds";
@@ -125,10 +142,18 @@ void testAuditLogAndSessionFileHardening() {
     std::remove(auditPath.c_str());
     std::remove(symSess.c_str());
     std::remove(sessPath.c_str());
+    std::remove(symDir.c_str());
+    ::rmdir(realSubDir.c_str());
     ::rmdir(tmpDir);
 }
 
 void testControllerPreflightAndShutdown() {
+    char dirTmpl[] = "/tmp/zd-test-ctrl-XXXXXX";
+    char* tmpDir = ::mkdtemp(dirTmpl);
+    assert(tmpDir != nullptr);
+    const std::string base(tmpDir);
+    ::setenv("HOME", tmpDir, 1);
+
     AppController ctrl("wlan0");
     ctrl.boot(1234u);
     assert(!ctrl.monitoring());
@@ -137,9 +162,34 @@ void testControllerPreflightAndShutdown() {
     assert(d1 == zd::sec::AuthDecision::BlockedUnconfirmed);
     assert(!ctrl.monitoring());
 
+    // Multicast client target is rejected in requestDeauth before monitor/injection.
+    const auto badCli = ctrl.requestDeauth("02:aa:bb:cc:dd:ee", "01:00:5e:00:00:fb", 4u);
+    assert(!badCli.ok);
+
+    // Replay anchors secMood to lastEventMs rather than wall clock so historical alerts stay Alarmed.
+    const std::string replayPath = base + "/replay_alarmed.zds";
+    const std::vector<zd::sec::SecEvent> replayEvs = {
+        zd::sec::ApObserved{1000u, "02:aa:bb:cc:dd:01", "CorpNet", 6, -42,
+                            zd::sec::Encryption::Wpa2, false},
+        zd::sec::ApObserved{1100u, "02:aa:bb:cc:dd:02", "CorpNet", 6, -45,
+                            zd::sec::Encryption::Open, false},
+    };
+    assert(saveEventsToFile(replayPath, replayEvs));
+    const auto loadRes = ctrl.loadSession(replayPath);
+    assert(loadRes.ok);
+    assert(ctrl.secMood() == zd::sec::SecMood::Alarmed);
+
     // Safe shutdown when idle is a no-op.
     ctrl.shutdown();
     assert(!ctrl.monitoring());
+
+    std::remove(replayPath.c_str());
+    std::string cleanAudit = base + "/.local/state/pwnagotchi-zeroday/audit.log";
+    std::remove(cleanAudit.c_str());
+    ::rmdir((base + "/.local/state/pwnagotchi-zeroday").c_str());
+    ::rmdir((base + "/.local/state").c_str());
+    ::rmdir((base + "/.local").c_str());
+    ::rmdir(tmpDir);
 }
 
 }  // namespace

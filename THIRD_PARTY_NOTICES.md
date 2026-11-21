@@ -9,7 +9,7 @@ required by, the distributed binaries**. Each remains under its own license.
 
 | Component | License | Source |
 |---|---|---|
-| Arduino core for ESP32 (`framework-arduinoespressif32`) | LGPL-2.1-or-later | https://github.com/espressif/arduino-esp32 |
+| Arduino core for ESP32 (`framework-arduinoespressif32`, incl. `SPI` and `ESP32 BLE Arduino` `BLEDevice.h` under Apache-2.0) | LGPL-2.1-or-later / Apache-2.0 | https://github.com/espressif/arduino-esp32 |
 | ESP-IDF (bootloader, partition table, libraries; incl. FreeRTOS, lwIP, mbedTLS, etc.) | Apache-2.0 (bundled components under their own permissive licenses) | https://github.com/espressif/esp-idf |
 | M5Unified (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5Unified |
 | M5GFX (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5GFX |
@@ -46,6 +46,10 @@ under the **BSD-2-Clause License** (Copyright (c) 2012 Adafruit Industries).
   `aircrack-ng` (`airmon-ng`, `airodump-ng`, `aireplay-ng`, GPL-2.0-or-later), `iw` (ISC), and
   NetworkManager `nmcli` (GPL-2.0-or-later). None of these tools are linked into or distributed
   with `pwnagotchi-zeroday`.
+- **Optional Linux BLE / Sub-GHz line parsers** (`platforms/linux/backend/parsers.hpp`) accept
+  line-based output formats produced by standard host utilities such as BlueZ (`bluetoothctl`,
+  GPL-2.0-or-later) and `rtl_433` (GPL-2.0-or-later), which are never bundled, linked, or
+  distributed with `pwnagotchi-zeroday`.
 
 ## Trademarks
 
@@ -53,6 +57,8 @@ under the **BSD-2-Clause License** (Copyright (c) 2012 Adafruit Industries).
 (https://github.com/evilsocket/pwnagotchi, GPL-3.0); this project is an independent
 clean-room C++17/JS implementation inspired by it and is not affiliated with or endorsed by it.
 Tamagotchi is a registered trademark of Bandai; M5Stack, M5StickC, LILYGO, T-Deck,
-Espressif, and Qt are trademarks of their respective owners. Their use in hardware target names
-and documentation is strictly nominative and descriptive to identify compatible hardware and
+Espressif, Qt, Bluetooth, Apple, AirTag, Find My, Samsung, SmartTag, Tile, Flipper Zero,
+and Texas Instruments (CC1101) are trademarks or registered trademarks of their respective
+owners. Their use in hardware target names, passive signature matching, and documentation is
+strictly nominative and descriptive to identify compatible hardware, radio standards, and
 toolchains.

@@ -58,12 +58,7 @@ public:
     // Synchronously wait for any in-flight background job and restore managed WiFi if
     // monitor mode is active (or was just brought up by an in-flight StartMonitor).
     void shutdown() {
-        if (actionJob_.running()) {
-            // Wait until the worker finishes so we never leave a monitor interface stranded.
-            while (actionJob_.running()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
-        }
+        actionJob_.wait();
         if (std::optional<AsyncActionOutcome> outcome = actionJob_.collect()) {
             if (outcome->kind == AsyncActionKind::StartMonitor && !outcome->monitorIface.empty()) {
                 monitor_.applyUp(outcome->monitorIface, outcome->killedNetworkManager);
@@ -95,26 +90,35 @@ public:
     void step() {
         pollAsyncJobs();
         const uint32_t now = nowMs();
-        const char* tag = pet_.stepRadio(now, scanner_);
-        if (tag != nullptr && std::string(tag) == "SCAN_DONE") {
-            feedScanIntoSecurity(now);
+        if (!monitoring_ && !actionJob_.running()) {
+            const char* tag = pet_.stepRadio(now, scanner_);
+            if (tag != nullptr && std::string(tag) == "SCAN_DONE") {
+                feedScanIntoSecurity(now);
+            }
         }
         if (monitoring_ && capture_ && capture_->running()) {
             for (const sec::CapturedFrame& f : capture_->poll()) {
                 sec_.ingest(f);
+            }
+            if (sec_.state().revision != lastPetSyncRev_ && (now - lastPetSyncMs_) >= 2000u) {
+                syncPetFromSec(now);
             }
         }
         pet_.stepTick(now, power_);
     }
 
     // --- Recon (active scan via NetworkManager; no monitor mode needed) ---
-    void requestScan() { pet_.dispatch(ButtonBPressedEvent{nowMs()}, &themeStore_); }
+    void requestScan() {
+        replayMode_ = false;
+        pet_.dispatch(ButtonBPressedEvent{nowMs()}, &themeStore_);
+    }
 
     // --- Monitor mode lifecycle (needed for capture + injection) ---
     // airmon-ng commonly takes seconds, so both of these only *kick off* a worker-thread
     // job and return immediately; the real outcome surfaces later via takeLastAsyncResult()
     // once pollAsyncJobs() (called every step()) collects it.
     ActionResult startMonitor() {
+        replayMode_ = false;
         if (monitoring_) {
             return {true, "already monitoring on " + monitor_.monitorIface()};
         }
@@ -194,7 +198,33 @@ public:
         sec_.authorization().operatorConfirmed = on;
         if (prev != on) {
             (void)audit_.record(on ? "ARM operatorConfirmed=true" : "DISARM operatorConfirmed=false");
+            pet_.dispatch(SetOffensiveArmedEvent{nowMs(), on}, &themeStore_);
         }
+    }
+
+    void cycleOpsMode() {
+        pet_.dispatch(CycleOpsModeEvent{nowMs()}, &themeStore_);
+    }
+
+    void setOpsMode(OpsMode mode) {
+        pet_.dispatch(SetOpsModeEvent{nowMs(), mode}, &themeStore_);
+    }
+
+    void ingestBle(const std::vector<BleDevice>& devices) {
+        const uint32_t now = nowMs();
+        for (const BleDevice& d : devices) {
+            sec_.dispatch(sec::BleObserved{now, d.mac, d.name, d.rssi, d.companyId,
+                                           d.serviceUuid, d.trackerPayload});
+        }
+        pet_.dispatch(BleScanCompletedEvent{now, devices}, &themeStore_);
+    }
+
+    void ingestSubGhz(const SubGhzSignal& sig) {
+        const uint32_t now = nowMs();
+        sec_.dispatch(sec::SubGhzObserved{now, sig.freqKhz, sig.rssi, sig.protocol,
+                                          sig.burstCount,
+                                          sig.anomaly == SubGhzAnomaly::JammingCarrier});
+        pet_.dispatch(SubGhzObservedEvent{now, sig}, &themeStore_);
     }
     bool allowBssid(const std::string& bssid) { return sec_.authorization().allow(bssid); }
     bool toggleAllowBssid(const std::string& bssid) {
@@ -230,7 +260,7 @@ public:
         if (!sec::isValidMac(bssid)) {
             return {false, "invalid target BSSID '" + bssid + "'"};
         }
-        if (!client.empty() && !sec::isValidMac(client)) {
+        if (!sec::isValidClientTarget(client)) {
             return {false, "invalid client MAC '" + client + "'"};
         }
         if (count < 1u || count > 1000u) {
@@ -297,6 +327,8 @@ public:
         return {true, "saved " + std::to_string(sec_.events().size()) + " event(s) to " + path};
     }
 
+    void setPcapDumpPath(std::string path) { pcapDumpPath_ = std::move(path); }
+
     ActionResult loadSession(const std::string& path) {
         if (path.empty()) {
             return {false, "missing file path"};
@@ -305,20 +337,9 @@ public:
         if (!decoded.has_value()) {
             return {false, "failed to read session file: " + path};
         }
+        replayMode_ = true;
         sec_.loadEvents(*decoded);
-        // Also populate the pet UI with the replayed networks so the Pet Face / Radar /
-        // Spectrum views immediately reflect the loaded airspace.
-        std::vector<AccessPoint> aps;
-        aps.reserve(sec_.state().targets.size());
-        for (const sec::WifiTarget& t : sec_.state().targets) {
-            aps.push_back(AccessPoint{
-                t.ssid,
-                t.rssi,
-                t.channel,
-                t.enc != sec::Encryption::Open && t.enc != sec::Encryption::Unknown
-            });
-        }
-        pet_.dispatch(ScanCompletedEvent{nowMs(), std::move(aps)}, &themeStore_);
+        syncPetFromSec(nowMs());
         return {true, "replayed " + std::to_string(decoded->size()) + " event(s) from " + path +
                           " (" + std::to_string(sec_.state().targets.size()) + " APs, " +
                           std::to_string(sec_.state().stations.size()) + " stations)"};
@@ -331,7 +352,10 @@ public:
     UiFrame petFrame(ScreenDimensions dims) const { return pet_.buildFrame(dims); }
     const AppState& petState() const { return pet_.state(); }
     const sec::SecState& secState() const { return sec_.state(); }
-    sec::SecMood secMood() const { return sec::deriveSecMood(sec_.state(), nowMs()); }
+    sec::SecMood secMood() const {
+        const uint32_t refMs = replayMode_ ? sec_.state().lastEventMs : nowMs();
+        return sec::deriveSecMood(sec_.state(), refMs);
+    }
     const std::vector<linux_backend::ScannedAp>& lastScan() const { return scanner_.detailed(); }
 
     bool monitoring() const { return monitoring_; }
@@ -381,6 +405,41 @@ private:
         lastAsyncResult_ = outcome->result;
     }
 
+    void syncPetFromSec(uint32_t now) {
+        lastPetSyncRev_ = sec_.state().revision;
+        lastPetSyncMs_ = now;
+        std::vector<AccessPoint> aps;
+        aps.reserve(sec_.state().targets.size());
+        for (const sec::WifiTarget& t : sec_.state().targets) {
+            aps.push_back(AccessPoint{
+                t.ssid,
+                t.rssi,
+                t.channel,
+                t.enc != sec::Encryption::Open && t.enc != sec::Encryption::Unknown
+            });
+        }
+        pet_.dispatch(ScanCompletedEvent{now, std::move(aps)}, &themeStore_);
+        if (!sec_.state().bleTargets.empty()) {
+            std::vector<BleDevice> devs;
+            devs.reserve(sec_.state().bleTargets.size());
+            for (const sec::BleTarget& bt : sec_.state().bleTargets) {
+                devs.push_back(BleDevice{bt.mac, bt.name, bt.rssi, bt.companyId, bt.serviceUuid,
+                                         bt.trackerPayload, bt.threat});
+            }
+            pet_.dispatch(BleScanCompletedEvent{now, std::move(devs)}, &themeStore_);
+        }
+        if (!sec_.state().subGhzCaptures.empty()) {
+            const sec::SubGhzCapture& c = sec_.state().subGhzCaptures.back();
+            const SubGhzAnomaly anom =
+                c.continuousCarrier
+                    ? SubGhzAnomaly::JammingCarrier
+                    : (c.burstCount >= 5u ? SubGhzAnomaly::ReplayBurst : SubGhzAnomaly::None);
+            pet_.dispatch(
+                SubGhzObservedEvent{now, SubGhzSignal{c.freqKhz, c.rssi, c.protocol, c.burstCount, anom}},
+                &themeStore_);
+        }
+    }
+
     void feedScanIntoSecurity(uint32_t now) {
         for (const linux_backend::ScannedAp& ap : scanner_.detailed()) {
             sec_.dispatch(sec::ApObserved{now, ap.bssid, ap.ssid, ap.channel, ap.rssi, ap.enc});
@@ -389,7 +448,11 @@ private:
 
     void buildCaptureAndInjector() {
 #ifdef ZD_WITH_LIBPCAP
-        capture_ = std::make_unique<linux_backend::NativeCaptureSource>();
+        auto nativeCap = std::make_unique<linux_backend::NativeCaptureSource>();
+        if (!pcapDumpPath_.empty()) {
+            nativeCap->setPcapDumpPath(pcapDumpPath_);
+        }
+        capture_ = std::move(nativeCap);
         injector_ = std::make_unique<linux_backend::NativeInjector>(&monitor_);
         engine_ = CaptureEngine::Native;
 #else
@@ -400,6 +463,7 @@ private:
     }
 
     std::string iface_;
+    std::string pcapDumpPath_;
     hal::PlatformSession pet_;
     sec::SecSession sec_;
     linux_backend::CliMonitorControl monitor_;
@@ -412,6 +476,9 @@ private:
     std::unique_ptr<sec::IInjector> injector_;
     CaptureEngine engine_ = CaptureEngine::None;
     bool monitoring_ = false;
+    bool replayMode_ = false;
+    uint64_t lastPetSyncRev_ = UINT64_MAX;
+    uint32_t lastPetSyncMs_ = 0u;
 
     // Declared last so it is destroyed *first*: AsyncJob's destructor joins its worker
     // thread, which must happen before capture_/injector_ (which that thread may be using)

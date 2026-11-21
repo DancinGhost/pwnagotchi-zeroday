@@ -1,10 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "domain.hpp"
@@ -58,14 +61,25 @@ inline std::vector<AccessPoint> deduplicateSortedAps(const std::vector<AccessPoi
                                                      std::size_t maxCount = 0) {
     std::vector<AccessPoint> result;
     result.reserve(maxCount > 0 ? std::min(maxCount, sortedAps.size()) : sortedAps.size());
+    const bool useHash = (maxCount == 0u || sortedAps.size() > 32u);
+    std::unordered_set<std::string> seenSsids;
+    std::unordered_set<int32_t> seenHiddenChannels;
+    if (useHash) {
+        seenSsids.reserve(sortedAps.size());
+    }
     for (const AccessPoint& candidate : sortedAps) {
         const bool isHidden = (candidate.ssid == "<hidden>");
         bool alreadyPresent = false;
-        for (const AccessPoint& existing : result) {
-            if (isHidden ? (existing.ssid == "<hidden>" && existing.channel == candidate.channel)
-                         : (existing.ssid == candidate.ssid)) {
-                alreadyPresent = true;
-                break;
+        if (useHash) {
+            alreadyPresent = isHidden ? !seenHiddenChannels.insert(candidate.channel).second
+                                      : !seenSsids.insert(candidate.ssid).second;
+        } else {
+            for (const AccessPoint& existing : result) {
+                if (isHidden ? (existing.ssid == "<hidden>" && existing.channel == candidate.channel)
+                             : (existing.ssid == candidate.ssid)) {
+                    alreadyPresent = true;
+                    break;
+                }
             }
         }
         if (!alreadyPresent) {
@@ -145,6 +159,85 @@ inline ScanSummary summarizeScan(const std::vector<AccessPoint>& rawNetworks,
         topUnique,
         histogram
     };
+}
+
+// --- Pure BLE Tracker / Multi-Tool & Sub-GHz Helpers ----------------------------------
+
+inline std::string toLowerAscii(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return out;
+}
+
+inline BleThreatKind classifyBleDevice(std::string_view mac,
+                                       std::string_view name,
+                                       uint16_t companyId,
+                                       uint16_t serviceUuid,
+                                       bool trackerPayload) {
+    const std::string lowerName = toLowerAscii(name);
+    const std::string lowerMac = toLowerAscii(mac);
+
+    // Multi-tool BLE signatures (e.g. Flipper Zero STMicroelectronics OUI 00:80:e1 or serial/RPC UUIDs 0x3080..0x3083)
+    if ((serviceUuid >= 0x3080u && serviceUuid <= 0x3083u) ||
+        lowerMac.rfind("00:80:e1", 0) == 0 ||
+        lowerMac.rfind("0080e1", 0) == 0 ||
+        lowerName.rfind("flipper", 0) == 0) {
+        return BleThreatKind::MultiToolBle;
+    }
+    // Apple FindMy / AirTag (Company ID 0x004C with offline-finding payload or name hint)
+    if ((companyId == 0x004Cu && trackerPayload) ||
+        lowerName.find("airtag") != std::string::npos ||
+        lowerName.find("findmy") != std::string::npos) {
+        return BleThreatKind::AirTagTracker;
+    }
+    // Samsung SmartTag (Company ID 0x0075 with tracker payload or name hint)
+    if ((companyId == 0x0075u && trackerPayload) ||
+        lowerName.find("smarttag") != std::string::npos) {
+        return BleThreatKind::SmartTagTracker;
+    }
+    // Tile Tracker (Service UUID 0xFEED or name hint)
+    if (serviceUuid == 0xFEEDu || lowerName.find("tile") != std::string::npos) {
+        return BleThreatKind::TileTracker;
+    }
+    if (lowerName.find("spam") != std::string::npos) {
+        return BleThreatKind::BleSpam;
+    }
+    return BleThreatKind::None;
+}
+
+constexpr const char* bleThreatLabel(BleThreatKind kind) {
+    switch (kind) {
+        case BleThreatKind::None:            return "OK";
+        case BleThreatKind::AirTagTracker:   return "LOC-TAG!";
+        case BleThreatKind::SmartTagTracker: return "BLE-TAG!";
+        case BleThreatKind::TileTracker:     return "KEY-TAG!";
+        case BleThreatKind::MultiToolBle:    return "RF-TOOL!";
+        case BleThreatKind::BleSpam:         return "SPAM!";
+    }
+    return "OK";
+}
+
+constexpr const char* subGhzAnomalyLabel(SubGhzAnomaly anomaly) {
+    switch (anomaly) {
+        case SubGhzAnomaly::None:           return "OK";
+        case SubGhzAnomaly::ReplayBurst:    return "REPLAY!";
+        case SubGhzAnomaly::JammingCarrier: return "JAMMING!";
+        case SubGhzAnomaly::RollingCode:    return "ROLLING";
+    }
+    return "OK";
+}
+
+inline std::string formatFreqMhz(uint32_t freqKhz) {
+    const uint32_t whole = freqKhz / 1000u;
+    const uint32_t frac = (freqKhz % 1000u) / 10u;  // 2 decimal places
+    std::string f = std::to_string(frac);
+    if (f.size() < 2u) {
+        f = "0" + f;
+    }
+    return std::to_string(whole) + "." + f + "MHz";
 }
 
 }  // namespace zd

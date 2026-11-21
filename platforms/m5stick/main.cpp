@@ -39,6 +39,9 @@ public:
         M5.Display.setBrightness(180);
         canvas_.setColorDepth(16);
         canvasReady_ = canvas_.createSprite(M5.Display.width(), M5.Display.height());
+        if (!canvasReady_) {
+            Serial.println("[DISPLAY] ERROR: createSprite failed; screen output disabled");
+        }
     }
 
     zd::ScreenDimensions dimensions() const override {
@@ -81,27 +84,19 @@ zd::hal::PlatformSession gSession;
 // the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
 zd::esp32_common::OffensiveConsole gOffensive;
 
+bool gBtnALongHandled = false;
 bool gBtnBLongHandled = false;
 zd::esp32_common::DirtyFramePacer gFramePacer;
 std::string gSerialLine;
 
 void logSerialStatus(const char* eventTag) {
-    const zd::AppState& st = gSession.state();
-    const zd::FaceDescriptor face = zd::faceForMood(st.mood);
-    Serial.printf("[%s] %s %s> \"%s\" | APs:%u | BusiestCh:%d | Theme:%s\n",
-                  eventTag,
-                  face.asciiFace,
-                  st.petName.c_str(),
-                  st.phrase.c_str(),
-                  static_cast<unsigned>(st.latestScan.totalAps),
-                  static_cast<int>(st.latestScan.busiestChannel),
-                  zd::themeSpec(st.theme).key);
+    zd::esp32_common::printSerialStatus(gSession, eventTag);
 }
 
 void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
         if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs).c_str());
+            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
             return;
         }
         const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
@@ -138,8 +133,16 @@ void loop() {
     M5.update();
     const uint32_t nowMs = millis();
 
-    // 1. Button A -> next screen page
+    // 1. Button A -> short press cycles screen view, 700ms hold cycles OpsMode
     if (M5.BtnA.wasPressed()) {
+        gBtnALongHandled = false;
+    }
+    if (M5.BtnA.isPressed() && !gBtnALongHandled && M5.BtnA.pressedFor(700)) {
+        gBtnALongHandled = true;
+        gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
+        logSerialStatus("MODE");
+    }
+    if (M5.BtnA.wasReleased() && !gBtnALongHandled) {
         gSession.dispatch(zd::ButtonAPressedEvent{nowMs}, &gThemeStore);
         logSerialStatus("BTN_A");
     }
@@ -170,7 +173,8 @@ void loop() {
     pollSerialCli(nowMs);
 
     // 5. Step non-blocking radio scanner & periodic telemetry tick
-    if (const char* scanTag = gSession.stepRadio(nowMs, gRadio)) {
+    if (const char* scanTag = gSession.stepRadio(
+            nowMs, gRadio, zd::hal::PlatformSession::kDefaultScanTimeoutMs, &gThemeStore)) {
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);
