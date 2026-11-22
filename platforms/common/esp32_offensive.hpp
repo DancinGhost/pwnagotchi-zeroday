@@ -237,8 +237,13 @@ public:
         scanner_.setPetSession(petSession);
         std::string out = core_.handleLine(line, nowMs);
         scanner_.setPetSession(nullptr);
-        if (petSession != nullptr && core_.isArmed() != petSession->state().offensiveArmed) {
-            petSession->dispatch(zd::SetOffensiveArmedEvent{nowMs, core_.isArmed()});
+        if (petSession != nullptr) {
+            if (petSession->state().isScanning && WiFi.scanComplete() != WIFI_SCAN_RUNNING) {
+                petSession->dispatch(zd::ScanCompletedEvent{nowMs, {}});
+            }
+            if (core_.isArmed() != petSession->state().offensiveArmed) {
+                petSession->dispatch(zd::SetOffensiveArmedEvent{nowMs, core_.isArmed()});
+            }
         }
         return out;
     }

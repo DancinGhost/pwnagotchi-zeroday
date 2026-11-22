@@ -94,6 +94,13 @@ enum class ThemeEffect : uint8_t {
     SatelliteBeam    // Orbital satellite shooting beam down to Earth horizon
 };
 
+// Differentiates classic Pwnagotchi-style bracket faces from full pixel-art
+// mascot + gear replacement scenes per theme.
+enum class FaceStyle : uint8_t {
+    ClassicFace = 0,
+    PixelArtMascot = 1
+};
+
 struct ThemeSpec {
     ThemeId id;
     const char* key;       // Stable lowercase slug for persistence / CLI / URLs. Never rename.
@@ -205,6 +212,23 @@ constexpr bool isValidTheme(ThemeId id) {
 // Total lookup: invalid ids fall back to the first catalog entry.
 constexpr const ThemeSpec& themeSpec(ThemeId id) {
     return kThemeCatalog[isValidTheme(id) ? themeIndex(id) : 0u];
+}
+
+// Maps each theme to its pet rendering style: classic bracket face + flanking props vs.
+// full pixel-art mascot & gear replacement.
+constexpr FaceStyle themeFaceStyle(ThemeId id) {
+    switch (id) {
+        case ThemeId::PaperInk:
+        case ThemeId::CodeRain:
+            return FaceStyle::ClassicFace;
+        case ThemeId::ZeroDayCyan:
+        case ThemeId::AmberCrt:
+        case ThemeId::RedTeam:
+        case ThemeId::BlueTeam:
+        case ThemeId::Count_:
+            return FaceStyle::PixelArtMascot;
+    }
+    return FaceStyle::ClassicFace;
 }
 
 // Wrap-around step through the catalog (step may be negative).

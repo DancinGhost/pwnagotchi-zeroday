@@ -22,8 +22,12 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <unordered_set>
+
+#include "zd/report.hpp"
 #include "zd/theme.hpp"
 #include "zd/ui_model.hpp"
+#include "zd/wifi_analysis.hpp"
 
 namespace zd {
 namespace linux_gui {
@@ -64,12 +68,19 @@ void styleAllowedBadge(QTableWidgetItem* item, bool active) {
     }
 }
 
+bool containsLower(const std::string& haystack, const std::string& lowerNeedle) {
+    if (lowerNeedle.empty()) {
+        return true;
+    }
+    return zd::toLowerAscii(haystack).find(lowerNeedle) != std::string::npos;
+}
+
 }  // namespace
 
 MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     : QMainWindow(parent), app_(app) {
     setWindowTitle("pwnagotchi-zeroday — Linux");
-    resize(1080, 660);
+    resize(1120, 690);
 
     auto* central = new QWidget(this);
     auto* root = new QVBoxLayout(central);
@@ -79,7 +90,7 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     pet_ = new PetWidget(central);
     pet_->setEventCallback([this](const AppEvent& ev) {
         app_.dispatchPet(ev);
-        pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+        pet_->setFrame(app_.petFrame(kPetDims));
         refreshStatus();
     });
     top->addWidget(pet_, 3);
@@ -118,21 +129,33 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     auto* viewBtn = new QPushButton("&View", central);
     modeBtn_ = new QPushButton("&Mode: RECON", central);
     modeBtn_->setToolTip("Cycle OpsMode (RECON / DEFENSE / OFFENSE) (M)");
-    auto* loadBtn = new QPushButton("&Load…", central);
-    auto* saveBtn = new QPushButton("Sa&ve…", central);
-    recordBtn_ = new QPushButton("&Record…", central);
     btnRow->addWidget(scanBtn);
     btnRow->addWidget(monitorBtn_);
     btnRow->addWidget(prevThemeBtn);
     btnRow->addWidget(themeBtn);
     btnRow->addWidget(viewBtn);
     btnRow->addWidget(modeBtn_);
-    btnRow->addWidget(loadBtn);
-    btnRow->addWidget(saveBtn);
-    btnRow->addWidget(recordBtn_);
     statusBox->addLayout(btnRow);
 
-    // Channel control strip & table freeze toggle.
+    auto* toolsRow = new QHBoxLayout();
+    auto* loadBtn = new QPushButton("&Load…", central);
+    auto* saveBtn = new QPushButton("Sa&ve…", central);
+    recordBtn_ = new QPushButton("&Record…", central);
+    auto* pcapBtn = new QPushButton("&PCAP…", central);
+    auto* exportBtn = new QPushButton("&Export…", central);
+    bleBtn_ = new QPushButton("&BLE Scan", central);
+    bleBtn_->setEnabled(app_.bleAvailable());
+    clearThreatBtn_ = new QPushButton("Clear &Threat", central);
+    toolsRow->addWidget(loadBtn);
+    toolsRow->addWidget(saveBtn);
+    toolsRow->addWidget(recordBtn_);
+    toolsRow->addWidget(pcapBtn);
+    toolsRow->addWidget(exportBtn);
+    toolsRow->addWidget(bleBtn_);
+    toolsRow->addWidget(clearThreatBtn_);
+    statusBox->addLayout(toolsRow);
+
+    // Channel control strip, hopper & table freeze toggle.
     auto* chRow = new QHBoxLayout();
     auto* chLabel = new QLabel("Monitor &channel:", central);
     channelSpin_ = new QSpinBox(central);
@@ -142,11 +165,15 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     chLabel->setBuddy(channelSpin_);
     channelBtn_ = new QPushButton("Set C&hannel", central);
     channelBtn_->setEnabled(false);
+    hopCheck_ = new QCheckBox("&Hop ch", central);
+    hopCheck_->setToolTip("Automatically hop 2.4 GHz channels with 3s EAPOL handshake hold");
+    hopCheck_->setChecked(app_.channelHopEnabled());
     freezeSortCheck_ = new QCheckBox("&Freeze sort", central);
     freezeSortCheck_->setToolTip("Preserve table row order during live scans");
     chRow->addWidget(chLabel);
     chRow->addWidget(channelSpin_);
     chRow->addWidget(channelBtn_);
+    chRow->addWidget(hopCheck_);
     chRow->addStretch(1);
     chRow->addWidget(freezeSortCheck_);
     statusBox->addLayout(chRow);
@@ -160,6 +187,7 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     authCheck_ = new QCheckBox("I am authorized to transmit against the allow-listed targets",
                                central);
     auto* allowBtn = new QPushButton("&Allow / Remove BSSID", central);
+    auto* trustBtn = new QPushButton("Tr&ust BSSID", central);
     deauthBtn_ = new QPushButton("&Deauth selected…", central);
     deauthBtn_->setStyleSheet("font-weight:bold;");
     deauthBtn_->setEnabled(false);
@@ -167,6 +195,7 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     authLayout->addWidget(authCheck_);
     auto* authBtnRow = new QHBoxLayout();
     authBtnRow->addWidget(allowBtn);
+    authBtnRow->addWidget(trustBtn);
     authBtnRow->addWidget(deauthBtn_);
     authLayout->addLayout(authBtnRow);
     statusBox->addWidget(authGroup);
@@ -181,14 +210,23 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     top->addLayout(statusBox, 2);
     root->addLayout(top, 2);
 
-    // --- Bottom: tabbed network + station tables & defensive alerts ---
+    // --- Bottom: filter bar + tabbed tables (Networks / Stations / RF Guard) & alerts ---
     auto* split = new QSplitter(Qt::Horizontal, central);
 
-    tabs_ = new QTabWidget(split);
-    table_ = new QTableWidget(0, 9, tabs_);
+    auto* leftPane = new QWidget(split);
+    auto* leftLayout = new QVBoxLayout(leftPane);
+    leftLayout->setContentsMargins(0, 0, 0, 0);
+    filterEdit_ = new QLineEdit(leftPane);
+    filterEdit_->setPlaceholderText("Filter SSID, BSSID, probed SSID, BLE or Sub-GHz…");
+    filterEdit_->setClearButtonEnabled(true);
+    filterEdit_->setAccessibleName("Table search filter");
+    leftLayout->addWidget(filterEdit_);
+
+    tabs_ = new QTabWidget(leftPane);
+    table_ = new QTableWidget(0, 10, tabs_);
     table_->setAccessibleName("Discovered WiFi networks");
     table_->setHorizontalHeaderLabels(
-        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS", "Clients", "Capture", "Allowed"});
+        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS", "Clients", "Capture", "Trusted", "Allowed"});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -205,7 +243,18 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     stationsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tabs_->addTab(stationsTable_, "Stations / Probes (0)");
 
-    split->addWidget(tabs_);
+    rfGuardTable_ = new QTableWidget(0, 6, tabs_);
+    rfGuardTable_->setAccessibleName("BLE and Sub-GHz RF Guard detections");
+    rfGuardTable_->setHorizontalHeaderLabels(
+        {"Band", "Addr / Freq", "Name / Protocol", "RSSI", "Status", "Seen / Burst"});
+    rfGuardTable_->horizontalHeader()->setStretchLastSection(true);
+    rfGuardTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    rfGuardTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    rfGuardTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tabs_->addTab(rfGuardTable_, "RF Guard (0)");
+
+    leftLayout->addWidget(tabs_);
+    split->addWidget(leftPane);
 
     auto* alertBox = new QWidget(split);
     auto* alertLayout = new QVBoxLayout(alertBox);
@@ -227,6 +276,9 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     connect(scanBtn, &QPushButton::clicked, this, &MainWindow::onScan);
     connect(monitorBtn_, &QPushButton::clicked, this, &MainWindow::onToggleMonitor);
     connect(channelBtn_, &QPushButton::clicked, this, &MainWindow::onSetChannel);
+    connect(hopCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        app_.setChannelHopEnabled(on);
+    });
     connect(prevThemeBtn, &QPushButton::clicked, this, &MainWindow::onPrevTheme);
     connect(themeBtn, &QPushButton::clicked, this, &MainWindow::onCycleTheme);
     connect(viewBtn, &QPushButton::clicked, this, &MainWindow::onCycleView);
@@ -234,14 +286,24 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     connect(loadBtn, &QPushButton::clicked, this, &MainWindow::onLoadSession);
     connect(saveBtn, &QPushButton::clicked, this, &MainWindow::onSaveSession);
     connect(recordBtn_, &QPushButton::clicked, this, &MainWindow::onToggleRecord);
+    connect(pcapBtn, &QPushButton::clicked, this, &MainWindow::onSelectPcap);
+    connect(exportBtn, &QPushButton::clicked, this, &MainWindow::onExportReport);
+    connect(bleBtn_, &QPushButton::clicked, this, &MainWindow::onBleScan);
+    connect(clearThreatBtn_, &QPushButton::clicked, this, &MainWindow::onClearThreat);
+    connect(filterEdit_, &QLineEdit::textChanged, this, &MainWindow::onFilterChanged);
     connect(authCheck_, &QCheckBox::toggled, this, &MainWindow::onAuthToggled);
     connect(allowBtn, &QPushButton::clicked, this, &MainWindow::onAllowSelected);
+    connect(trustBtn, &QPushButton::clicked, this, &MainWindow::onTrustSelected);
     connect(deauthBtn_, &QPushButton::clicked, this, &MainWindow::onDeauthSelected);
 
     connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_O), this), &QShortcut::activated,
             this, &MainWindow::onLoadSession);
     connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_S), this), &QShortcut::activated,
             this, &MainWindow::onSaveSession);
+    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_E), this), &QShortcut::activated,
+            this, &MainWindow::onExportReport);
+    connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_F), this), &QShortcut::activated,
+            filterEdit_, QOverload<>::of(&QLineEdit::setFocus));
     connect(new QShortcut(QKeySequence(Qt::Key_F5), this), &QShortcut::activated,
             this, &MainWindow::onScan);
     connect(new QShortcut(QKeySequence(Qt::Key_BracketLeft), this), &QShortcut::activated,
@@ -258,19 +320,19 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
             this, &MainWindow::onCycleMode);
     connect(new QShortcut(QKeySequence(Qt::Key_1), this), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::PetFace});
-        pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+        pet_->setFrame(app_.petFrame(kPetDims));
     });
     connect(new QShortcut(QKeySequence(Qt::Key_2), this), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::NearbyRadar});
-        pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+        pet_->setFrame(app_.petFrame(kPetDims));
     });
     connect(new QShortcut(QKeySequence(Qt::Key_3), this), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::ChannelSpectrum});
-        pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+        pet_->setFrame(app_.petFrame(kPetDims));
     });
     connect(new QShortcut(QKeySequence(Qt::Key_4), this), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::RfGuard});
-        pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+        pet_->setFrame(app_.petFrame(kPetDims));
     });
 
     timer_ = new QTimer(this);
@@ -282,10 +344,11 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     } else {
         refreshNetworks(true);
         refreshStations(true);
+        refreshRfGuard(true);
         refreshChannels(true);
         refreshAlerts();
     }
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
     pet_->setSecMood(app_.secMood());
     refreshStatus();
 }
@@ -304,13 +367,14 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 void MainWindow::onTick() {
     app_.step();
     pollAsyncResult();
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
     pet_->setSecMood(app_.secMood());
     const std::uint32_t now = linux_app::nowMs();
     if ((now - lastTableRefreshMs_) >= 500u) {
         lastTableRefreshMs_ = now;
         refreshNetworks(false);
         refreshStations(false);
+        refreshRfGuard(false);
         refreshChannels(false);
     }
     refreshAlerts();
@@ -384,6 +448,9 @@ void MainWindow::refreshStatus() {
     if (recordBtn_->text() != recText) {
         recordBtn_->setText(recText);
     }
+    if (clearThreatBtn_ != nullptr) {
+        clearThreatBtn_->setEnabled(!ps.lastThreatLabel.empty());
+    }
 
     const auto& auth = app_.authorization();
     if (authCheck_->isChecked() != auth.operatorConfirmed) {
@@ -441,20 +508,16 @@ void MainWindow::refreshNetworks(bool force) {
     if (freezeSortCheck_ != nullptr && freezeSortCheck_->isChecked() && !displayedTargets_.empty()) {
         std::vector<sec::WifiTarget> updated;
         updated.reserve(sec.targets.size());
+        std::unordered_set<std::string> seenBssids;
+        seenBssids.reserve(displayedTargets_.size() + 8u);
         for (const auto& prev : displayedTargets_) {
             if (const sec::WifiTarget* cur = sec::findTarget(sec, prev.bssid)) {
                 updated.push_back(*cur);
+                seenBssids.insert(prev.bssid);
             }
         }
         for (const auto& cur : sec.targets) {
-            bool known = false;
-            for (const auto& prev : displayedTargets_) {
-                if (prev.bssid == cur.bssid) {
-                    known = true;
-                    break;
-                }
-            }
-            if (!known) {
+            if (seenBssids.find(cur.bssid) == seenBssids.end()) {
                 updated.push_back(cur);
             }
         }
@@ -462,14 +525,24 @@ void MainWindow::refreshNetworks(bool force) {
     } else {
         displayedTargets_ = sec::targetsByStrength(sec);
     }
-    const auto& targets = displayedTargets_;
+    const std::string needle =
+        (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
+                                 : std::string{};
+    std::vector<const sec::WifiTarget*> visible;
+    visible.reserve(displayedTargets_.size());
+    for (const auto& t : displayedTargets_) {
+        if (containsLower(t.bssid, needle) || containsLower(t.ssid, needle) ||
+            containsLower(sec::encryptionLabel(t.enc), needle)) {
+            visible.push_back(&t);
+        }
+    }
     const auto& auth = app_.authorization();
-    tabs_->setTabText(0, QString("Networks (%1)").arg(targets.size()));
+    tabs_->setTabText(0, QString("Networks (%1)").arg(visible.size()));
     const std::string selBssid = selectedBssid();
-    table_->setRowCount(static_cast<int>(targets.size()));
+    table_->setRowCount(static_cast<int>(visible.size()));
     int selRow = -1;
-    for (int i = 0; i < static_cast<int>(targets.size()); ++i) {
-        const auto& t = targets[static_cast<std::size_t>(i)];
+    for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
+        const auto& t = *visible[static_cast<std::size_t>(i)];
         setCellText(table_, i, 0, QString::fromStdString(t.bssid));
         setCellText(table_, i, 1,
                     t.ssid.empty() ? QString("<hidden>") : QString::fromStdString(t.ssid));
@@ -481,9 +554,13 @@ void MainWindow::refreshNetworks(bool force) {
         setCellText(table_, i, 6, QString::number(t.clientCount));
         setCellText(table_, i, 7,
                     t.handshake ? QString("HANDSHAKE") : (t.pmkid ? QString("PMKID") : QString("-")));
+        const bool isTrusted = sec::isTrustedBssid(sec, t.bssid);
+        QTableWidgetItem* truItem =
+            setCellText(table_, i, 8, isTrusted ? QString("TRUSTED") : QString("-"));
+        styleAllowedBadge(truItem, isTrusted);
         const bool isAllowed = auth.isAllowed(t.bssid);
         QTableWidgetItem* alwItem =
-            setCellText(table_, i, 8, isAllowed ? QString("YES") : QString("-"));
+            setCellText(table_, i, 9, isAllowed ? QString("YES") : QString("-"));
         styleAllowedBadge(alwItem, isAllowed);
         if (t.bssid == selBssid) {
             selRow = i;
@@ -500,11 +577,30 @@ void MainWindow::refreshStations(bool force) {
         return;
     }
     lastStationsRev_ = sec.revision;
-    const auto stations = sec::stationsByActivity(sec);
-    tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(stations.size()));
-    stationsTable_->setRowCount(static_cast<int>(stations.size()));
-    for (int i = 0; i < static_cast<int>(stations.size()); ++i) {
-        const auto& st = stations[static_cast<std::size_t>(i)];
+    const std::string needle =
+        (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
+                                 : std::string{};
+    const auto allStations = sec::stationsByActivity(sec);
+    std::vector<const sec::Station*> visible;
+    visible.reserve(allStations.size());
+    for (const auto& st : allStations) {
+        bool match = containsLower(st.mac, needle) || containsLower(st.lastBssid, needle);
+        if (!match) {
+            for (const auto& s : st.probedSsids) {
+                if (containsLower(s, needle)) {
+                    match = true;
+                    break;
+                }
+            }
+        }
+        if (match) {
+            visible.push_back(&st);
+        }
+    }
+    tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(visible.size()));
+    stationsTable_->setRowCount(static_cast<int>(visible.size()));
+    for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
+        const auto& st = *visible[static_cast<std::size_t>(i)];
         const bool weak = sec::hasWeakOrDefaultProbe(st);
         QString probedList;
         for (std::size_t k = 0; k < st.probedSsids.size(); ++k) {
@@ -524,6 +620,69 @@ void MainWindow::refreshStations(bool force) {
             setCellText(stationsTable_, i, 3, weak ? QString("WEAK / DEFAULT") : QString("-"));
         styleWarnBadge(riskItem, weak);
         setCellText(stationsTable_, i, 4, probedList);
+    }
+}
+
+void MainWindow::refreshRfGuard(bool force) {
+    if (rfGuardTable_ == nullptr) {
+        return;
+    }
+    const auto& sec = app_.secState();
+    if (!force && sec.revision == lastRfGuardRev_) {
+        return;
+    }
+    lastRfGuardRev_ = sec.revision;
+    const std::string needle =
+        (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
+                                 : std::string{};
+
+    struct RfRow {
+        QString band;
+        QString addr;
+        QString name;
+        int32_t rssi;
+        QString status;
+        uint32_t count;
+        bool alert;
+    };
+    std::vector<RfRow> rows;
+    rows.reserve(sec.bleTargets.size() + sec.subGhzCaptures.size());
+    for (const auto& b : sec.bleTargets) {
+        const std::string dispName = b.name.empty() ? "-" : b.name;
+        const std::string status = zd::bleThreatLabel(b.threat);
+        if (!containsLower(b.mac, needle) && !containsLower(dispName, needle) &&
+            !containsLower(status, needle) && !containsLower("ble", needle)) {
+            continue;
+        }
+        rows.push_back({"BLE", QString::fromStdString(b.mac), QString::fromStdString(dispName),
+                        b.rssi, QString::fromStdString(status), b.seenCount,
+                        b.threat != zd::BleThreatKind::None});
+    }
+    for (const auto& sc : sec.subGhzCaptures) {
+        const std::string freq = zd::formatFreqMhz(sc.freqKhz);
+        const std::string status =
+            sc.continuousCarrier ? "JAMMING!" : (sc.burstCount >= 5u ? "REPLAY!" : "OK");
+        if (!containsLower(freq, needle) && !containsLower(sc.protocol, needle) &&
+            !containsLower(status, needle) && !containsLower("subghz", needle)) {
+            continue;
+        }
+        rows.push_back({"Sub-GHz", QString::fromStdString(freq),
+                        QString::fromStdString(sc.protocol.empty() ? "-" : sc.protocol), sc.rssi,
+                        QString::fromStdString(status), sc.burstCount,
+                        sc.continuousCarrier || sc.burstCount >= 5u});
+    }
+
+    tabs_->setTabText(2, QString("RF Guard (%1)").arg(rows.size()));
+    rfGuardTable_->setRowCount(static_cast<int>(rows.size()));
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+        const auto& r = rows[static_cast<std::size_t>(i)];
+        setCellText(rfGuardTable_, i, 0, r.band);
+        setCellText(rfGuardTable_, i, 1, r.addr);
+        setCellText(rfGuardTable_, i, 2, r.name);
+        setCellText(rfGuardTable_, i, 3, QString::number(r.rssi));
+        QTableWidgetItem* stItem = setCellText(rfGuardTable_, i, 4, r.status);
+        styleWarnBadge(stItem, r.alert);
+        setCellText(rfGuardTable_, i, 5, QString::number(r.count));
     }
 }
 
@@ -630,21 +789,21 @@ void MainWindow::onSetChannel() {
 
 void MainWindow::onPrevTheme() {
     app_.dispatchPet(CycleThemeEvent{linux_app::nowMs(), -1});
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
     refreshStatus();
 }
 void MainWindow::onCycleTheme() {
     app_.dispatchPet(CycleThemeEvent{linux_app::nowMs(), +1});
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
     refreshStatus();
 }
 void MainWindow::onCycleView() {
     app_.dispatchPet(CyclePageEvent{linux_app::nowMs(), +1});
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
 }
 void MainWindow::onCycleMode() {
     app_.cycleOpsMode();
-    pet_->setFrame(app_.petFrame(ScreenDimensions{240, 135}));
+    pet_->setFrame(app_.petFrame(kPetDims));
     refreshStatus();
 }
 
@@ -664,10 +823,12 @@ void MainWindow::onLoadSession() {
     lastTotalAlerts_ = 0;
     lastNetworksRev_ = UINT64_MAX;
     lastStationsRev_ = UINT64_MAX;
+    lastRfGuardRev_ = UINT64_MAX;
     lastChannelsRev_ = UINT64_MAX;
     displayedTargets_.clear();
     refreshNetworks(true);
     refreshStations(true);
+    refreshRfGuard(true);
     refreshChannels(true);
     onTick();
 }
@@ -703,6 +864,65 @@ void MainWindow::onSaveSession() {
     if (!r.ok) {
         QMessageBox::warning(this, "Save Session", QString::fromStdString(r.message));
     }
+}
+
+void MainWindow::onSelectPcap() {
+    const QString path = QFileDialog::getSaveFileName(
+        this, "Set Live PCAP Capture File", "capture.pcap", "PCAP Capture (*.pcap *.cap);;All Files (*)");
+    if (path.isEmpty()) {
+        return;
+    }
+    app_.setPcapDumpPath(path.toStdString());
+    statusBar()->showMessage(QString("PCAP capture path set: %1").arg(path), 6000);
+}
+
+void MainWindow::onExportReport() {
+    const QString path = QFileDialog::getSaveFileName(
+        this, "Export Assessment Report", "zeroday_report.md",
+        "Markdown Report (*.md);;CSV Report (*.csv);;HTML Report (*.html)");
+    if (path.isEmpty()) {
+        return;
+    }
+    const auto r = app_.exportReport(path.toStdString());
+    statusBar()->showMessage(QString::fromStdString(r.message), 6000);
+    if (!r.ok) {
+        QMessageBox::warning(this, "Export Report", QString::fromStdString(r.message));
+    }
+}
+
+void MainWindow::onBleScan() {
+    const auto r = app_.requestBleScan();
+    statusBar()->showMessage(QString::fromStdString(r.message), 5000);
+}
+
+void MainWindow::onClearThreat() {
+    app_.clearThreat();
+    pet_->setFrame(app_.petFrame(kPetDims));
+    refreshStatus();
+}
+
+void MainWindow::onTrustSelected() {
+    std::string bssid;
+    std::string station;
+    resolveSelectedTarget(bssid, station);
+    if (bssid.empty()) {
+        QMessageBox::information(this, "Trusted BSSID", "Select a network row (or associated station) first.");
+        return;
+    }
+    const bool trusted = app_.toggleTrustBssid(bssid);
+    statusBar()->showMessage(
+        QString(trusted ? "Trusted BSSID %1" : "Untrusted BSSID %1").arg(QString::fromStdString(bssid)),
+        4000);
+    refreshNetworks(true);
+}
+
+void MainWindow::onFilterChanged() {
+    lastNetworksRev_ = UINT64_MAX;
+    lastStationsRev_ = UINT64_MAX;
+    lastRfGuardRev_ = UINT64_MAX;
+    refreshNetworks(true);
+    refreshStations(true);
+    refreshRfGuard(true);
 }
 
 void MainWindow::onAuthToggled(bool on) {

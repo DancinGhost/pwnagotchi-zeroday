@@ -73,6 +73,7 @@
   const elBtnMotion = document.getElementById('btn-motion');
   const elBtnSnapPng = document.getElementById('btn-snap-png');
   const elBtnCopyAscii = document.getElementById('btn-copy-ascii');
+  const elBtnShareLink = document.getElementById('btn-share-link');
 
   let hotkeysEnabled = loadPref('hotkeys', 'on') !== 'off';
   const motionQuery =
@@ -372,15 +373,24 @@
     }
     const hasActiveAnim =
       (frame.themeEffect && frame.themeEffect !== 'None') ||
-      (frame.scene && frame.scene !== 'None');
+      (frame.scene && frame.scene !== 'None') ||
+      frame.page === logic.ScreenPage.PetFace;
     const animKey = hasActiveAnim ? frame.animTick : 0;
+    let pageSig = '';
+    if (frame.page === logic.ScreenPage.NearbyRadar) {
+      pageSig = frame.radarRows.map(function (r) { return r.ssid + ':' + r.details; }).join(';');
+    } else if (frame.page === logic.ScreenPage.ChannelSpectrum) {
+      pageSig = frame.spectrumSummary + '|' + frame.channelBars.map(function (b) { return b.count; }).join(',');
+    } else if (frame.page === logic.ScreenPage.RfGuard) {
+      pageSig = frame.rfGuardSummary + '|' + frame.rfGuardRows.map(function (r) { return r.ssid + ':' + r.details; }).join(';');
+    }
     const canvasSig =
       d.width + 'x' + d.height + '|' + frame.page + '|' + frame.theme + '|' + animKey + '|' +
       isBlinking + '|' + frame.headerLine + '|' + frame.footerLine + '|' + frame.modeBadge + '|' +
-      frame.scene + '|' + frame.rankLine + '|' +
-      frame.face.moodLabel + '|' + (frame.toast && frame.toast.visible ? frame.toast.text : '') +
-      '|' + frame.phraseLines.join('/') + '|' + frame.spotlightLabel + '|' +
-      frame.radarRows.length + '|' + frame.rfGuardRows.length + '|' + frame.spectrumSummary;
+      frame.scene + '|' + frame.rankLine + '|' + frame.xpProgressPct + '|' +
+      frame.threatBanner + '|' + frame.face.moodLabel + '|' +
+      (frame.toast && frame.toast.visible ? frame.toast.text : '') +
+      '|' + frame.phraseLines.join('/') + '|' + frame.spotlightLabel + '|' + pageSig;
 
     if (force || canvasSig !== lastCanvasSig) {
       lastCanvasSig = canvasSig;
@@ -457,7 +467,7 @@
     const t = nowMs();
     const target =
       gState.latestScan.strongestSsid ||
-      (customAps.length > 0 ? customAps[0].ssid : 'Gibson_Mainframe');
+      (customAps.length > 0 ? customAps[0].ssid : 'Mainframe_Lab');
     gState = logic.reduce(gState, {
       type: 'ToyHandshake',
       nowMs: t,
@@ -705,8 +715,8 @@
       return;
     }
 
-    // Clicking ZeroDay's face on PetFace page boops the pet!
-    if (gState.page === logic.ScreenPage.PetFace && lx <= d.width * 0.48) {
+    // Clicking ZeroDay's centered mascot on PetFace page boops the pet!
+    if (gState.page === logic.ScreenPage.PetFace && lx >= d.width * 0.25 && lx <= d.width * 0.75) {
       triggerPetBoop();
     } else {
       triggerButtonA();
@@ -819,6 +829,112 @@
 
   elBtnCopyAscii.addEventListener('click', copyAsciiFrameToClipboard);
   elBtnTermAscii.addEventListener('click', copyAsciiFrameToClipboard);
+
+  function buildPermalinkHash() {
+    if (typeof URLSearchParams === 'undefined') {
+      return '';
+    }
+    const p = new URLSearchParams();
+    p.set('theme', themes.themeSpec(gState.theme).key);
+    p.set('page', gState.page);
+    p.set('mode', gState.opsMode);
+    p.set('res', displayMode);
+    p.set('env', activeEnv);
+    p.set('subghz', String(gState.subGhzFreqKhz));
+    if (elSelectShell && elSelectShell.value) {
+      p.set('shell', elSelectShell.value);
+    }
+    return '#' + p.toString();
+  }
+
+  let shareResetTimer = null;
+  function copyShareLink() {
+    const hash = buildPermalinkHash();
+    if (window.location) {
+      if (window.history && typeof window.history.replaceState === 'function') {
+        window.history.replaceState(null, '', hash);
+      } else {
+        window.location.hash = hash;
+      }
+    }
+    const url = window.location && window.location.href ? window.location.href : hash;
+    if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () {
+        if (elBtnShareLink) {
+          elBtnShareLink.textContent = 'Copied Link!';
+          if (shareResetTimer) clearTimeout(shareResetTimer);
+          shareResetTimer = setTimeout(function () {
+            elBtnShareLink.textContent = 'Share Link';
+            shareResetTimer = null;
+          }, 1200);
+        }
+      }).catch(function () {});
+    }
+    appendLog('LINK', 'Permalink -> ' + url, 'log-cmd');
+  }
+
+  if (elBtnShareLink) {
+    elBtnShareLink.addEventListener('click', copyShareLink);
+  }
+
+  function applyPermalinkHash() {
+    if (!window.location || typeof window.location.hash !== 'string' || window.location.hash.length <= 1 ||
+        typeof URLSearchParams === 'undefined') {
+      return;
+    }
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const tKey = params.get('theme');
+    if (tKey) {
+      const tid = themes.themeFromKey(tKey);
+      if (tid) {
+        gState = logic.reduce(gState, { type: 'SetTheme', nowMs: nowMs(), theme: tid, announce: false });
+      }
+    }
+    const pg = params.get('page') || params.get('view');
+    if (pg) {
+      const pageMap = {
+        '1': logic.ScreenPage.PetFace, petface: logic.ScreenPage.PetFace,
+        '2': logic.ScreenPage.NearbyRadar, nearbyradar: logic.ScreenPage.NearbyRadar, radar: logic.ScreenPage.NearbyRadar,
+        '3': logic.ScreenPage.ChannelSpectrum, channelspectrum: logic.ScreenPage.ChannelSpectrum, spectrum: logic.ScreenPage.ChannelSpectrum,
+        '4': logic.ScreenPage.RfGuard, rfguard: logic.ScreenPage.RfGuard, guard: logic.ScreenPage.RfGuard
+      };
+      const resolved = pageMap[pg.toLowerCase()];
+      if (resolved) {
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: resolved });
+      }
+    }
+    const md = params.get('mode');
+    if (md) {
+      const mLower = md.toLowerCase();
+      const resolvedMode = mLower.startsWith('off') ? logic.OpsMode.Offensive
+        : (mLower.startsWith('def') ? logic.OpsMode.Defensive
+        : (mLower.startsWith('rec') ? logic.OpsMode.Recon : null));
+      if (resolvedMode) {
+        gState = logic.reduce(gState, { type: 'SetOpsMode', nowMs: nowMs(), mode: resolvedMode });
+      }
+    }
+    const resKey = params.get('res') || params.get('size');
+    if (resKey && ui.screenProfileFromKey(resKey)) {
+      displayMode = resKey;
+      elSelectRes.value = resKey;
+    }
+    const envKey = params.get('env');
+    if (envKey && sim.PRESETS[envKey]) {
+      activeEnv = envKey;
+    }
+    const subghz = params.get('subghz');
+    if (subghz) {
+      const fKhz = parseInt(subghz, 10);
+      if (fKhz >= 300000 && fKhz <= 928000) {
+        gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: fKhz });
+      }
+    }
+    const sh = params.get('shell');
+    if (sh && VALID_SHELLS.indexOf(sh) >= 0) {
+      document.body.setAttribute('data-shell', sh);
+      elSelectShell.value = sh;
+    }
+  }
 
   // Page & Theme quick buttons
   document.querySelectorAll('[data-page]').forEach(function (btn) {
@@ -1075,8 +1191,19 @@
       case '?':
         appendLog(
           'HELP',
-          'Commands: scan | view [next|prev|1-4] | mode [recon|defense|offense] | subghz [next|315|433|868|915] | ble | score | guard | theme [next|prev|<key>] | themes | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
+          'Commands: scan | view [next|prev|1-4] | mode [recon|defense|offense] | subghz [next|315|433|868|915] | ble | ack | guard | link | theme [next|prev|<key>] | themes | score | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
         );
+        break;
+
+      case 'ack':
+      case 'clear-threat':
+        gState = logic.reduce(gState, { type: 'ClearThreat', nowMs: nowMs() });
+        appendLog('ACK', 'Cleared active threat alert.');
+        renderCurrentState(true);
+        break;
+
+      case 'link':
+        copyShareLink();
         break;
 
       case 'mode': {
@@ -1443,6 +1570,7 @@
   });
 
   // --- Visibility-Gated Animation Loop (~16.7 FPS active, zero wakeups when tab hidden) ---
+  applyPermalinkHash();
   logSerialStatus('BOOT');
   appendLog(
     'WEB_TOY',
@@ -1450,6 +1578,12 @@
     'log-cmd'
   );
   renderCurrentState(true);
+
+  if (navigator && navigator.serviceWorker && window.location &&
+      (window.location.protocol === 'https:' || window.location.hostname === 'localhost' ||
+       window.location.hostname === '127.0.0.1')) {
+    navigator.serviceWorker.register('./sw.js').catch(function () {});
+  }
 
   let lastFrameAt = 0;
   let rafId = 0;

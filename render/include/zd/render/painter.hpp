@@ -382,49 +382,436 @@ void drawActivitySceneWidget(Gfx& gfx, const zd::UiFrame& frame) {
 }
 
 template <typename Gfx>
-void drawPetFacePage(Gfx& gfx, const zd::UiFrame& frame) {
-    drawPwnagotchiFace(gfx, frame);
-    drawActivitySceneWidget(gfx, frame);
+void drawClassicFaceProps(Gfx& gfx, const zd::UiFrame& frame) {
+    if (frame.dims.width < 160 || frame.dims.height < 72) {
+        return;
+    }
+    const auto& g = frame.faceGeom;
+    const auto& pal = frame.palette;
+    const uint16_t tipCol = ((frame.animTick & 1u) != 0u) ? pal.highlight : pal.accent;
 
-    // Subtle vertical divider between face and speech column on full-size displays
-    if (!frame.compact) {
-        gfx.drawLine(frame.speechX - 6, frame.headerDividerY + 5,
-                     frame.speechX - 6, frame.footerDividerY - 5, frame.palette.muted);
+    // Pixel-art antenna ear-mounts flanking the classic face brackets
+    const int16_t antW = frame.compact ? 2 : 3;
+    const int16_t antH = frame.compact ? 4 : 6;
+    const int16_t antY = static_cast<int16_t>(g.centerY - g.bracketHalfHeight + 2);
+    const int16_t lAntX = static_cast<int16_t>(g.centerX - g.bracketOffsetX - antW);
+    const int16_t rAntX = static_cast<int16_t>(g.centerX + g.bracketOffsetX);
+    if (lAntX >= 2 && (rAntX + antW) < frame.dims.width - 2 && antY > frame.headerDividerY + 2) {
+        gfx.fillRect(lAntX, antY, antW, antH, pal.accent);
+        gfx.fillRect(lAntX + (antW / 2), antY - 2, 1, 2, pal.fg);
+        gfx.fillRect(lAntX + (antW / 2) - 1, antY - 3, 2, 2, tipCol);
+
+        gfx.fillRect(rAntX, antY, antW, antH, pal.accent);
+        gfx.fillRect(rAntX + (antW / 2), antY - 2, 1, 2, pal.fg);
+        gfx.fillRect(rAntX + (antW / 2), antY - 3, 2, 2, tipCol);
     }
 
-    // Pet prompt header ("zeroday>")
-    gfx.setTextColor(frame.palette.accent, frame.palette.bg);
-    gfx.drawString(frame.promptLabel.c_str(), frame.speechX, frame.speechTopY);
-
-    // Wrapped phrase lines
-    gfx.setTextColor(frame.palette.fg, frame.palette.bg);
-    int16_t y = static_cast<int16_t>(frame.speechTopY + frame.lineStepY + (frame.compact ? 1 : 2));
-    for (const std::string& line : frame.phraseLines) {
-        gfx.drawString(line.c_str(), frame.speechX, y);
-        y = static_cast<int16_t>(y + frame.lineStepY);
+    // Companion mini pixel-art gear props on full-size displays (>= 220px wide)
+    if (frame.compact || frame.dims.width < 220) {
+        return;
     }
-
-    // Rank / Highscore + mini XP bar above bottom spotlight (full-size displays)
-    if (!frame.compact && !frame.rankLine.empty()) {
-        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
-        gfx.drawString(frame.rankLine.c_str(), frame.speechX, frame.footerDividerY - 21);
-        const int16_t barW = 28;
-        const int16_t barX = static_cast<int16_t>(frame.dims.width - barW - 4);
-        const int16_t barY = static_cast<int16_t>(frame.footerDividerY - 19);
-        if (barX > frame.speechX + static_cast<int16_t>(frame.rankLine.size() * 6) + 2) {
-            gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
-            const int16_t fillW = static_cast<int16_t>((static_cast<int32_t>(barW) * frame.xpProgressPct) / 100);
-            if (fillW > 0) {
-                gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
+    const int16_t p = (frame.dims.width >= 300 && frame.dims.height >= 180) ? 2 : 1;
+    // Left mini hacker terminal
+    const int16_t lx = static_cast<int16_t>(g.centerX - g.bracketOffsetX - (13 * p) - 6);
+    const int16_t ly = static_cast<int16_t>(g.centerY - (3 * p));
+    if (lx >= 4 && (ly + 9 * p) < g.moodBadgeY) {
+        gfx.fillRect(lx + p, ly, 9 * p, 6 * p, pal.accent);
+        gfx.fillRect(lx + 2 * p, ly + p, 7 * p, 4 * p, pal.bg);
+        gfx.fillRect(lx + 3 * p, ly + 2 * p, 4 * p, p, pal.fg);
+        gfx.fillRect(lx + 3 * p, ly + 4 * p, ((frame.animTick & 1u) ? 5 : 3) * p, p, pal.highlight);
+        gfx.fillRect(lx, ly + 6 * p, 11 * p, 2 * p, pal.fg);
+    }
+    // Right reactive RF prop
+    const int16_t rx = static_cast<int16_t>(g.centerX + g.bracketOffsetX + 7);
+    const int16_t ry = static_cast<int16_t>(g.centerY - (4 * p));
+    const int16_t rw = static_cast<int16_t>(14 * p);
+    const int16_t rh = static_cast<int16_t>(11 * p);
+    if ((rx + rw) <= frame.dims.width - 4 && (ry + rh) < g.moodBadgeY) {
+        if (frame.scene == zd::ActivityScene::RadarDish || frame.face.moodLabel[0] == 'D') {
+            drawPixelArtDish(gfx, rx, ry, rw, rh, pal, frame.animTick);
+        } else if (frame.scene == zd::ActivityScene::SatelliteBeam) {
+            drawPixelArtSatellite(gfx, rx, ry, rw, rh, pal, frame.animTick);
+        } else if (frame.scene == zd::ActivityScene::ThreatShield) {
+            drawPixelArtShield(gfx, rx, ry, static_cast<int16_t>(12 * p), rh, pal, frame.animTick,
+                               !frame.threatBanner.empty());
+        } else {
+            // Mini 4-bar RF analyzer tower
+            gfx.fillRect(rx, ry + 9 * p, 12 * p, 2 * p, pal.accent);
+            for (int16_t i = 0; i < 4; ++i) {
+                const uint32_t lv = ((frame.animTick + static_cast<uint32_t>(i)) % 4u) + 1u;
+                const int16_t bh = static_cast<int16_t>(lv * 2 * p);
+                gfx.fillRect(rx + i * 3 * p + p, ry + 9 * p - bh, 2 * p, bh,
+                             (lv >= 4u) ? pal.highlight : pal.fg);
             }
         }
     }
+}
 
-    // Strongest nearby SSID or Threat Alert ticker at bottom of speech column
-    if (!frame.spotlightLabel.empty()) {
-        const uint16_t spotCol = !frame.threatBanner.empty() ? frame.palette.highlight : frame.palette.accent;
-        gfx.setTextColor(spotCol, frame.palette.bg);
-        gfx.drawString(frame.spotlightLabel.c_str(), frame.speechX, frame.footerDividerY - 11);
+enum class MascotCol : uint8_t { Fg = 0, Bg, Accent, Highlight, Muted };
+
+struct MascotRect {
+    int8_t x;
+    int8_t y;
+    int8_t w;
+    int8_t h;
+    MascotCol col;
+};
+
+inline uint16_t mascotPaletteColor(const zd::ColorPalette& pal, MascotCol c) {
+    switch (c) {
+        case MascotCol::Fg:        return pal.fg;
+        case MascotCol::Bg:        return pal.bg;
+        case MascotCol::Accent:    return pal.accent;
+        case MascotCol::Highlight: return pal.highlight;
+        case MascotCol::Muted:     return pal.muted;
+    }
+    return pal.fg;
+}
+
+template <typename Gfx, std::size_t N>
+inline void drawMascotRects(Gfx& gfx,
+                            int16_t cx,
+                            int16_t cy,
+                            int16_t px,
+                            const zd::ColorPalette& pal,
+                            const MascotRect (&rects)[N]) {
+    for (std::size_t i = 0u; i < N; ++i) {
+        const auto& m = rects[i];
+        gfx.fillRect(cx + static_cast<int16_t>(m.x) * px,
+                     cy + static_cast<int16_t>(m.y) * px,
+                     static_cast<int16_t>(m.w) * px,
+                     static_cast<int16_t>(m.h) * px,
+                     mascotPaletteColor(pal, m.col));
+    }
+}
+
+template <typename Gfx>
+void drawMascotEyes(Gfx& gfx,
+                    int16_t cx,
+                    int16_t cy,
+                    int16_t px,
+                    zd::EyeGlyph style,
+                    const zd::ColorPalette& pal,
+                    uint32_t animTick) {
+    static constexpr MascotRect kRoundCenter[] = {
+        {-5, -5, 3, 3, MascotCol::Fg}, {-5, -5, 1, 1, MascotCol::Bg},
+        {2, -5, 3, 3, MascotCol::Fg},  {2, -5, 1, 1, MascotCol::Bg}};
+    static constexpr MascotRect kRoundLeft[] = {
+        {-6, -5, 3, 3, MascotCol::Fg}, {-6, -5, 1, 1, MascotCol::Bg},
+        {1, -5, 3, 3, MascotCol::Fg},  {1, -5, 1, 1, MascotCol::Bg}};
+    static constexpr MascotRect kRoundRight[] = {
+        {-4, -5, 3, 3, MascotCol::Fg}, {-4, -5, 1, 1, MascotCol::Bg},
+        {3, -5, 3, 3, MascotCol::Fg},  {3, -5, 1, 1, MascotCol::Bg}};
+    static constexpr MascotRect kHappyArc[] = {
+        {-5, -3, 1, 1, MascotCol::Fg}, {-4, -4, 1, 1, MascotCol::Fg},
+        {-3, -3, 1, 1, MascotCol::Fg}, {2, -3, 1, 1, MascotCol::Fg},
+        {3, -4, 1, 1, MascotCol::Fg},  {4, -3, 1, 1, MascotCol::Fg}};
+    static constexpr MascotRect kWideSparkle[] = {
+        {-6, -5, 4, 3, MascotCol::Fg}, {-5, -4, 2, 1, MascotCol::Bg},
+        {-5, -4, 1, 1, MascotCol::Highlight}, {2, -5, 4, 3, MascotCol::Fg},
+        {3, -4, 2, 1, MascotCol::Bg},  {4, -4, 1, 1, MascotCol::Highlight}};
+    static constexpr MascotRect kSunglasses[] = {
+        {-6, -5, 5, 3, MascotCol::Fg}, {-5, -5, 1, 1, MascotCol::Bg},
+        {1, -5, 5, 3, MascotCol::Fg},  {2, -5, 1, 1, MascotCol::Bg},
+        {-1, -5, 2, 1, MascotCol::Fg}};
+    static constexpr MascotRect kSadDroop[] = {
+        {-6, -6, 2, 1, MascotCol::Fg}, {-5, -5, 2, 3, MascotCol::Fg},
+        {4, -6, 2, 1, MascotCol::Fg},  {3, -5, 2, 3, MascotCol::Fg}};
+    static constexpr MascotRect kHalfLid[] = {
+        {-5, -4, 3, 1, MascotCol::Fg}, {-5, -3, 2, 1, MascotCol::Accent},
+        {2, -4, 3, 1, MascotCol::Fg},  {3, -3, 2, 1, MascotCol::Accent}};
+    static constexpr MascotRect kSleepingLine[] = {
+        {-5, -3, 3, 1, MascotCol::Fg}, {2, -3, 3, 1, MascotCol::Fg}};
+    static constexpr MascotRect kCyberWink[] = {
+        {-5, -5, 1, 1, MascotCol::Fg}, {-4, -4, 1, 1, MascotCol::Fg},
+        {-5, -3, 1, 1, MascotCol::Fg}, {2, -5, 3, 3, MascotCol::Fg},
+        {3, -4, 1, 1, MascotCol::Highlight}};
+    static constexpr MascotRect kShieldVisor[] = {
+        {-6, -5, 5, 3, MascotCol::Fg}, {-5, -4, 3, 1, MascotCol::Bg},
+        {-4, -4, 1, 1, MascotCol::Accent}, {1, -5, 5, 3, MascotCol::Fg},
+        {2, -4, 3, 1, MascotCol::Bg},  {3, -4, 1, 1, MascotCol::Accent}};
+
+    const auto r = [&](int16_t gx, int16_t gy, int16_t gw, int16_t gh, uint16_t col) {
+        gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
+    };
+
+    switch (style) {
+        case zd::EyeGlyph::RoundCenter:  drawMascotRects(gfx, cx, cy, px, pal, kRoundCenter); break;
+        case zd::EyeGlyph::RoundLeft:    drawMascotRects(gfx, cx, cy, px, pal, kRoundLeft); break;
+        case zd::EyeGlyph::RoundRight:   drawMascotRects(gfx, cx, cy, px, pal, kRoundRight); break;
+        case zd::EyeGlyph::HappyArc:     drawMascotRects(gfx, cx, cy, px, pal, kHappyArc); break;
+        case zd::EyeGlyph::WideSparkle:  drawMascotRects(gfx, cx, cy, px, pal, kWideSparkle); break;
+        case zd::EyeGlyph::Sunglasses:   drawMascotRects(gfx, cx, cy, px, pal, kSunglasses); break;
+        case zd::EyeGlyph::SadDroop:     drawMascotRects(gfx, cx, cy, px, pal, kSadDroop); break;
+        case zd::EyeGlyph::HalfLid:      drawMascotRects(gfx, cx, cy, px, pal, kHalfLid); break;
+        case zd::EyeGlyph::SleepingLine: drawMascotRects(gfx, cx, cy, px, pal, kSleepingLine); break;
+        case zd::EyeGlyph::CyberWink:    drawMascotRects(gfx, cx, cy, px, pal, kCyberWink); break;
+        case zd::EyeGlyph::ShieldVisor:  drawMascotRects(gfx, cx, cy, px, pal, kShieldVisor); break;
+        case zd::EyeGlyph::LaserVisor: {
+            r(-6, -4, 12, 2, pal.fg);
+            const int16_t lx = static_cast<int16_t>(-5 + static_cast<int16_t>((animTick * 2u) % 9u));
+            r(lx, -4, 2, 2, pal.highlight);
+            break;
+        }
+        case zd::EyeGlyph::StarEyes: {
+            const uint16_t sc = ((animTick & 1u) != 0u) ? pal.highlight : pal.fg;
+            r(-5, -4, 3, 1, sc);
+            r(-4, -5, 1, 3, sc);
+            r(2, -4, 3, 1, sc);
+            r(3, -5, 1, 3, sc);
+            break;
+        }
+        case zd::EyeGlyph::AlertRing: {
+            r(-5, -5, 3, 3, pal.highlight);
+            r(-4, -4, 1, 1, ((animTick & 1u) == 0u) ? pal.fg : pal.bg);
+            r(2, -5, 3, 3, pal.highlight);
+            r(3, -4, 1, 1, ((animTick & 1u) == 0u) ? pal.fg : pal.bg);
+            break;
+        }
+    }
+}
+
+template <typename Gfx>
+void drawMascotMouth(Gfx& gfx,
+                     int16_t cx,
+                     int16_t cy,
+                     int16_t px,
+                     zd::MouthGlyph mouth,
+                     const zd::ColorPalette& pal) {
+    static constexpr MascotRect kDoubleSmile[] = {
+        {-3, 0, 2, 1, MascotCol::Fg}, {-1, -1, 2, 1, MascotCol::Fg},
+        {1, 0, 2, 1, MascotCol::Fg}};
+    static constexpr MascotRect kBigGrin[] = {
+        {-3, -1, 6, 1, MascotCol::Fg}, {-2, 0, 4, 2, MascotCol::Fg},
+        {-1, 0, 2, 1, MascotCol::Highlight}};
+    static constexpr MascotRect kSmirk[] = {
+        {-3, 0, 5, 1, MascotCol::Fg}, {2, -1, 1, 1, MascotCol::Fg}};
+    static constexpr MascotRect kFlatLine[] = {{-3, 0, 6, 1, MascotCol::Fg}};
+    static constexpr MascotRect kSadWave[] = {
+        {-2, 0, 4, 1, MascotCol::Fg}, {-3, 1, 1, 1, MascotCol::Fg},
+        {2, 1, 1, 1, MascotCol::Fg}};
+    static constexpr MascotRect kFangs[] = {
+        {-3, 0, 6, 1, MascotCol::Fg}, {-3, 1, 1, 1, MascotCol::Fg},
+        {2, 1, 1, 1, MascotCol::Fg}};
+
+    switch (mouth) {
+        case zd::MouthGlyph::DoubleSmile: drawMascotRects(gfx, cx, cy, px, pal, kDoubleSmile); break;
+        case zd::MouthGlyph::BigGrin:     drawMascotRects(gfx, cx, cy, px, pal, kBigGrin); break;
+        case zd::MouthGlyph::Smirk:       drawMascotRects(gfx, cx, cy, px, pal, kSmirk); break;
+        case zd::MouthGlyph::FlatLine:    drawMascotRects(gfx, cx, cy, px, pal, kFlatLine); break;
+        case zd::MouthGlyph::SadWave:     drawMascotRects(gfx, cx, cy, px, pal, kSadWave); break;
+        case zd::MouthGlyph::Fangs:       drawMascotRects(gfx, cx, cy, px, pal, kFangs); break;
+    }
+}
+
+template <typename Gfx>
+void drawPixelArtMascot(Gfx& gfx, const zd::UiFrame& frame) {
+    const auto& g = frame.faceGeom;
+    const auto& pal = frame.palette;
+    const auto& f = frame.face;
+    const uint32_t animTick = frame.animTick;
+
+    const bool micro = (frame.dims.width < 150 || frame.dims.height < 72);
+    const bool wide = (frame.dims.width >= 300 && frame.dims.height >= 180);
+    const int16_t px = (micro || frame.compact) ? 1 : (wide ? 3 : 2);
+    const int16_t cx = g.centerX;
+    const int16_t cy = g.centerY;
+
+    const auto r = [&](int16_t gx, int16_t gy, int16_t gw, int16_t gh, uint16_t col) {
+        gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
+    };
+
+    // Static mascot silhouette: ears, mast, headphone cups, rounded visor head, torso, feet, and deck
+    static constexpr MascotRect kMascotBase[] = {
+        // Ears & transceiver mast
+        {-7, -9, 2, 2, MascotCol::Fg},      {-6, -10, 1, 1, MascotCol::Accent},
+        {5, -9, 2, 2, MascotCol::Fg},       {5, -10, 1, 1, MascotCol::Accent},
+        {0, -9, 1, 2, MascotCol::Accent},
+        // Cyber-headphone cups + rounded visor head chassis
+        {-10, -5, 2, 5, MascotCol::Accent}, {-11, -4, 1, 3, MascotCol::Highlight},
+        {8, -5, 2, 5, MascotCol::Accent},   {10, -4, 1, 3, MascotCol::Highlight},
+        {-8, -7, 16, 10, MascotCol::Fg},    {-8, -7, 1, 1, MascotCol::Bg},
+        {7, -7, 1, 1, MascotCol::Bg},       {-8, 2, 1, 1, MascotCol::Bg},
+        {7, 2, 1, 1, MascotCol::Bg},        {-7, -6, 14, 8, MascotCol::Bg},
+        // Cyber-vest torso & boots
+        {-6, 3, 12, 6, MascotCol::Accent},  {-4, 4, 8, 4, MascotCol::Bg},
+        {-5, 9, 3, 2, MascotCol::Fg},       {2, 9, 3, 2, MascotCol::Fg},
+        // Left gear prop: cyber-deck console base
+        {-26, -1, 11, 7, MascotCol::Accent}, {-25, 0, 9, 5, MascotCol::Bg},
+        {-24, 1, 5, 1, MascotCol::Fg},      {-27, 6, 13, 3, MascotCol::Fg},
+        {-25, 7, 9, 1, MascotCol::Muted},   {-25, 9, 2, 2, MascotCol::Muted},
+        {-17, 9, 2, 2, MascotCol::Muted}
+    };
+    drawMascotRects(gfx, cx, cy, px, pal, kMascotBase);
+
+    // Pulsing signal beacon
+    r(-1, -10, 3, 1, ((animTick & 1u) != 0u) ? pal.highlight : pal.fg);
+
+    // Expressive pixel eyes, mouth & cheek/tear/sleep overlays
+    drawMascotEyes(gfx, cx, cy, px, f.eyes, pal, animTick);
+    drawMascotMouth(gfx, cx, cy, px, f.mouth, pal);
+
+    if (f.showBlush) {
+        r(-6, -1, 2, 1, pal.highlight);
+        r(4, -1, 2, 1, pal.highlight);
+    }
+    if (f.showTear) {
+        r(5, -2, 1, 2, pal.accent);
+    }
+    if (f.showZzz) {
+        static constexpr MascotRect kZzz[] = {
+            {9, -9, 3, 1, MascotCol::Accent},
+            {10, -8, 1, 1, MascotCol::Accent},
+            {9, -7, 3, 1, MascotCol::Accent}};
+        drawMascotRects(gfx, cx, cy, px, pal, kZzz);
+    }
+
+    // Animated chest core, paws & cyber-deck trace
+    r(-1, 5, 2, 2, ((animTick & 1u) != 0u) ? pal.highlight : pal.fg);
+    const int16_t pawLift = ((animTick & 1u) != 0u) ? 0 : 1;
+    r(-8, 5 + pawLift, 2, 2, pal.fg);
+    r(6, 6 - pawLift, 2, 2, pal.fg);
+    r(-24, 3, ((animTick & 1u) != 0u) ? 7 : 4, 1, pal.highlight);
+
+    // Right gear prop: Mood & OpsMode-reactive pixel equipment
+    const bool isScanningScene =
+        (frame.scene == zd::ActivityScene::RadarDish) ||
+        (f.eyes == zd::EyeGlyph::RoundLeft || f.eyes == zd::EyeGlyph::RoundRight);
+    const bool isOffenseScene = (frame.scene == zd::ActivityScene::SatelliteBeam);
+    const bool isDefenseScene =
+        (frame.scene == zd::ActivityScene::ThreatShield) || (f.eyes == zd::EyeGlyph::AlertRing);
+
+    if (isScanningScene) {
+        static constexpr MascotRect kDishTripod[] = {
+            {16, 8, 1, 3, MascotCol::Accent},
+            {20, 8, 1, 3, MascotCol::Accent},
+            {17, 7, 3, 1, MascotCol::Accent}};
+        drawMascotRects(gfx, cx, cy, px, pal, kDishTripod);
+        const int16_t tilt = ((animTick % 3u) == 1u) ? 1 : 0;
+        r(15, 2 + tilt, 2, 4, pal.fg);
+        r(17, 4 + tilt, 3, 3, pal.fg);
+        r(19, 6 + tilt, 3, 1, pal.fg);
+        r(18, 2 + tilt, 1, 2, pal.accent);
+        r(19, 1 + tilt, 2, 2, pal.highlight);
+        const uint32_t wavePhase = animTick % 3u;
+        r(22, 0, 1, 2, (wavePhase == 0u) ? pal.highlight : pal.accent);
+        r(24, -2, 1, 3, (wavePhase == 1u) ? pal.highlight : pal.accent);
+        r(26, -4, 1, 4, (wavePhase == 2u) ? pal.highlight : pal.accent);
+    } else if (isOffenseScene) {
+        static constexpr MascotRect kTower[] = {
+            {15, 7, 10, 4, MascotCol::Accent}, {17, 8, 6, 2, MascotCol::Fg},
+            {19, -9, 3, 3, MascotCol::Fg},     {15, -8, 4, 2, MascotCol::Accent},
+            {22, -8, 4, 2, MascotCol::Accent}, {20, -6, 1, 13, MascotCol::Muted}};
+        drawMascotRects(gfx, cx, cy, px, pal, kTower);
+        const int16_t pulseY = static_cast<int16_t>(-5 + static_cast<int16_t>((animTick * 2u) % 10u));
+        r(20, pulseY, 1, 2, pal.highlight);
+    } else if (isDefenseScene) {
+        const bool alertActive = !frame.threatBanner.empty() || (f.eyes == zd::EyeGlyph::AlertRing);
+        const uint16_t shieldCol = alertActive ? pal.highlight : pal.accent;
+        r(15, -1, 10, 9, shieldCol);
+        r(17, 8, 6, 2, shieldCol);
+        r(19, 10, 2, 1, shieldCol);
+        r(17, 1, 6, 6, pal.bg);
+        const int16_t sx = ((animTick & 1u) != 0u) ? 20 : 18;
+        const int16_t sy = ((animTick & 2u) != 0u) ? 4 : 2;
+        r(sx, sy, 2, 2, alertActive ? pal.highlight : pal.fg);
+    } else if (f.showZzz) {
+        static constexpr MascotRect kSleepBattery[] = {
+            {14, 6, 12, 4, MascotCol::Accent}, {15, 7, 10, 2, MascotCol::Bg},
+            {18, 1, 3, 1, MascotCol::Accent},  {19, 2, 1, 1, MascotCol::Accent},
+            {18, 3, 3, 1, MascotCol::Accent}};
+        drawMascotRects(gfx, cx, cy, px, pal, kSleepBattery);
+        const int16_t fill = static_cast<int16_t>(2 + static_cast<int16_t>((animTick % 3u) * 3u));
+        r(16, 7, fill, 2, pal.fg);
+    } else {
+        // Multi-bar RF spectrum analyzer tower
+        r(14, 7, 12, 4, pal.accent);
+        r(15, 8, 10, 2, pal.bg);
+        for (int16_t i = 0; i < 4; ++i) {
+            const int16_t bh = static_cast<int16_t>(
+                2 + static_cast<int16_t>(((animTick + static_cast<uint32_t>(i)) % 4u) * 2u));
+            r(15 + i * 3, 7 - bh, 2, bh, (bh >= 8) ? pal.highlight : pal.fg);
+        }
+    }
+
+    // Centered mood tag beneath the mascot
+    char badge[24];
+    std::snprintf(badge, sizeof(badge), "[%s]", f.moodLabel);
+    const int16_t badgeW = static_cast<int16_t>(std::char_traits<char>::length(badge) * 6);
+    gfx.setTextColor(pal.accent, pal.bg);
+    gfx.drawString(badge, (std::max)(2, static_cast<int>(g.centerX) - (badgeW / 2)), g.moodBadgeY);
+}
+
+template <typename Gfx>
+void drawPetFacePage(Gfx& gfx, const zd::UiFrame& frame) {
+    if (frame.faceStyle == zd::FaceStyle::PixelArtMascot) {
+        drawPixelArtMascot(gfx, frame);
+    } else {
+        drawPwnagotchiFace(gfx, frame);
+        drawClassicFaceProps(gfx, frame);
+    }
+    drawActivitySceneWidget(gfx, frame);
+
+    // Top speech bubble (prompt + wrapped phrase)
+    gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+    gfx.drawString(frame.promptLabel.c_str(), frame.speechX, frame.speechTopY);
+
+    gfx.setTextColor(frame.palette.fg, frame.palette.bg);
+    if (frame.compact) {
+        if (!frame.phraseLines.empty()) {
+            const int16_t inlineX = static_cast<int16_t>(
+                frame.speechX + (static_cast<int16_t>(frame.promptLabel.size()) + 1) * 6);
+            gfx.drawString(frame.phraseLines[0].c_str(), inlineX, frame.speechTopY);
+        }
+    } else {
+        const bool wide = (frame.dims.width >= 300 && frame.dims.height >= 180);
+        int16_t y = static_cast<int16_t>(frame.speechTopY + frame.lineStepY + (wide ? 2 : 0));
+        for (const std::string& line : frame.phraseLines) {
+            gfx.drawString(line.c_str(), frame.speechX, y);
+            y = static_cast<int16_t>(y + frame.lineStepY);
+        }
+    }
+
+    // Bottom telemetry stack (rank / XP bar + strongest SSID / threat banner)
+    if (!frame.compact) {
+        const bool wide = (frame.dims.width >= 300 && frame.dims.height >= 180);
+        const int16_t padX = wide ? 6 : 4;
+        const int16_t rankY = wide ? static_cast<int16_t>(frame.footerDividerY - 21)
+                                   : static_cast<int16_t>(frame.footerDividerY - 10);
+        const int16_t barW = wide ? 48 : 24;
+        const int16_t barX = static_cast<int16_t>(frame.dims.width - barW - padX);
+        const int16_t barY = static_cast<int16_t>(rankY + 2);
+
+        if (!frame.rankLine.empty()) {
+            gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+            gfx.drawString(frame.rankLine.c_str(), padX, rankY);
+            if (barX > padX + static_cast<int16_t>(frame.rankLine.size() * 6) + 4) {
+                gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
+                const int16_t fillW =
+                    static_cast<int16_t>((static_cast<int32_t>(barW) * frame.xpProgressPct) / 100);
+                if (fillW > 0) {
+                    gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
+                }
+            }
+        }
+
+        if (!frame.spotlightLabel.empty()) {
+            const uint16_t spotCol =
+                !frame.threatBanner.empty() ? frame.palette.highlight : frame.palette.accent;
+            gfx.setTextColor(spotCol, frame.palette.bg);
+            if (wide) {
+                gfx.drawString(frame.spotlightLabel.c_str(), padX, frame.footerDividerY - 11);
+            } else {
+                const int16_t leftEnd =
+                    static_cast<int16_t>(padX + static_cast<int16_t>(frame.rankLine.size() * 6) + 6);
+                const int16_t availPx = static_cast<int16_t>(barX - 4 - leftEnd);
+                if (availPx >= 30) {
+                    const std::string clipped =
+                        zd::truncateText(frame.spotlightLabel, static_cast<std::size_t>(availPx / 6));
+                    gfx.drawString(clipped.c_str(), leftEnd, rankY);
+                }
+            }
+        }
     }
 }
 
@@ -547,9 +934,18 @@ void drawDigitalRainBackdrop(Gfx& gfx, const zd::UiFrame& frame) {
     constexpr uint32_t kGlyphCount = 12u;
 
     const auto& g = frame.faceGeom;
-    const int16_t faceLeft = static_cast<int16_t>(g.centerX - g.bracketOffsetX - 6);
-    const int16_t faceRight = static_cast<int16_t>(g.centerX + g.bracketOffsetX + 6);
-    const int16_t faceTop = static_cast<int16_t>(g.centerY - g.bracketHalfHeight - 6);
+    const bool micro = (frame.dims.width < 150 || frame.dims.height < 72);
+    const bool wide = (frame.dims.width >= 300 && frame.dims.height >= 180);
+    const int16_t px = (micro || frame.compact) ? 1 : (wide ? 3 : 2);
+    const int16_t halfArtW = (frame.faceStyle == zd::FaceStyle::PixelArtMascot)
+                                 ? static_cast<int16_t>(28 * px)
+                                 : static_cast<int16_t>(g.bracketOffsetX + 6);
+    const int16_t halfArtH = (frame.faceStyle == zd::FaceStyle::PixelArtMascot)
+                                 ? static_cast<int16_t>(11 * px)
+                                 : static_cast<int16_t>(g.bracketHalfHeight + 6);
+    const int16_t faceLeft = static_cast<int16_t>(g.centerX - halfArtW);
+    const int16_t faceRight = static_cast<int16_t>(g.centerX + halfArtW);
+    const int16_t faceTop = static_cast<int16_t>(g.centerY - halfArtH);
     const int16_t faceBottom = static_cast<int16_t>(g.moodBadgeY + 9);
 
     for (int32_t col = 0;; ++col) {

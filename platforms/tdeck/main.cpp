@@ -20,11 +20,19 @@
 #include "esp32_hal.hpp"
 #include "esp32_offensive.hpp"
 #include "nmea.hpp"
+#include "wigle.hpp"
 
 #include <Arduino.h>
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
+#include <SPI.h>
 #include <Wire.h>
+#if defined(__has_include)
+#if __has_include(<SD.h>) && !defined(ZD_NO_ESP32_SD)
+#include <SD.h>
+#define ZD_HAS_ESP32_SD 1
+#endif
+#endif
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -33,6 +41,7 @@
 
 namespace {
 
+using zd::esp32_common::Esp32BleScanner;
 using zd::esp32_common::Esp32WifiScanner;
 using zd::esp32_common::NvsThemeStore;
 
@@ -158,6 +167,13 @@ public:
     }
 
     zd::hal::PowerStatus readPower() override {
+        const uint32_t nowMs = millis();
+        if (hasCache_ && (nowMs - lastReadMs_) < 2000u) {
+            return cached_;
+        }
+        lastReadMs_ = nowMs;
+        hasCache_ = true;
+
         // Sample ADC with 4-reading moving average
         uint32_t sumMv = 0;
         for (int i = 0; i < 4; ++i) {
@@ -179,8 +195,14 @@ public:
 
         // Elevated voltage when USB charging (>4.25V)
         const bool charging = (batMv > 4250);
-        return zd::hal::PowerStatus{pct, charging};
+        cached_ = zd::hal::PowerStatus{pct, charging};
+        return cached_;
     }
+
+private:
+    zd::hal::PowerStatus cached_{100, true};
+    uint32_t lastReadMs_ = 0u;
+    bool hasCache_ = false;
 };
 
 class TDeckDisplaySink final : public zd::hal::IDisplaySink {
@@ -190,16 +212,19 @@ public:
         pinMode(PIN_POWER_ON, OUTPUT);
         digitalWrite(PIN_POWER_ON, HIGH);
 
-        // 2. Drive unused shared SPI CS pins HIGH to eliminate bus contention
+        // 2. Isolate shared SPI CS pins HIGH and initialize SPI bus before display init
         pinMode(PIN_LORA_CS, OUTPUT);
         digitalWrite(PIN_LORA_CS, HIGH);
         pinMode(PIN_SD_CS, OUTPUT);
         digitalWrite(PIN_SD_CS, HIGH);
+        pinMode(PIN_LCD_CS, OUTPUT);
+        digitalWrite(PIN_LCD_CS, HIGH);
+        SPI.begin(PIN_LCD_SCLK, PIN_LCD_MISO, PIN_LCD_MOSI);
 
         // 3. Initialize LCD in landscape (320x240 QVGA)
         lcd_.init();
         lcd_.setRotation(1);
-        lcd_.setBrightness(180);
+        lcd_.setBrightness(brightness_);
 
         // 4. Create RGB565 double-buffered sprite
         canvas_.setColorDepth(16);
@@ -210,6 +235,17 @@ public:
     }
 
     void setOverlay(std::string text) { overlay_ = std::move(text); }
+    void setGpsStatus(bool hasFix, uint8_t sats) {
+        gpsFix_ = hasFix;
+        gpsSats_ = sats;
+    }
+
+    void setBrightness(uint8_t level) {
+        if (brightness_ != level) {
+            brightness_ = level;
+            lcd_.setBrightness(brightness_);
+        }
+    }
 
     zd::ScreenDimensions dimensions() const override {
         return zd::ScreenDimensions{
@@ -225,12 +261,25 @@ public:
         canvas_.setFont(&fonts::Font0);
         canvas_.setTextSize(1);
         zd::render::paintUiFrame(canvas_, frame);
+
+        const int32_t w = lcd_.width();
+        const int32_t h = lcd_.height();
+        if (gpsFix_ || gpsSats_ > 0u) {
+            char gpsTag[16];
+            if (gpsFix_) {
+                snprintf(gpsTag, sizeof(gpsTag), "GPS:%u", static_cast<unsigned>(gpsSats_));
+            } else {
+                snprintf(gpsTag, sizeof(gpsTag), "GPS..");
+            }
+            const uint16_t fg = gpsFix_ ? frame.palette.accent : frame.palette.muted;
+            canvas_.setTextColor(fg, frame.palette.bg);
+            canvas_.drawString(gpsTag, w - 42, frame.footerDividerY - 10);
+        }
+
         if (!overlay_.empty()) {
-            const int32_t w = lcd_.width();
-            const int32_t h = lcd_.height();
-            canvas_.fillRect(0, h - 12, w, 12, 0x0000);
-            canvas_.drawFastHLine(0, h - 12, w, 0xFFFF);
-            canvas_.setTextColor(0xFFFF, 0x0000);
+            canvas_.fillRect(0, h - 12, w, 12, frame.palette.bg);
+            canvas_.drawFastHLine(0, h - 12, w, frame.palette.accent);
+            canvas_.setTextColor(frame.palette.fg, frame.palette.bg);
             canvas_.setCursor(3, h - 10);
             canvas_.print(overlay_.c_str());
         }
@@ -244,6 +293,9 @@ private:
     lgfx::LGFX_Sprite canvas_{&lcd_};
     bool canvasReady_ = false;
     std::string overlay_;
+    bool gpsFix_ = false;
+    uint8_t gpsSats_ = 0u;
+    uint8_t brightness_ = 180u;
 };
 
 // --- Optional MIA-M10Q GNSS / GPS Telemetry (T-Deck Plus) ---
@@ -274,6 +326,7 @@ void pollGps(uint32_t nowMs) {
 // --- Runtime State & Adapters ---
 
 Esp32WifiScanner gRadio;
+Esp32BleScanner gBle;
 TDeckPowerSensor gPower;
 NvsThemeStore gThemeStore;
 TDeckDisplaySink gDisplay;
@@ -284,20 +337,25 @@ zd::hal::PlatformSession gSession;
 zd::esp32_common::OffensiveConsole gOffensive;
 
 zd::esp32_common::DirtyFramePacer gFramePacer;
+zd::WigleLogger gWigle;
+bool gSdReady = false;
+bool gWardriveEnabled = false;
 std::string gSerialLine;
 std::string gKeyboardLine;
 std::string gKbFeedback;
 uint32_t gKbFeedbackUntilMs = 0;
 std::string gLastKbOverlay;
+uint32_t gLastActivityMs = 0;
 
-// Trackball button state
-bool gTbClickActive = false;
-bool gTbLongHandled = false;
-uint32_t gTbClickStartMs = 0;
+// Trackball button state & touch gesture state
+zd::esp32_common::ShortLongButton gTbBtn;
 uint32_t gLastTbRollMs = 0;
-
-// Touch button state
 zd::esp32_common::TouchZoneGesture gTouchGesture;
+
+void wakeDisplay(uint32_t nowMs) {
+    gLastActivityMs = nowMs;
+    gDisplay.setBrightness(180u);
+}
 
 void logSerialStatus(const char* eventTag) {
     char gpsBuf[64] = "";
@@ -308,29 +366,103 @@ void logSerialStatus(const char* eventTag) {
     zd::esp32_common::printSerialStatus(gSession, eventTag, gpsBuf);
 }
 
+void setKbFeedback(const std::string& msg, uint32_t nowMs) {
+    std::string line = msg;
+    const std::size_t nl = line.find('\n');
+    if (nl != std::string::npos) {
+        line.resize(nl);
+    }
+    if (line.size() > 50u) {
+        line.resize(50u);
+    }
+    gKbFeedback = std::move(line);
+    gKbFeedbackUntilMs = nowMs + 3000u;
+}
+
+void flushWigleToSd() {
+#ifdef ZD_HAS_ESP32_SD
+    if (!gWardriveEnabled || !gSdReady || !gGps.hasFix) {
+        return;
+    }
+    const auto lines = gWigle.recordScan(gRadio.lastNetworks(), gRadio.lastBssids(), gGps);
+    if (lines.empty()) {
+        return;
+    }
+    const bool needsHeader = !SD.exists("/wigle_zd.csv");
+    File f = SD.open("/wigle_zd.csv", FILE_APPEND);
+    if (!f) {
+        return;
+    }
+    if (needsHeader) {
+        f.print(zd::formatWigleHeader().c_str());
+    }
+    for (const std::string& ln : lines) {
+        f.print(ln.c_str());
+    }
+    f.close();
+#endif
+}
+
+std::string executeConsoleLine(const std::string& line, uint32_t nowMs, const char* srcTag) {
+    if (line == "sec" || line.rfind("sec ", 0) == 0) {
+        return gOffensive.handleLine(line, nowMs, &gSession);
+    }
+    if (line == "ble on") {
+        gBle.setEnabled(true);
+        return "BLE scanner: enabled\n";
+    }
+    if (line == "ble off") {
+        gBle.setEnabled(false);
+        return "BLE scanner: disabled\n";
+    }
+    if (line == "wardrive on") {
+#ifdef ZD_HAS_ESP32_SD
+        if (!gSdReady) {
+            gSdReady = SD.begin(PIN_SD_CS);
+        }
+        gWardriveEnabled = gSdReady;
+        return gSdReady ? "WiGLE SD logging enabled (/wigle_zd.csv)\n"
+                        : "SD card not detected; wardriving unavailable\n";
+#else
+        return "SD support disabled in build\n";
+#endif
+    }
+    if (line == "wardrive off") {
+        gWardriveEnabled = false;
+        return "WiGLE SD logging disabled\n";
+    }
+    if (line == "wardrive") {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Wardrive: %s | SD:%s | Logged:%lu\n",
+                 gWardriveEnabled ? "ON" : "OFF", gSdReady ? "OK" : "NO",
+                 static_cast<unsigned long>(gWigle.loggedCount()));
+        return std::string(buf);
+    }
+    if (line == "gps") {
+        if (gGps.hasFix) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "GPS: FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | %s UTC\n",
+                     gGps.latitude, gGps.longitude, static_cast<unsigned>(gGps.satellites),
+                     gGps.utcTime);
+            return std::string(buf);
+        }
+        return "GPS: Searching for satellites...\n";
+    }
+    const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
+        line, gSession.state(), gDisplay.dimensions(), nowMs);
+    if (res.event.has_value()) {
+        gSession.dispatch(*res.event, &gThemeStore);
+        logSerialStatus(srcTag);
+    }
+    return res.output;
+}
+
 void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
-        if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
-            return;
-        }
-        if (line == "gps") {
-            if (gGps.hasFix) {
-                Serial.printf("GPS: FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
-                              gGps.latitude, gGps.longitude, gGps.satellites, gGps.utcTime);
-            } else {
-                Serial.println("GPS: Searching for satellites (no fix yet)...");
-            }
-        } else {
-            const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
-                line, gSession.state(), gDisplay.dimensions(), nowMs);
-            if (!res.output.empty()) {
-                Serial.print(res.output.c_str());
-            }
-            if (res.event.has_value()) {
-                gSession.dispatch(*res.event, &gThemeStore);
-                logSerialStatus("SERIAL");
-            }
+        wakeDisplay(nowMs);
+        const std::string out = executeConsoleLine(line, nowMs, "SERIAL");
+        if (!out.empty()) {
+            Serial.print(out.c_str());
         }
     });
 }
@@ -345,25 +477,20 @@ void initTrackball() {
 
 void pollTrackball(uint32_t nowMs) {
     // 1. Center Click / BOOT button (GPIO 0)
-    const bool clickPressed = (digitalRead(PIN_TB_CLICK) == LOW);
-    if (clickPressed && !gTbClickActive) {
-        gTbClickActive = true;
-        gTbClickStartMs = nowMs;
-        gTbLongHandled = false;
-    } else if (clickPressed && gTbClickActive && !gTbLongHandled) {
-        // Hold trackball center click for 600ms -> Trigger WiFi scan (Button B)
-        if ((nowMs - gTbClickStartMs) >= 600u) {
-            gTbLongHandled = true;
+    using Ev = zd::esp32_common::ShortLongButton::Event;
+    switch (gTbBtn.update(digitalRead(PIN_TB_CLICK) == LOW, nowMs, 600u, 25u)) {
+        case Ev::LongHold:
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
             logSerialStatus("TB_HOLD_SCAN");
-        }
-    } else if (!clickPressed && gTbClickActive) {
-        gTbClickActive = false;
-        if (!gTbLongHandled && (nowMs - gTbClickStartMs) >= 25u) {
-            // Short center click -> Cycle screen view (Button A) / wake pet
+            break;
+        case Ev::ShortClick:
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::ButtonAPressedEvent{nowMs}, &gThemeStore);
             logSerialStatus("TB_CLICK_VIEW");
-        }
+            break;
+        case Ev::None:
+            break;
     }
 
     // 2. Directional roll (active LOW pulses with debouncing)
@@ -371,18 +498,22 @@ void pollTrackball(uint32_t nowMs) {
     if ((nowMs - gLastTbRollMs) >= kRollDebounceMs) {
         if (digitalRead(PIN_TB_LEFT) == LOW) {
             gLastTbRollMs = nowMs;
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
             logSerialStatus("TB_LEFT_THEME");
         } else if (digitalRead(PIN_TB_RIGHT) == LOW) {
             gLastTbRollMs = nowMs;
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
             logSerialStatus("TB_RIGHT_THEME");
         } else if (digitalRead(PIN_TB_UP) == LOW) {
             gLastTbRollMs = nowMs;
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
             logSerialStatus("TB_UP_VIEW");
         } else if (digitalRead(PIN_TB_DOWN) == LOW) {
             gLastTbRollMs = nowMs;
+            wakeDisplay(nowMs);
             gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
             logSerialStatus("TB_DOWN_VIEW");
         }
@@ -393,19 +524,6 @@ uint32_t gLastKbPollMs = 0;
 
 void initKeyboard() {
     pinMode(PIN_KB_INT, INPUT_PULLUP);
-}
-
-void setKbFeedback(const std::string& msg, uint32_t nowMs) {
-    std::string line = msg;
-    const std::size_t nl = line.find('\n');
-    if (nl != std::string::npos) {
-        line.resize(nl);
-    }
-    if (line.size() > 50u) {
-        line.resize(50u);
-    }
-    gKbFeedback = std::move(line);
-    gKbFeedbackUntilMs = nowMs + 3000u;
 }
 
 void pollKeyboard(uint32_t nowMs) {
@@ -424,6 +542,7 @@ void pollKeyboard(uint32_t nowMs) {
         if (c == 0) {
             return;
         }
+        wakeDisplay(nowMs);
 
         if (c == '\r' || c == '\n') {
             if (gKeyboardLine.empty()) {
@@ -432,36 +551,10 @@ void pollKeyboard(uint32_t nowMs) {
                 setKbFeedback("Scan requested", nowMs);
                 logSerialStatus("KB_SCAN");
             } else {
-                if (gKeyboardLine == "sec" || gKeyboardLine.rfind("sec ", 0) == 0) {
-                    const std::string out = gOffensive.handleLine(gKeyboardLine, nowMs, &gSession);
+                const std::string out = executeConsoleLine(gKeyboardLine, nowMs, "KB_CLI");
+                if (!out.empty()) {
                     Serial.print(out.c_str());
                     setKbFeedback(out, nowMs);
-                    gKeyboardLine.clear();
-                    return;
-                }
-                if (gKeyboardLine == "gps") {
-                    if (gGps.hasFix) {
-                        char buf[64];
-                        snprintf(buf, sizeof(buf), "GPS %.4f,%.4f (%usats)",
-                                 gGps.latitude, gGps.longitude, static_cast<unsigned>(gGps.satellites));
-                        Serial.printf("[GPS] FIX OK | Lat: %.5f Lon: %.5f | Sats: %u | Time: %s UTC\n",
-                                      gGps.latitude, gGps.longitude, gGps.satellites, gGps.utcTime);
-                        setKbFeedback(buf, nowMs);
-                    } else {
-                        Serial.println("[GPS] Searching for satellites (no fix yet)...");
-                        setKbFeedback("GPS: searching...", nowMs);
-                    }
-                } else {
-                    const zd::hal::CliOutcome res = zd::hal::interpretCliLine(
-                        gKeyboardLine, gSession.state(), gDisplay.dimensions(), nowMs);
-                    if (!res.output.empty()) {
-                        Serial.print(res.output.c_str());
-                        setKbFeedback(res.output, nowMs);
-                    }
-                    if (res.event.has_value()) {
-                        gSession.dispatch(*res.event, &gThemeStore);
-                        logSerialStatus("KB_CLI");
-                    }
                 }
                 gKeyboardLine.clear();
             }
@@ -473,9 +566,11 @@ void pollKeyboard(uint32_t nowMs) {
             gKeyboardLine.clear();
             gKbFeedbackUntilMs = 0u;
         } else if (gKeyboardLine.empty() && (c == ' ' || c == '\t')) {
-            // Immediate hotkey: Space or Tab cycles screen view
             gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
             logSerialStatus("KB_VIEW");
+        } else if (gKeyboardLine.empty() && c == 'm') {
+            gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
+            logSerialStatus("KB_MODE");
         } else if (gKeyboardLine.empty() && c == '1') {
             gSession.dispatch(zd::SetPageEvent{nowMs, zd::ScreenPage::PetFace}, &gThemeStore);
             logSerialStatus("KB_PAGE_FACE");
@@ -504,34 +599,11 @@ void pollTouch(uint32_t nowMs, LGFX_TDeck& lcd) {
     uint16_t tx = 0;
     uint16_t ty = 0;
     const bool isTouched = lcd.getTouch(&tx, &ty);
-    using Act = zd::esp32_common::TouchZoneGesture::Action;
-    switch (gTouchGesture.update(isTouched, tx, ty, nowMs, 0u)) {
-        case Act::PrevTheme:
-            gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
-            logSerialStatus("TOUCH_THEME_PREV");
-            break;
-        case Act::NextTheme:
-            gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
-            logSerialStatus("TOUCH_THEME");
-            break;
-        case Act::PrevView:
-            gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
-            logSerialStatus("TOUCH_VIEW_PREV");
-            break;
-        case Act::NextView:
-            gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
-            logSerialStatus("TOUCH_VIEW_NEXT");
-            break;
-        case Act::Scan:
-            gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
-            logSerialStatus("TOUCH_SCAN");
-            break;
-        case Act::CycleMode:
-            gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
-            logSerialStatus("TOUCH_MODE");
-            break;
-        case Act::None:
-            break;
+    if (const char* tag = zd::esp32_common::dispatchTouchAction(
+            gTouchGesture.update(isTouched, tx, ty, nowMs, 0u, gDisplay.dimensions()),
+            nowMs, gSession, &gThemeStore)) {
+        wakeDisplay(nowMs);
+        logSerialStatus(tag);
     }
 }
 
@@ -550,12 +622,20 @@ void setup() {
     initGps();
 
     gRadio.init();
+    gBle.init();
     gPower.init();
     gThemeStore.init();
     gOffensive.begin();
+#ifdef ZD_HAS_ESP32_SD
+    gSdReady = SD.begin(PIN_SD_CS);
+    gWardriveEnabled = gSdReady;
+#endif
+
+    const uint32_t bootMs = millis();
+    gLastActivityMs = bootMs;
 
     // Seed pure functional PRNG with hardware entropy & restore theme from NVS
-    gSession.boot(esp_random(), millis(), &gThemeStore);
+    gSession.boot(esp_random(), bootMs, &gThemeStore);
     gSession.renderTo(gDisplay);
     logSerialStatus("BOOT");
 }
@@ -569,13 +649,22 @@ void loop() {
     pollTouch(nowMs, gDisplay.lcd());
     pollSerialCli(nowMs);
     pollGps(nowMs);
+    gDisplay.setGpsStatus(gGps.hasFix, gGps.satellites);
 
-    // 2. Step non-blocking radio scanner & periodic telemetry tick
-    if (const char* scanTag = gSession.stepRadio(
-            nowMs, gRadio, zd::hal::PlatformSession::kDefaultScanTimeoutMs, &gThemeStore)) {
+    // 2. Step non-blocking multi-radio scanner & periodic telemetry tick
+    if (const char* scanTag = gSession.stepMultiRadio(
+            nowMs, gRadio, &gBle, nullptr, &gThemeStore)) {
+        if (std::string(scanTag) == "SCAN_DONE") {
+            flushWigleToSd();
+        }
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);
+
+    // Dim backlight after 45s of idle while running on battery
+    if (!gSession.state().isCharging && (nowMs - gLastActivityMs) >= 45000u) {
+        gDisplay.setBrightness(48u);
+    }
 
     // 3. Synchronize keyboard overlay & refresh display when dirty
     std::string kbOverlay;

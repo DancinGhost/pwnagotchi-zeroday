@@ -1,6 +1,6 @@
 #pragma once
 
-// CLI-tool realizations of the security HAL, using the standard Linux/Kali wireless
+// CLI-tool realizations of the security HAL, using standard Linux wireless
 // toolchain already present on the system:
 //   - monitor mode / channel : airmon-ng, iw
 //   - AP + station discovery : airodump-ng (CSV dump, polled)
@@ -350,6 +350,9 @@ private:
 
 class CliCaptureSource final : public sec::ICaptureSource {
 public:
+    CliCaptureSource() = default;
+    CliCaptureSource(const CliCaptureSource&) = delete;
+    CliCaptureSource& operator=(const CliCaptureSource&) = delete;
     ~CliCaptureSource() override { stop(); }
 
     bool start(const std::string& monitorIface) override {
@@ -497,30 +500,60 @@ class CliRadioScanner final : public zd::hal::IRadioScanner {
 public:
     explicit CliRadioScanner(std::string iface = "wlan0") : iface_(std::move(iface)) {}
 
-    // Detailed results are retained so the shell can feed BSSID/encryption into secops.
+    // Detailed results are retained so the shell can feed BSSID/encryption/WPS into secops.
     // Only ever written on the UI thread (inside pollScan(), after the worker has finished).
     const std::vector<ScannedAp>& detailed() const { return detailed_; }
 
     bool startAsyncScan() override {
         const std::string iface = iface_;
-        return job_.start([iface]() {
-            // Runs entirely on the worker thread: fetch Wi-Fi list with `--rescan auto` so
-            // NetworkManager refreshes without an uninterruptible 1.2s sleep on shutdown.
+        return job_.start([iface]() -> std::vector<ScannedAp> {
             const bool validIface = sec::isValidIfaceName(iface);
+            std::vector<ScannedAp> list;
             if (validIface) {
                 const CommandResult r = runCapture({
                     "nmcli", "-t", "-f", "BSSID,SSID,CHAN,SECURITY,SIGNAL",
                     "dev", "wifi", "list", "--rescan", "auto", "ifname", iface
                 });
                 if (r.exitCode == 0 && !r.stdoutText.empty()) {
-                    return r.stdoutText;
+                    list = parseNmcliScanDetailed(r.stdoutText);
                 }
             }
-            const CommandResult r = runCapture({
-                "nmcli", "-t", "-f", "BSSID,SSID,CHAN,SECURITY,SIGNAL",
-                "dev", "wifi", "list", "--rescan", "auto"
-            });
-            return r.stdoutText;
+            if (list.empty()) {
+                const CommandResult r = runCapture({
+                    "nmcli", "-t", "-f", "BSSID,SSID,CHAN,SECURITY,SIGNAL",
+                    "dev", "wifi", "list", "--rescan", "auto"
+                });
+                if (r.exitCode == 0 && !r.stdoutText.empty()) {
+                    list = parseNmcliScanDetailed(r.stdoutText);
+                }
+            }
+            // Merge WPS flags from kernel scan cache, or fall back to active `iw scan`.
+            if (validIface) {
+                const CommandResult iwRes = runCapture(
+                    list.empty()
+                        ? std::vector<std::string>{"iw", "dev", iface, "scan"}
+                        : std::vector<std::string>{"iw", "dev", iface, "scan", "dump"},
+                    8000u);
+                if (iwRes.exitCode == 0 && !iwRes.stdoutText.empty()) {
+                    std::vector<ScannedAp> iwList = parseIwScanDetailed(iwRes.stdoutText);
+                    if (list.empty()) {
+                        list = std::move(iwList);
+                    } else {
+                        std::unordered_map<std::string, bool> wpsByBssid;
+                        for (const ScannedAp& iwAp : iwList) {
+                            if (iwAp.wps) {
+                                wpsByBssid[iwAp.bssid] = true;
+                            }
+                        }
+                        for (ScannedAp& ap : list) {
+                            if (wpsByBssid.find(ap.bssid) != wpsByBssid.end()) {
+                                ap.wps = true;
+                            }
+                        }
+                    }
+                }
+            }
+            return list;
         });
     }
 
@@ -528,11 +561,11 @@ public:
         if (job_.running()) {
             return {zd::hal::ScanPollState::Running, {}};
         }
-        const std::optional<std::string> text = job_.collect();
-        if (!text.has_value()) {
+        const std::optional<std::vector<ScannedAp>> res = job_.collect();
+        if (!res.has_value()) {
             return {zd::hal::ScanPollState::Failed, {}};
         }
-        detailed_ = parseNmcliScanDetailed(*text);
+        detailed_ = *res;
         std::vector<AccessPoint> aps;
         aps.reserve(detailed_.size());
         for (const ScannedAp& item : detailed_) {
@@ -551,7 +584,7 @@ public:
 private:
     std::string iface_;
     std::vector<ScannedAp> detailed_;
-    linux_app::AsyncJob<std::string> job_;
+    linux_app::AsyncJob<std::vector<ScannedAp>> job_;
 };
 
 // --- Deauth injection (gate enforced by SecSession before this is reached) ------------
@@ -614,9 +647,17 @@ private:
 class SysfsPowerSensor final : public zd::hal::IPowerSensor {
 public:
     zd::hal::PowerStatus readPower() override {
+        const auto now = std::chrono::steady_clock::now();
+        if (hasCache_ && (now - lastRead_) < std::chrono::seconds(5)) {
+            return cached_;
+        }
+        lastRead_ = now;
+        hasCache_ = true;
+
         zd::hal::PowerStatus st{100, false};
         DIR* dir = ::opendir("/sys/class/power_supply");
         if (dir == nullptr) {
+            cached_ = st;
             return st;
         }
         while (struct dirent* ent = ::readdir(dir)) {
@@ -636,15 +677,22 @@ public:
                 st.isCharging = (status.find("Charging") != std::string::npos) ||
                                 (status.find("Full") != std::string::npos);
                 ::closedir(dir);
+                cached_ = st;
                 return st;
             }
         }
         ::closedir(dir);
+        cached_ = st;
         return st;  // desktop with no battery => 100%, not charging
     }
+
+private:
+    zd::hal::PowerStatus cached_{100, false};
+    std::chrono::steady_clock::time_point lastRead_{};
+    bool hasCache_ = false;
 };
 
-// --- File-backed theme store ---------------------------------------------------------
+// --- File-backed theme, score & trusted-BSSID store ----------------------------------
 
 class FileThemeStore final : public zd::hal::IThemeStore {
 public:
@@ -653,6 +701,8 @@ public:
         dirOk_ = makeDirRecursive(dir, 0700);
         path_ = dir + "/theme";
         hiScorePath_ = dir + "/highscore";
+        trustedPath_ = dir + "/trusted_bssids";
+        mutedPath_ = dir + "/audio_muted";
     }
 
     std::string loadThemeKey() override {
@@ -702,9 +752,62 @@ public:
         }
     }
 
+    bool loadAudioMuted() override {
+        if (!dirOk_) {
+            return false;
+        }
+        const std::string raw = trim(readFileToString(mutedPath_, 16u));
+        return raw == "1" || raw == "true";
+    }
+
+    void saveAudioMuted(bool muted) override {
+        if (!dirOk_) {
+            return;
+        }
+        const int fd = openSecureWriteRegular(mutedPath_, /*append=*/false);
+        if (fd >= 0) {
+            const char* entry = muted ? "1\n" : "0\n";
+            (void)writeAllFd(fd, entry, 2u);
+            ::close(fd);
+        }
+    }
+
+    std::vector<std::string> loadTrustedBssids() override {
+        std::vector<std::string> out;
+        if (!dirOk_) {
+            return out;
+        }
+        std::istringstream in(readFileToString(trustedPath_, 64u * 1024u));
+        std::string line;
+        while (std::getline(in, line)) {
+            const std::string mac = trim(line);
+            if (sec::isValidMac(mac)) {
+                out.push_back(sec::normalizeMac(mac));
+            }
+        }
+        return out;
+    }
+
+    void saveTrustedBssids(const std::vector<std::string>& bssids) override {
+        if (!dirOk_) {
+            return;
+        }
+        const int fd = openSecureWriteRegular(trustedPath_, /*append=*/false);
+        if (fd >= 0) {
+            std::string body;
+            for (const std::string& b : bssids) {
+                body += b + "\n";
+            }
+            (void)writeAllFd(fd, body.data(), body.size());
+            ::close(fd);
+        }
+    }
+
 private:
     std::string path_;
     std::string hiScorePath_;
+    std::string trustedPath_;
+    std::string mutedPath_;
     bool dirOk_ = false;
 };
 
@@ -761,6 +864,9 @@ private:
 
 class FileSessionRecorder final : public sec::ISessionRecorder {
 public:
+    FileSessionRecorder() = default;
+    FileSessionRecorder(const FileSessionRecorder&) = delete;
+    FileSessionRecorder& operator=(const FileSessionRecorder&) = delete;
     bool open(const std::string& path) {
         close();
         fd_ = openSecureWriteRegular(path, /*append=*/true);
@@ -867,6 +973,196 @@ inline std::optional<std::vector<sec::SecEvent>> loadEventsFromFile(
     }
     return sec::decodeSecEvents(lines);
 }
+
+// --- Async BlueZ BLE Scanner & Optional rtl_433 Sub-GHz Receiver ---------------------
+
+class CliBleScanner final : public zd::hal::IBleScanner {
+public:
+    CliBleScanner() : available_(!detail::resolveTrustedExecutable("bluetoothctl").empty()) {}
+
+    bool available() const override { return available_; }
+
+    bool startAsyncScan() {
+        if (!available_) {
+            return false;
+        }
+        return job_.start([]() -> std::vector<BleDevice> {
+            (void)runCapture({"bluetoothctl", "--timeout", "2", "scan", "on"}, 3000u, 65536u);
+            const CommandResult r = runCapture({"bluetoothctl", "devices"}, 2000u, 256u * 1024u);
+            std::vector<BleDevice> out;
+            if (!r.launched) {
+                return out;
+            }
+            std::istringstream in(r.stdoutText);
+            std::string line;
+            while (std::getline(in, line)) {
+                if (const auto d = parseBluezBleLine(line)) {
+                    out.push_back(BleDevice{
+                        d->mac, d->name, d->rssi, d->companyId, d->serviceUuid,
+                        d->trackerPayload, d->threat});
+                }
+            }
+            return out;
+        });
+    }
+
+    std::vector<BleDevice> pollBleDevices(uint32_t nowMs) override {
+        if (!available_) {
+            return {};
+        }
+        if (const auto res = job_.collect()) {
+            return *res;
+        }
+        if (!job_.running() && autoEnabled_ && (nowMs - lastKickMs_) >= 15000u) {
+            lastKickMs_ = nowMs;
+            (void)startAsyncScan();
+        }
+        return {};
+    }
+
+    void setAutoEnabled(bool en) { autoEnabled_ = en; }
+    bool autoEnabled() const { return autoEnabled_; }
+
+private:
+    bool available_ = false;
+    bool autoEnabled_ = false;
+    uint32_t lastKickMs_ = 0u;
+    linux_app::AsyncJob<std::vector<BleDevice>> job_;
+};
+
+class Rtl433Source final : public zd::hal::ISubGhzRadio {
+public:
+    Rtl433Source() : binary_(!detail::resolveTrustedExecutable("rtl_433").empty()) {}
+    Rtl433Source(const Rtl433Source&) = delete;
+    Rtl433Source& operator=(const Rtl433Source&) = delete;
+    ~Rtl433Source() override { stop(); }
+
+    bool available() const override { return binary_; }
+    uint32_t frequencyKhz() const override { return freqKhz_; }
+
+    bool tuneFrequency(uint32_t freqKhz) override {
+        if (freqKhz < 300000u || freqKhz > 928000u) {
+            return false;
+        }
+        freqKhz_ = freqKhz;
+        if (running_) {
+            stop();
+            return start();
+        }
+        return binary_;
+    }
+
+    bool start() {
+        if (!binary_ || running_) {
+            return running_;
+        }
+        const std::string resolved = detail::resolveTrustedExecutable("rtl_433");
+        if (resolved.empty()) {
+            return false;
+        }
+        int pipefd[2];
+        if (::pipe(pipefd) != 0) {
+            return false;
+        }
+        ::fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+        ::fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+        ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+
+        const std::string freqArg = std::to_string(freqKhz_) + "k";
+        std::vector<std::string> args = {resolved, "-f", freqArg, "-M", "level", "-F", "kv"};
+        std::vector<char*> cargv;
+        cargv.reserve(args.size() + 1u);
+        for (std::string& a : args) cargv.push_back(a.data());
+        cargv.push_back(nullptr);
+        const char* const execPath = resolved.c_str();
+        char* const* const execArgv = cargv.data();
+        char* const* const execEnv = detail::safeEnviron();
+        const int maxFd = detail::safeMaxFd();
+
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(pipefd[0]);
+            ::close(pipefd[1]);
+            return false;
+        }
+        if (pid == 0) {
+            ::setpgid(0, 0);
+            const int devnull = ::open("/dev/null", O_RDWR);
+            if (devnull >= 0) {
+                ::dup2(devnull, STDIN_FILENO);
+                ::dup2(devnull, STDERR_FILENO);
+                if (devnull > STDERR_FILENO) {
+                    ::close(devnull);
+                }
+            }
+            ::dup2(pipefd[1], STDOUT_FILENO);
+            if (pipefd[0] > STDERR_FILENO) {
+                ::close(pipefd[0]);
+            }
+            if (pipefd[1] > STDERR_FILENO) {
+                ::close(pipefd[1]);
+            }
+            detail::closeNonStdioFds(maxFd);
+            ::execve(execPath, execArgv, execEnv);
+            ::_exit(127);
+        }
+        ::close(pipefd[1]);
+        readFd_ = pipefd[0];
+        pid_ = pid;
+        running_ = true;
+        return true;
+    }
+
+    void stop() {
+        if (readFd_ >= 0) {
+            ::close(readFd_);
+            readFd_ = -1;
+        }
+        if (pid_ > 0) {
+            detail::terminateChild(pid_);
+            pid_ = -1;
+        }
+        running_ = false;
+        buf_.clear();
+    }
+
+    std::optional<SubGhzSignal> pollSignal(uint32_t nowMs) override {
+        (void)nowMs;
+        if (!running_ || readFd_ < 0) {
+            return std::nullopt;
+        }
+        char tmp[1024];
+        const ssize_t n = ::read(readFd_, tmp, sizeof(tmp));
+        if (n > 0) {
+            buf_.append(tmp, static_cast<std::size_t>(n));
+            if (buf_.size() > 8192u) {
+                buf_.erase(0, buf_.size() - 4096u);
+            }
+        }
+        const std::size_t nl = buf_.find('\n');
+        if (nl == std::string::npos) {
+            return std::nullopt;
+        }
+        const std::string line = buf_.substr(0, nl);
+        buf_.erase(0, nl + 1u);
+        if (const auto sig = parseRtl433Line(line)) {
+            const SubGhzAnomaly anom =
+                sig->continuousCarrier
+                    ? SubGhzAnomaly::JammingCarrier
+                    : (sig->burstCount >= 5u ? SubGhzAnomaly::ReplayBurst : SubGhzAnomaly::None);
+            return SubGhzSignal{sig->freqKhz, sig->rssi, sig->protocol, sig->burstCount, anom};
+        }
+        return std::nullopt;
+    }
+
+private:
+    bool binary_ = false;
+    bool running_ = false;
+    uint32_t freqKhz_ = 433920u;
+    int readFd_ = -1;
+    pid_t pid_ = -1;
+    std::string buf_;
+};
 
 }  // namespace linux_backend
 }  // namespace zd

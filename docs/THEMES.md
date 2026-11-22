@@ -6,14 +6,14 @@ pwnagotchi-zeroday ships with a condensed data-driven catalog of **6 original co
 
 ## Built-In Themes
 
-| # | Slug (`key`) | Display Name | Effect | Inspiration / Aesthetic | `bg` | `fg` | `accent` |
-| :-: | :--- | :--- | :---: | :--- | :--- | :--- | :--- |
-| 1 | `paper` | **Paper Ink** | — | Classic e-paper: charcoal ink on warm cream paper | `#F2F0E6` | `#16181C` | `#303A5C` |
-| 2 | `cyan` | **ZeroDay** | Radar Dish | Signature cyber cyan & sweeping dish wavefronts on midnight blue | `#060C16` | `#00EEFF` | `#78FFC8` |
-| 3 | `rain` | **Storm Rain** | Lightning Storm | Cascading emerald digital rain with rain streaks & forked lightning strikes | `#020804` | `#24FF70` | `#BEFFD2` |
-| 4 | `amber` | **Amber Pulse** | — | Warm amber-orange pocket deck monochrome glow | `#100A02` | `#FFB200` | `#FFD880` |
-| 5 | `redteam` | **Red Team** | Satellite Beam | Offensive ops HUD: scarlet ink, corner reticles & orbital satellite beam | `#0C0406` | `#FF4452` | `#FFBCC4` |
-| 6 | `blueteam` | **Blue Team** | Tactical HUD | Defensive ops HUD: crisp ice blue, corner reticles & radar sweep | `#060C18` | `#60C0FF` | `#BCE8FF` |
+| # | Slug (`key`) | Display Name | Pet Style | Effect | Inspiration / Aesthetic | `bg` | `fg` | `accent` |
+| :-: | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :--- |
+| 1 | `paper` | **Paper Ink** | Classic Face | — | Classic e-paper: charcoal ink on warm paper | `#F2F0E6` | `#16181C` | `#303A5C` |
+| 2 | `cyan` | **ZeroDay** | Pixel-Art Mascot | Radar Dish | Signature cyber cyan & sweeping dish wavefronts on midnight blue | `#060C16` | `#00EEFF` | `#78FFC8` |
+| 3 | `rain` | **Storm Rain** | Classic Face | Lightning Storm | Cascading emerald digital rain with rain streaks & forked lightning strikes | `#020804` | `#24FF70` | `#BEFFD2` |
+| 4 | `amber` | **Amber Pulse** | Pixel-Art Mascot | — | Warm amber-orange pocket deck monochrome glow | `#100A02` | `#FFB200` | `#FFD880` |
+| 5 | `redteam` | **Red Team** | Pixel-Art Mascot | Satellite Beam | Offensive ops HUD: scarlet ink, corner reticles & orbital satellite beam | `#0C0406` | `#FF4452` | `#FFBCC4` |
+| 6 | `blueteam` | **Blue Team** | Pixel-Art Mascot | Tactical HUD | Defensive ops HUD: crisp ice blue, corner reticles & radar sweep | `#060C18` | `#60C0FF` | `#BCE8FF` |
 
 Legacy slugs (`dark`, `neon`, `volt`, `sunset`, `green`, `storm`, `orange`, `crimson`, `redrain`, `operator`) resolve automatically to the closest matching core theme via `themeFromKey`.
 
@@ -36,7 +36,7 @@ Legacy slugs (`dark`, `neon`, `volt`, `sunset`, `green`, `storm`, `orange`, `cri
   - `theme prev` / `T` — step backward
   - `theme <key>` (e.g. `theme neon`, `theme volt`, `theme operator`) — jump directly
 - **Web Port (`platforms/web/index.html`)**:
-  - Click the `‹` / `›` buttons in the theme cycler, click any of the 6 palette swatches, hold `[B]` for 0.7s, press `T` / `Shift+T`, or run `theme <key>` in the `/dev/ttyACM0` console.
+  - Click the `‹` / `›` buttons in the theme cycler, click any of the 6 palette swatches, hold `[B]` for 0.7s, press `T` / `Shift+T`, run `theme <key>` in the console, or copy a permalink via **Share Link** / URL `#hash`.
 
 ---
 

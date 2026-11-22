@@ -88,6 +88,19 @@ class TestLinuxCliBinaries(unittest.TestCase):
             self.assertIn("LabNet", res.stdout)
             self.assertIn("ALARMED", res.stdout)
 
+            # Verify headless report export from replay (.md / .csv)
+            md_path = os.path.join(tmp, "out.md")
+            rep_res = subprocess.run(
+                [ZDLINUX_BIN, "replay", zds_path, "--export", md_path],
+                capture_output=True,
+                text=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(rep_res.returncode, 0, msg=rep_res.stderr)
+            with open(md_path, "r", encoding="utf-8") as rfh:
+                self.assertIn("LabNet", rfh.read())
+
 
 def main():
     parser = argparse.ArgumentParser()

@@ -101,9 +101,13 @@ public:
     virtual std::string loadThemeKey() = 0;
     // Persist stable theme slug (e.g. "blueteam") to NVS / file / EEPROM.
     virtual void saveThemeKey(std::string_view key) = 0;
-    // Optional highscore persistence (defaults to no-op for minimal stores).
+    // Optional highscore, audio mute & trusted BSSID persistence (default no-op).
     virtual uint32_t loadHighScore() { return 0u; }
     virtual void saveHighScore(uint32_t) {}
+    virtual bool loadAudioMuted() { return false; }
+    virtual void saveAudioMuted(bool) {}
+    virtual std::vector<std::string> loadTrustedBssids() { return {}; }
+    virtual void saveTrustedBssids(const std::vector<std::string>&) {}
 };
 
 class IDisplaySink {
@@ -192,7 +196,7 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
         out.requestQuit = true;
     } else if (cmd == "help" || cmd == "?") {
         out.output =
-            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | score | scan | ascii | status\n";
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | ack | score | scan | ascii | status\n";
     } else if (cmd == "themes") {
         out.output = formatThemeTable(state.theme);
     } else if (cmd == "t") {
@@ -267,6 +271,8 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
     } else if (cmd == "ble") {
         out.output = "BLE Devices: " + std::to_string(state.bleDevices.size()) +
                      " | Threats: " + std::to_string(state.threatsDetected) + "\n";
+    } else if (cmd == "ack" || cmd == "clear-threat") {
+        out.event = ClearThreatEvent{nowMs};
     } else if (cmd == "score" || cmd == "level") {
         const LevelInfo lvl = deriveLevelInfo(state.xp);
         out.output = "Lv." + std::to_string(lvl.level) + " " + lvl.title +
@@ -285,7 +291,7 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
                      " | Theme:" + themeSpec(state.theme).key + "\n";
     } else {
         out.output =
-            "Commands: theme [next|prev|<key>] | themes | view [next|prev] | mode [recon|def|off] | subghz [315|433|868|915] | ble | score | scan | ascii | status\n";
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | ack | score | scan | ascii | status\n";
     }
     return out;
 }
@@ -301,11 +307,11 @@ public:
         if (store != nullptr) {
             const std::string saved = store->loadThemeKey();
             if (const auto theme = themeFromKey(saved)) {
-                state_ = reduce(state_, SetThemeEvent{nowMs, *theme, /*announce=*/false});
+                state_ = reduce(std::move(state_), SetThemeEvent{nowMs, *theme, /*announce=*/false});
             }
             const uint32_t hi = store->loadHighScore();
             if (hi > 0u) {
-                state_ = reduce(state_, SetHighScoreEvent{nowMs, hi, 0u});
+                state_ = reduce(std::move(state_), SetHighScoreEvent{nowMs, hi, 0u});
             }
         }
         persistedTheme_ = state_.theme;
@@ -313,7 +319,7 @@ public:
     }
 
     void dispatch(const AppEvent& ev, IThemeStore* store = nullptr) {
-        state_ = reduce(state_, ev);
+        state_ = reduce(std::move(state_), ev);
         syncThemeStore(store);
     }
 
@@ -328,13 +334,13 @@ public:
             const ScanPollResult poll = radio.pollScan();
             if (poll.state == ScanPollState::Completed) {
                 radio.clearScan();
-                state_ = reduce(state_, ScanCompletedEvent{nowMs, poll.networks});
+                state_ = reduce(std::move(state_), ScanCompletedEvent{nowMs, poll.networks});
                 syncThemeStore(store);
                 tag = "SCAN_DONE";
             } else if (poll.state == ScanPollState::Failed ||
                        (nowMs - state_.lastScanStartMs) > scanTimeoutMs) {
                 radio.clearScan();
-                state_ = reduce(state_, ScanCompletedEvent{nowMs, {}});
+                state_ = reduce(std::move(state_), ScanCompletedEvent{nowMs, {}});
                 syncThemeStore(store);
                 tag = "SCAN_EMPTY";
             }
@@ -343,7 +349,7 @@ public:
         if (shouldTriggerScan(state_, nowMs)) {
             radio.clearScan();
             if (radio.startAsyncScan()) {
-                state_ = reduce(state_, ScanStartedEvent{nowMs});
+                state_ = reduce(std::move(state_), ScanStartedEvent{nowMs});
                 if (tag == nullptr) {
                     tag = "SCAN_START";
                 }
@@ -362,7 +368,7 @@ public:
         if (ble != nullptr && ble->available()) {
             auto devs = ble->pollBleDevices(nowMs);
             if (!devs.empty()) {
-                state_ = reduce(state_, BleScanCompletedEvent{nowMs, std::move(devs)});
+                state_ = reduce(std::move(state_), BleScanCompletedEvent{nowMs, std::move(devs)});
             }
         }
         if (subghz != nullptr && subghz->available()) {
@@ -370,7 +376,7 @@ public:
                 subghz->tuneFrequency(state_.subGhzFreqKhz);
             }
             if (auto sig = subghz->pollSignal(nowMs)) {
-                state_ = reduce(state_, SubGhzObservedEvent{nowMs, *sig});
+                state_ = reduce(std::move(state_), SubGhzObservedEvent{nowMs, *sig});
             }
         }
         syncThemeStore(store);
@@ -379,7 +385,7 @@ public:
 
     void stepTick(uint32_t nowMs, IPowerSensor& power) {
         const PowerStatus p = power.readPower();
-        state_ = reduce(state_, TickEvent{nowMs, p.batteryPercent, p.isCharging});
+        state_ = reduce(std::move(state_), TickEvent{nowMs, p.batteryPercent, p.isCharging});
     }
 
     UiFrame buildFrame(ScreenDimensions dims) const {

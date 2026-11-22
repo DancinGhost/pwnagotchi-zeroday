@@ -116,15 +116,20 @@ void testPainterAcrossDevicesThemesAndMoods() {
             }
         }
 
-        // Every mood expression on PetFace page must also stay strictly in-bounds
-        for (zd::Mood mood : kMoods) {
-            zd::AppState moodState = base;
-            moodState.mood = mood;
-            moodState.page = zd::ScreenPage::PetFace;
-            const zd::UiFrame frame = zd::buildUiFrame(moodState, prof.dims);
-            zd::render::Rgb565Surface surf(prof.dims.width, prof.dims.height);
-            zd::render::paintUiFrame(surf, frame);
-            assert(surf.outOfBoundsDrops() == 0u);
+        // Every mood expression on PetFace page must stay strictly in-bounds across both
+        // ClassicFace (PaperInk) and PixelArtMascot (ZeroDayCyan / AmberCrt) styles.
+        for (zd::ThemeId styleTheme : {zd::ThemeId::PaperInk, zd::ThemeId::AmberCrt, zd::ThemeId::ZeroDayCyan}) {
+            for (zd::Mood mood : kMoods) {
+                zd::AppState moodState = zd::reduce(base, zd::SetThemeEvent{12600u, styleTheme, false});
+                moodState.mood = mood;
+                moodState.page = zd::ScreenPage::PetFace;
+                const zd::UiFrame frame = zd::buildUiFrame(moodState, prof.dims);
+                assert(frame.faceGeom.centerX == prof.dims.width / 2);
+                assert(frame.faceStyle == zd::themeFaceStyle(styleTheme));
+                zd::render::Rgb565Surface surf(prof.dims.width, prof.dims.height);
+                zd::render::paintUiFrame(surf, frame);
+                assert(surf.outOfBoundsDrops() == 0u);
+            }
         }
 
         // Animated backdrop effects (RadarDish, LightningStorm, SatelliteBeam, TacticalHud)

@@ -31,12 +31,17 @@ public:
             st.batteryPercent != lastBat_ || st.isCharging != lastCharging_ ||
             st.phrase != lastPhrase_ || st.offensiveArmed != lastArmed_ ||
             st.opsMode != lastOpsMode_ || st.xp != lastXp_ ||
-            st.threatsDetected != lastThreats_ || toastVisible != lastToastVisible_;
+            st.highScore != lastHighScore_ || st.threatsDetected != lastThreats_ ||
+            st.lastThreatLabel != lastThreatLabel_ || st.subGhzFreqKhz != lastSubGhzFreq_ ||
+            st.bleDevices.size() != lastBleCount_ ||
+            st.subGhzSignals.size() != lastSubGhzCount_ || toastVisible != lastToastVisible_;
 
+        const bool hasPetIdleAnim = (st.page == zd::ScreenPage::PetFace);
         const bool hasSceneAnim = st.isScanning || st.offensiveArmed ||
                                   st.opsMode != zd::OpsMode::Recon ||
                                   st.mood == zd::Mood::ThreatAlert ||
-                                  st.mood == zd::Mood::CyberAttack;
+                                  st.mood == zd::Mood::CyberAttack ||
+                                  hasPetIdleAnim;
 
         const bool animChanged =
             ((hasEffect || hasSceneAnim) && animTick != lastAnimTick_) ||
@@ -62,7 +67,12 @@ public:
         lastArmed_ = st.offensiveArmed;
         lastOpsMode_ = st.opsMode;
         lastXp_ = st.xp;
+        lastHighScore_ = st.highScore;
         lastThreats_ = st.threatsDetected;
+        lastThreatLabel_ = st.lastThreatLabel;
+        lastSubGhzFreq_ = st.subGhzFreqKhz;
+        lastBleCount_ = st.bleDevices.size();
+        lastSubGhzCount_ = st.subGhzSignals.size();
         lastToastVisible_ = toastVisible;
         lastAnimTick_ = animTick;
         lastScanAnimTick_ = st.scanAnimTick;
@@ -80,7 +90,11 @@ private:
     zd::OpsMode lastOpsMode_ = zd::OpsMode::Recon;
     uint32_t lastScans_ = 0;
     uint32_t lastXp_ = 0;
+    uint32_t lastHighScore_ = 0;
     uint32_t lastThreats_ = 0;
+    uint32_t lastSubGhzFreq_ = 433920u;
+    std::size_t lastBleCount_ = 0;
+    std::size_t lastSubGhzCount_ = 0;
     int32_t lastBat_ = -1;
     bool lastCharging_ = false;
     bool lastArmed_ = false;
@@ -88,6 +102,7 @@ private:
     uint32_t lastAnimTick_ = 0;
     uint8_t lastScanAnimTick_ = 0;
     std::string lastPhrase_;
+    std::string lastThreatLabel_;
 };
 
 }  // namespace esp32_common

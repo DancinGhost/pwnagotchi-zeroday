@@ -179,15 +179,51 @@ void testControllerPreflightAndShutdown() {
     assert(loadRes.ok);
     assert(ctrl.secMood() == zd::sec::SecMood::Alarmed);
 
+    // Replay stays immune to step() auto-scan pollution even past boot auto-scan delay.
+    ctrl.step();
+    assert(!ctrl.petState().isScanning);
+    assert(ctrl.secState().targets.size() == 2u);
+
+    // Trusted BSSID memory persists across AppController boots.
+    assert(ctrl.toggleTrustBssid("02:aa:bb:cc:dd:01"));
+    assert(zd::sec::isTrustedBssid(ctrl.secState(), "02:aa:bb:cc:dd:01"));
+    {
+        AppController ctrl2("wlan0");
+        ctrl2.boot(78u);
+        assert(zd::sec::isTrustedBssid(ctrl2.secState(), "02:aa:bb:cc:dd:01"));
+    }
+    assert(!ctrl.toggleTrustBssid("02:aa:bb:cc:dd:01"));  // untrusts
+
+    // Assessment report export writes valid .md, .csv, and .html files and rejects bad ext.
+    const std::string mdOut = base + "/report.md";
+    const std::string csvOut = base + "/report.csv";
+    const std::string htmlOut = base + "/report.html";
+    assert(ctrl.exportReport(mdOut).ok);
+    assert(ctrl.exportReport(csvOut).ok);
+    assert(ctrl.exportReport(htmlOut).ok);
+    assert(!ctrl.exportReport(base + "/report.exe").ok);
+    assert(readFileToString(mdOut).find("CorpNet") != std::string::npos);
+    assert(readFileToString(csvOut).find("kind,bssid_or_mac") != std::string::npos);
+    assert(readFileToString(htmlOut).find("<!doctype html>") != std::string::npos);
+
     // Safe shutdown when idle is a no-op.
     ctrl.shutdown();
     assert(!ctrl.monitoring());
 
+    std::remove(mdOut.c_str());
+    std::remove(csvOut.c_str());
+    std::remove(htmlOut.c_str());
     std::remove(replayPath.c_str());
-    std::string cleanAudit = base + "/.local/state/pwnagotchi-zeroday/audit.log";
+    std::remove((base + "/.config/pwnagotchi-zeroday/trusted_bssids").c_str());
+    std::remove((base + "/.config/pwnagotchi-zeroday/theme").c_str());
+    std::remove((base + "/.config/pwnagotchi-zeroday/highscore").c_str());
+    std::remove((base + "/.config/pwnagotchi-zeroday/audio_muted").c_str());
+    ::rmdir((base + "/.config/pwnagotchi-zeroday").c_str());
+    ::rmdir((base + "/.config").c_str());
+    std::string cleanAudit = base + "/.local/share/pwnagotchi-zeroday/audit.log";
     std::remove(cleanAudit.c_str());
-    ::rmdir((base + "/.local/state/pwnagotchi-zeroday").c_str());
-    ::rmdir((base + "/.local/state").c_str());
+    ::rmdir((base + "/.local/share/pwnagotchi-zeroday").c_str());
+    ::rmdir((base + "/.local/share").c_str());
     ::rmdir((base + "/.local").c_str());
     ::rmdir(tmpDir);
 }

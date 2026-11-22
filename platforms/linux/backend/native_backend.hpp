@@ -21,6 +21,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <fcntl.h>
@@ -52,6 +53,9 @@ class NativeCaptureSource final : public sec::ICaptureSource {
 public:
     static constexpr std::size_t kMaxQueuedFrames = 4096u;
 
+    NativeCaptureSource() = default;
+    NativeCaptureSource(const NativeCaptureSource&) = delete;
+    NativeCaptureSource& operator=(const NativeCaptureSource&) = delete;
     ~NativeCaptureSource() override { stop(); }
 
     void setPcapDumpPath(std::string path) { dumpPath_ = std::move(path); }
@@ -63,7 +67,7 @@ public:
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
         handle_ = pcap_create(monitorIface.c_str(), errbuf);
         if (handle_ == nullptr) {
-            lastError_ = errbuf;
+            setError(errbuf);
             return false;
         }
         int cfg = 0;
@@ -74,18 +78,18 @@ public:
         (void)cfg;  // best-effort tuning; activation below is the authoritative check
         const int actRc = pcap_activate(handle_);
         if (actRc < 0) {
-            lastError_ = pcap_geterr(handle_);
+            setError(pcap_geterr(handle_));
             pcap_close(handle_);
             handle_ = nullptr;
             return false;
         }
         if (actRc > 0) {
-            lastError_ = pcap_geterr(handle_);  // non-fatal warning (e.g. promisc not supported)
+            setError(pcap_geterr(handle_));  // non-fatal warning (e.g. promisc not supported)
         }
         setPcapCloexec(handle_);
         const int dlt = pcap_datalink(handle_);
         if (dlt != DLT_IEEE802_11_RADIO && dlt != DLT_IEEE802_11) {
-            lastError_ = "interface is not in monitor mode (unexpected DLT)";
+            setError("interface is not in monitor mode (unexpected DLT)");
             pcap_close(handle_);
             handle_ = nullptr;
             return false;
@@ -132,18 +136,37 @@ public:
     }
 
     bool running() const override { return running_.load(std::memory_order_acquire); }
-    const std::string& lastError() const { return lastError_; }
+    std::string lastError() const {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        return lastError_;
+    }
 
 private:
+    void setError(std::string err) {
+        std::lock_guard<std::mutex> lock(errorMutex_);
+        lastError_ = std::move(err);
+    }
+
     void captureLoop() {
         while (!stopRequested_.load(std::memory_order_acquire)) {
+            batchQueue_.clear();
             const int n = pcap_dispatch(handle_, 256, &NativeCaptureSource::trampoline,
                                         reinterpret_cast<u_char*>(this));
+            if (!batchQueue_.empty()) {
+                std::lock_guard<std::mutex> lock(queueMutex_);
+                for (auto& f : batchQueue_) {
+                    if (queue_.size() >= kMaxQueuedFrames) {
+                        queue_.pop_front();
+                    }
+                    queue_.push_back(std::move(f));
+                }
+                batchQueue_.clear();
+            }
             if (n == PCAP_ERROR_BREAK || stopRequested_.load(std::memory_order_acquire)) {
                 break;
             }
             if (n < 0) {
-                lastError_ = pcap_geterr(handle_);
+                setError(pcap_geterr(handle_));
                 break;
             }
         }
@@ -152,6 +175,7 @@ private:
 
     void openDumper() {
         closeDumper();
+        dumpedBeaconBssids_.clear();
         if (dumpPath_.empty() || handle_ == nullptr) {
             return;
         }
@@ -195,16 +219,19 @@ private:
             f = decodeDot11(bytes, h->caplen, now, -100);
         }
         if (f.has_value()) {
-            if (self->dumper_ != nullptr &&
-                (f->kind == sec::FrameKind::Beacon || f->kind == sec::FrameKind::Eapol ||
-                 f->kind == sec::FrameKind::Pmkid)) {
-                pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+            if (self->dumper_ != nullptr) {
+                if (f->kind == sec::FrameKind::Eapol || f->kind == sec::FrameKind::Pmkid) {
+                    pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+                } else if (f->kind == sec::FrameKind::Beacon && !f->bssid.empty()) {
+                    if (self->dumpedBeaconBssids_.size() >= 1024u) {
+                        self->dumpedBeaconBssids_.clear();
+                    }
+                    if (self->dumpedBeaconBssids_.insert(f->bssid).second) {
+                        pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+                    }
+                }
             }
-            std::lock_guard<std::mutex> lock(self->queueMutex_);
-            if (self->queue_.size() >= kMaxQueuedFrames) {
-                self->queue_.pop_front();
-            }
-            self->queue_.push_back(std::move(*f));
+            self->batchQueue_.push_back(std::move(*f));
         }
     }
 
@@ -215,7 +242,10 @@ private:
     std::atomic<bool> stopRequested_{false};
     std::thread worker_;
     std::mutex queueMutex_;
+    mutable std::mutex errorMutex_;
     std::deque<sec::CapturedFrame> queue_;
+    std::vector<sec::CapturedFrame> batchQueue_;
+    std::unordered_set<std::string> dumpedBeaconBssids_;
     std::string dumpPath_;
     std::string lastError_;
 };
@@ -223,6 +253,8 @@ private:
 class NativeInjector final : public sec::IInjector {
 public:
     explicit NativeInjector(sec::IMonitorControl* monitor) : monitor_(monitor) {}
+    NativeInjector(const NativeInjector&) = delete;
+    NativeInjector& operator=(const NativeInjector&) = delete;
     ~NativeInjector() override { closeHandle(); }
 
     bool available() const override {

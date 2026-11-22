@@ -205,9 +205,18 @@ inline CommandResult runCapture(const std::vector<std::string>& argv,
         const int devnull = ::open("/dev/null", O_RDONLY);
         if (devnull >= 0) {
             ::dup2(devnull, STDIN_FILENO);
+            if (devnull != STDIN_FILENO) {
+                ::close(devnull);
+            }
         }
         ::dup2(pipefd[1], STDOUT_FILENO);
         ::dup2(pipefd[1], STDERR_FILENO);
+        if (pipefd[0] > STDERR_FILENO) {
+            ::close(pipefd[0]);
+        }
+        if (pipefd[1] > STDERR_FILENO) {
+            ::close(pipefd[1]);
+        }
         detail::closeNonStdioFds(maxFd);
         ::execve(execPath, execArgv, execEnv);
         ::_exit(127);
@@ -325,6 +334,9 @@ public:
                 ::dup2(devnull, STDIN_FILENO);
                 ::dup2(devnull, STDOUT_FILENO);
                 ::dup2(devnull, STDERR_FILENO);
+                if (devnull > STDERR_FILENO) {
+                    ::close(devnull);
+                }
             }
             detail::closeNonStdioFds(maxFd);
             ::execve(execPath, execArgv, execEnv);

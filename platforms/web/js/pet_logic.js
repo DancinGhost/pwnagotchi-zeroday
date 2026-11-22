@@ -484,7 +484,7 @@
     let nextXp = current.minXp;
     if (nextTier) {
       const span = nextTier.minXp - current.minXp;
-      progressPct = Math.min(100, Math.round(((safeXp - current.minXp) / span) * 100));
+      progressPct = Math.min(100, Math.floor(((safeXp - current.minXp) * 100) / span));
       nextXp = nextTier.minXp;
     }
     return {
@@ -518,6 +518,8 @@
     }
     return s.hasScannedOnce ? deriveMoodFromScan(s.latestScan) : Mood.Awake;
   }
+
+  const THREAT_DISPLAY_TIMEOUT_MS = 30000;
 
   function sanitizePetName(rawName) {
     const cleaned = String(rawName == null ? '' : rawName)
@@ -561,6 +563,7 @@
       subGhzFreqKhz: 433920,
       threatsDetected: 0,
       lastThreatLabel: '',
+      lastThreatMs: 0,
       // Playful hacker toy counters
       toyHandshakes: 0,
       snacksFed: 0,
@@ -654,6 +657,21 @@
           batteryPercent: fp.clampVal(Math.trunc(event.batteryPercent), 0, 100),
           isCharging: Boolean(event.isCharging)
         });
+
+        if (next.lastThreatLabel && (next.lastThreatMs || 0) > 0) {
+          const threatElapsed = (next.uptimeMs - (next.lastThreatMs >>> 0)) >>> 0;
+          if (threatElapsed < 0x80000000 && threatElapsed >= THREAT_DISPLAY_TIMEOUT_MS) {
+            next.lastThreatLabel = '';
+            next.lastThreatMs = 0;
+            if (!next.isScanning && next.mood === Mood.ThreatAlert) {
+              next.mood = idleMoodForState(next);
+              const picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
+              next.phrase = picked.value;
+              next.rngSeed = picked.nextSeed;
+              next.lastPhraseChangeMs = next.uptimeMs;
+            }
+          }
+        }
 
         if (next.isScanning) {
           const phase = Math.floor((next.uptimeMs - next.lastScanStartMs) / 450) % 2;
@@ -796,8 +814,7 @@
         const nextBase = Object.assign({}, state, {
           uptimeMs: now,
           lastInteractionMs: now,
-          opsMode: nextMode,
-          offensiveArmed: nextMode === OpsMode.Offensive
+          opsMode: nextMode
         });
         if (!nextBase.isScanning) {
           nextBase.mood = idleMoodForState(nextBase);
@@ -815,8 +832,7 @@
         const nextBase = Object.assign({}, state, {
           uptimeMs: now,
           lastInteractionMs: now,
-          opsMode: nextMode,
-          offensiveArmed: nextMode === OpsMode.Offensive
+          opsMode: nextMode
         });
         if (!nextBase.isScanning) {
           nextBase.mood = idleMoodForState(nextBase);
@@ -861,7 +877,8 @@
           uptimeMs: now,
           bleDevices: Object.freeze(trimmed),
           threatsDetected: (state.threatsDetected || 0) + threatCount,
-          lastThreatLabel: topThreat || state.lastThreatLabel
+          lastThreatLabel: topThreat || state.lastThreatLabel,
+          lastThreatMs: threatCount > 0 ? (now === 0 ? 1 : now) : (state.lastThreatMs || 0)
         }, xpFields);
         if (threatCount > 0 && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
           nextBase.mood = Mood.ThreatAlert;
@@ -891,7 +908,8 @@
           subGhzFreqKhz: sig.freqKhz,
           subGhzSignals: Object.freeze(list),
           threatsDetected: (state.threatsDetected || 0) + (isAnom ? 1 : 0),
-          lastThreatLabel: threatLbl
+          lastThreatLabel: threatLbl,
+          lastThreatMs: isAnom ? (now === 0 ? 1 : now) : (state.lastThreatMs || 0)
         }, xpFields);
         if (isAnom && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
           nextBase.mood = Mood.ThreatAlert;
@@ -1040,6 +1058,24 @@
         );
       }
 
+      case 'ClearThreat': {
+        const now = event.nowMs >>> 0;
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          lastThreatLabel: '',
+          lastThreatMs: 0
+        });
+        if (!nextBase.isScanning) {
+          nextBase.mood = idleMoodForState(nextBase);
+          const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+          nextBase.phrase = picked.value;
+          nextBase.rngSeed = picked.nextSeed;
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
       case 'SetPage': {
         return applyPage(state, event.page, event.nowMs);
       }
@@ -1054,6 +1090,7 @@
   }
 
   const petLogic = Object.freeze({
+    THREAT_DISPLAY_TIMEOUT_MS,
     OpsMode,
     opsModeLabel,
     cycleOpsMode,

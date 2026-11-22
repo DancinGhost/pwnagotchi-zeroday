@@ -35,23 +35,25 @@ core/include/zd/              # Zero-dependency C++17 Functional Core & HAL
   ├── pet_logic.hpp           # Pure Elm/Redux reducer: reduce(AppState, AppEvent)
   ├── ui_model.hpp            # Responsive multi-device layout & ASCII frame renderer
   ├── hal.hpp                 # Portable HAL interfaces, CLI parser & PlatformSession
-  ├── secops.hpp              # Pure security engine: SecState reducer, defensive monitors,
-  │                           #   and the transmit authorization gate
+  ├── secops.hpp              # Pure security engine: SecState reducer, ChannelHopper,
+  │                           #   trusted BSSID memory, defensive monitors & TX gate
+  ├── report.hpp              # Pure assessment report exporter (Markdown, CSV, HTML)
   └── secops_hal.hpp          # Capture/inject/monitor adapter contracts & SecSession
 render/include/zd/render/     # Hardware-agnostic immediate-mode renderer
   ├── painter.hpp             # Templated paintUiFrame<Gfx> (M5GFX, LovyanGFX, etc.)
   └── surface_rgb565.hpp      # Zero-dep RGB565 framebuffer + 5x7 font + 1-bit export
 platforms/                    # Device & OS shells
-  ├── m5stick/main.cpp        # ESP32 + M5Unified + WiFi + NVS Preferences + Serial CLI
-  ├── tdeck/main.cpp          # ESP32-S3 + LovyanGFX + Trackball + Touch + Keyboard + GPS
-  ├── cyd/main.cpp            # ESP32-2432S028 (CYD) + LovyanGFX + XPT2046 Touch + BOOT btn
+  ├── common/                 # Shared ESP32 WiFi/BLE/CC1101 HAL, buzzer melodies & WiGLE CSV
+  ├── m5stick/main.cpp        # ESP32 + M5Unified + Speaker melodies + WiFi/BLE + NVS
+  ├── tdeck/main.cpp          # ESP32-S3 + LovyanGFX + Trackball + Keyboard + GPS + WiGLE SD
+  ├── cyd/main.cpp            # ESP32-2432S028 (CYD) + Dual-Band DMA + XPT2046 + LDR/LED
   ├── native/main.cpp         # Desktop / Linux / RPi CLI simulator & PPM exporter (zd_sim)
   ├── linux/                  # Linux desktop app: real offensive/defensive WiFi tooling
-  │   ├── backend/            #   hybrid libpcap/libnl + CLI-tool adapters & pure parsers
+  │   ├── backend/            #   hybrid libpcap + nmcli/iw/airodump/rtl_433/bluetoothctl
   │   ├── app/                #   shared AppController + monotonic clock
   │   ├── cli/main.cpp        #   ncurses TUI + scriptable subcommands (zd-linux)
   │   └── gui/                #   Qt6 Widgets dashboard (zd-gui)
-  └── web/                    # Standalone HTML5 Canvas pocket cyberdeck port
+  └── web/                    # Offline-installable PWA HTML5 Canvas pocket cyberdeck port
 tests/                        # Automated host & cross-language parity test suites
 docs/                         # Theme design rules (THEMES.md) & porting guide (PORTING.md)
 ```
@@ -77,9 +79,9 @@ docs/                         # Theme design rules (THEMES.md) & porting guide (
 | **Trackball Up / Down** | Cycle screen views backward / forward |
 | **Trackball Left / Right** | Cycle themes backward / forward (shows toast & persists to NVS) |
 | **GT911 Touchscreen** (T-Deck Plus) | Tap header for **next** theme (top-right `[MODE]` badge cycles OpsMode); hold header (~0.6s) for **previous** theme; tap left/right third for **prev/next** view; tap center to scan; hold center (~0.6s) to cycle OpsMode |
-| **QWERTY Keyboard Hotkeys** | `Space`/`Tab`: cycle views; `Enter`: scan; `1`–`4`: Face/Radar/Spectrum/RF Guard; `[`/`]`: prev/next theme |
-| **Keyboard / Serial CLI** | `theme <key>`, `mode [recon|def|off]`, `subghz [315|433|868|915]`, `ble`, `score`, `view <1-4>`, `scan`, `gps` |
-| **MIA-M10Q GPS** (T-Deck Plus) | Real-time GNSS coordinate & satellite acquisition; queried via `gps` command or telemetry |
+| **QWERTY Keyboard Hotkeys** | `Space`/`Tab`: cycle views; `Enter`: scan; `m`: cycle OpsMode; `1`–`4`: Face/Radar/Spectrum/RF Guard; `[`/`]`: prev/next theme |
+| **Keyboard / Serial CLI** | `theme <key>`, `mode [recon\|def\|off]`, `subghz [315\|433\|868\|915]`, `ble [on\|off]`, `ack`, `score`, `view <1-4>`, `scan`, `gps`, `wardrive [on\|off]` |
+| **MIA-M10Q GPS & WiGLE SD** (T-Deck Plus) | Real-time GNSS coordinates, `[GPS]` corner status pill, and deduplicated `/wigle_zd.csv` MicroSD wardriving |
 
 ### CYD ESP32-2432S028 ("Cheap Yellow Display")
 | Input | Action |
@@ -88,7 +90,7 @@ docs/                         # Theme design rules (THEMES.md) & porting guide (
 | **XPT2046 Resistive Touch — Left / Right Third** | Tap left third for **previous** view; tap right third for **next** view |
 | **XPT2046 Resistive Touch — Center** | Tap center to trigger immediate WiFi scan; hold (~0.6s) to cycle OpsMode |
 | **BOOT Button (GPIO 0)** | Short press: cycle screen views & wake pet; Hold (~0.6s): immediate WiFi scan |
-| **Serial CLI (`115200` baud)** | Standard commands (`themes`, `theme <key>`, `mode`, `subghz`, `ble`, `score`, `view`, `scan`, `status`, `ascii`) plus `bl <10-255>`, `rot <1\|3>`, `ldr` |
+| **Serial CLI (`115200` baud)** | Standard commands (`themes`, `theme <key>`, `mode`, `subghz`, `ble [on\|off]`, `ack`, `score`, `view`, `scan`, `status`, `ascii`) plus `bl <10-255>`, `autobl [on\|off]`, `led [on\|off]`, `rot <1\|3>`, `ldr` |
 
 ---
 

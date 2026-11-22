@@ -166,6 +166,8 @@ struct AppState {
     uint32_t subGhzFreqKhz = 433920u;
     uint32_t threatsDetected = 0;
     std::string lastThreatLabel{};
+    uint32_t lastThreatMs = 0;
+    OpsMode preArmedOpsMode = OpsMode::Recon;
 };
 
 // --- Algebraic Sum Type of Events fed from the Imperative Shell into the Pure Reducer ---
@@ -263,6 +265,18 @@ struct SetHighScoreEvent {
     uint32_t xp = 0;
 };
 
+struct ClearThreatEvent {
+    uint32_t nowMs;
+};
+
+struct SyncMonitorSnapshotEvent {
+    uint32_t nowMs;
+    std::vector<AccessPoint> aps{};
+    std::vector<BleDevice> bleDevices{};
+    uint32_t threatCount = 0;
+    std::string topThreatLabel{};
+};
+
 using AppEvent = std::variant<
     TickEvent,
     ButtonAPressedEvent,
@@ -280,6 +294,8 @@ using AppEvent = std::variant<
     BleScanCompletedEvent,
     SubGhzObservedEvent,
     SetSubGhzFreqEvent,
-    SetHighScoreEvent>;
+    SetHighScoreEvent,
+    ClearThreatEvent,
+    SyncMonitorSnapshotEvent>;
 
 }  // namespace zd

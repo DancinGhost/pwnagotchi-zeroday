@@ -8,9 +8,11 @@
 #include <string>
 #include <vector>
 
+#include "buzzer_melodies.hpp"
 #include "esp32_sec_cmd.hpp"
 #include "frame_pacer.hpp"
 #include "nmea.hpp"
+#include "wigle.hpp"
 #include "zd/pet_logic.hpp"
 
 namespace {
@@ -188,12 +190,50 @@ void testOffensiveConsoleCore() {
     assert(!console.isArmed());
 }
 
+void testMelodiesWigleAndPacerExtensions() {
+    // 1. MelodyPlayer non-blocking note stepping & mute stop
+    zd::MelodyPlayer mp;
+    mp.trigger(zd::MelodyId::Boot, 1000u);
+    assert(mp.isPlaying());
+    const auto c1 = mp.step(1000u);
+    assert(c1.has_value() && c1->active && c1->freqHz == 523u);
+    assert(!mp.step(1020u).has_value());
+    const auto c2 = mp.step(1060u);
+    assert(c2.has_value() && c2->active && c2->freqHz == 659u);
+    mp.setMuted(true);
+    const auto stopCmd = mp.step(1070u);
+    assert(stopCmd.has_value() && !stopCmd->active);
+    assert(!mp.isPlaying());
+
+    // 2. WigleLogger dedup & CSV formula injection protection
+    zd::WigleLogger wl;
+    zd::esp32_common::GpsState noFix{};
+    assert(wl.recordScan({{"Test", -50, 6, true}}, {"02:aa:bb:cc:dd:01"}, noFix).empty());
+    zd::esp32_common::GpsState fix{true, 37.7749f, -122.4194f, 7u, "12:30:00", 2000u};
+    const auto rows1 = wl.recordScan({{"=evil", -65, 6, true}}, {"02:aa:bb:cc:dd:01"}, fix);
+    assert(rows1.size() == 1u && wl.loggedCount() == 1u);
+    assert(rows1[0].find("\"'=evil\"") != std::string::npos);
+    // Small RSSI fluctuation (+3 dB) deduplicated; >= 8 dB improvement logged
+    assert(wl.recordScan({{"=evil", -62, 6, true}}, {"02:aa:bb:cc:dd:01"}, fix).empty());
+    assert(wl.recordScan({{"=evil", -50, 6, true}}, {"02:aa:bb:cc:dd:01"}, fix).size() == 1u);
+
+    // 3. DirtyFramePacer SubGHz/Threat changes & PetFace idle anim
+    zd::esp32_common::DirtyFramePacer pacer;
+    zd::AppState st = zd::initialState(1u);
+    st.theme = zd::ThemeId::PaperInk;
+    assert(pacer.shouldRender(st, 100u));
+    assert(pacer.shouldRender(st, 280u));  // PetFace animates on PaperInk
+    st = zd::reduce(st, zd::SetSubGhzFreqEvent{400u, 915000u});
+    assert(pacer.shouldRender(st, 420u));  // immediate render on SubGhzFreq change despite < 140ms
+}
+
 }  // namespace
 
 int main() {
     testNmeaParserHardening();
     testDirtyFramePacer();
     testOffensiveConsoleCore();
+    testMelodiesWigleAndPacerExtensions();
     std::cout << "[esp32-common] all portable ESP32 helper tests passed\n";
     return 0;
 }

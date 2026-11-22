@@ -245,91 +245,6 @@
     const bodyBottom = footerDivY - 1;
     const bodyH = bodyBottom - bodyTop;
 
-    let geom;
-    let speechX;
-    let speechTopY;
-    let lineStepY;
-    let speechCols;
-    let speechMaxLines;
-
-    if (micro) {
-      const centerY = bodyTop + Math.trunc(bodyH / 2) - 4;
-      geom = {
-        centerX: 28,
-        centerY,
-        eyeOffsetX: 9,
-        eyeY: centerY - 2,
-        eyeRadius: 4,
-        mouthY: centerY + 5,
-        mouthRadius: 3,
-        bracketOffsetX: 21,
-        bracketHalfHeight: 10,
-        moodBadgeY: bodyBottom - 8
-      };
-      speechX = 56;
-      speechTopY = bodyTop + 2;
-      lineStepY = 9;
-      speechCols = Math.max(6, Math.floor((dims.width - speechX - 2) / 6));
-      speechMaxLines = Math.max(2, Math.floor((bodyH - 12) / 9));
-    } else if (compact) {
-      const centerY = bodyTop + Math.trunc(bodyH / 2) - 4;
-      geom = {
-        centerX: 35,
-        centerY,
-        eyeOffsetX: 11,
-        eyeY: centerY - 3,
-        eyeRadius: 5,
-        mouthY: centerY + 6,
-        mouthRadius: 4,
-        bracketOffsetX: 26,
-        bracketHalfHeight: 13,
-        moodBadgeY: bodyBottom - 9
-      };
-      speechX = 70;
-      speechTopY = bodyTop + 3;
-      lineStepY = 10;
-      speechCols = Math.floor((dims.width - speechX - 3) / 6);
-      speechMaxLines = 4;
-    } else if (wide) {
-      const centerY = bodyTop + Math.trunc(bodyH / 2) - 8;
-      geom = {
-        centerX: 72,
-        centerY,
-        eyeOffsetX: 22,
-        eyeY: centerY - 5,
-        eyeRadius: 10,
-        mouthY: centerY + 13,
-        mouthRadius: 8,
-        bracketOffsetX: 54,
-        bracketHalfHeight: 26,
-        moodBadgeY: bodyBottom - 14
-      };
-      speechX = 144;
-      speechTopY = bodyTop + 8;
-      lineStepY = 14;
-      speechCols = Math.floor((dims.width - speechX - 6) / 6);
-      speechMaxLines = Math.max(5, Math.floor((bodyH - 38) / 14));
-    } else {
-      const centerY = bodyTop + Math.trunc(bodyH / 2) - 7;
-      geom = {
-        centerX: 55,
-        centerY,
-        eyeOffsetX: 18,
-        eyeY: centerY - 4,
-        eyeRadius: 8,
-        mouthY: centerY + 10,
-        mouthRadius: 6,
-        bracketOffsetX: 42,
-        bracketHalfHeight: 20,
-        moodBadgeY: bodyBottom - 12
-      };
-      speechX = 112;
-      speechTopY = bodyTop + 6;
-      lineStepY = 12;
-      speechCols = Math.floor((dims.width - speechX - 4) / 6);
-      speechMaxLines = bodyH >= 110 ? 4 : 3;
-    }
-
     const scene = state.isScanning
       ? ActivityScene.RadarDish
       : effectiveMode === logic.OpsMode.Offensive
@@ -338,23 +253,120 @@
           ? ActivityScene.ThreatShield
           : ActivityScene.None;
 
-    const promptMaxCols =
-      scene !== ActivityScene.None && speechCols > 5 ? speechCols - (compact ? 4 : 5) : speechCols;
+    const centerX = Math.trunc(dims.width / 2);
+    let geom;
+    let speechX;
+    let speechTopY;
+    let lineStepY;
+    let speechCols;
+    let speechMaxLines;
+
+    if (micro) {
+      const centerY = bodyTop + Math.trunc(bodyH / 2) + 1;
+      geom = {
+        centerX,
+        centerY,
+        eyeOffsetX: 9,
+        eyeY: centerY - 2,
+        eyeRadius: 4,
+        mouthY: centerY + 5,
+        mouthRadius: 3,
+        bracketOffsetX: 21,
+        bracketHalfHeight: 7,
+        moodBadgeY: bodyBottom - 8
+      };
+      speechX = 4;
+      speechTopY = bodyTop + 1;
+      lineStepY = 8;
+      const reserve = scene !== ActivityScene.None ? 18 : 0;
+      speechCols = Math.max(6, Math.floor((dims.width - 8 - reserve) / 6));
+      speechMaxLines = 1;
+    } else if (compact) {
+      const centerY = bodyTop + Math.trunc(bodyH / 2);
+      geom = {
+        centerX,
+        centerY,
+        eyeOffsetX: 11,
+        eyeY: centerY - 2,
+        eyeRadius: 5,
+        mouthY: centerY + 6,
+        mouthRadius: 4,
+        bracketOffsetX: 26,
+        bracketHalfHeight: 10,
+        moodBadgeY: bodyBottom - 9
+      };
+      speechX = 4;
+      speechTopY = bodyTop + 2;
+      lineStepY = 9;
+      const reserve = scene !== ActivityScene.None ? 24 : 0;
+      speechCols = Math.max(8, Math.floor((dims.width - 8 - reserve) / 6));
+      speechMaxLines = 1;
+    } else if (wide) {
+      const centerY = bodyTop + Math.trunc(bodyH / 2) - 4;
+      geom = {
+        centerX,
+        centerY,
+        eyeOffsetX: 22,
+        eyeY: centerY - 5,
+        eyeRadius: 10,
+        mouthY: centerY + 13,
+        mouthRadius: 8,
+        bracketOffsetX: 54,
+        bracketHalfHeight: 26,
+        moodBadgeY: bodyBottom - 34
+      };
+      speechX = 6;
+      speechTopY = bodyTop + 4;
+      lineStepY = 11;
+      const reserve = scene !== ActivityScene.None ? 40 : 0;
+      speechCols = Math.max(12, Math.floor((dims.width - 12 - reserve) / 6));
+      speechMaxLines = 2;
+    } else {
+      const centerY = bodyTop + Math.trunc(bodyH / 2);
+      geom = {
+        centerX,
+        centerY,
+        eyeOffsetX: 16,
+        eyeY: centerY - 4,
+        eyeRadius: 7,
+        mouthY: centerY + 8,
+        mouthRadius: 5,
+        bracketOffsetX: 38,
+        bracketHalfHeight: 14,
+        moodBadgeY: bodyBottom - 19
+      };
+      speechX = 4;
+      speechTopY = bodyTop + 2;
+      lineStepY = 9;
+      const reserve = scene !== ActivityScene.None ? 32 : 0;
+      speechCols = Math.max(12, Math.floor((dims.width - 8 - reserve) / 6));
+      speechMaxLines = 1;
+    }
+
+    const promptMaxCols = compact
+      ? (speechCols > 10 ? Math.min(9, Math.trunc(speechCols / 2)) : speechCols)
+      : speechCols;
     const promptLabel = truncateText(state.petName + '>', promptMaxCols);
-    const wrappedPhrase = wrapWords(state.phrase, speechCols, speechMaxLines);
+    const phraseCols = compact
+      ? (speechCols > promptLabel.length + 1 ? speechCols - promptLabel.length - 1 : 0)
+      : speechCols;
+    const wrappedPhrase = wrapWords(state.phrase, phraseCols, speechMaxLines);
 
     const lvlInfo = logic.deriveLevelInfo(state.xp || 0);
     const highScore = Math.max(state.highScore || 0, lvlInfo.xp);
     let rankLine = '';
     if (!compact) {
+      const maxRankCols = wide
+        ? (dims.width > 68 ? Math.floor((dims.width - 64) / 6) : maxFrameCols)
+        : 16;
       rankLine = truncateText(
         'LV' + lvlInfo.level + ' HI:' + highScore,
-        speechCols > 7 ? speechCols - 6 : speechCols
+        maxRankCols
       );
     }
 
     const threatBanner = state.lastThreatLabel
-      ? truncateText('! ' + state.lastThreatLabel, speechCols)
+      ? truncateText('! ' + state.lastThreatLabel, maxFrameCols)
       : '';
 
     let spotlightLabel = '';
@@ -363,7 +375,7 @@
     } else if (!compact && state.latestScan.totalAps > 0 && state.latestScan.strongestSsid.length > 0) {
       const rawSpot =
         '> ' + state.latestScan.strongestSsid + ' (' + state.latestScan.strongestRssi + ')';
-      spotlightLabel = truncateText(rawSpot, speechCols);
+      spotlightLabel = truncateText(rawSpot, maxFrameCols);
     }
 
     const radarRowStep = compact ? 12 : 15;
@@ -501,6 +513,7 @@
       rfGuardEmptyHint,
       theme: state.theme,
       themeEffect: themes.themeSpec(state.theme).effect,
+      faceStyle: themes.themeFaceStyle(state.theme),
       animTick: Math.floor((state.uptimeMs >>> 0) / 140),
       toast,
       offensiveArmed: Boolean(state.offensiveArmed),

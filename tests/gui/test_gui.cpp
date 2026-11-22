@@ -5,6 +5,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QTabWidget>
@@ -81,36 +82,79 @@ int main(int argc, char** argv) {
     authCheck->setChecked(false);
     QApplication::processEvents();
 
-    // 2. Network table, station table, and defensive alert list populated from replay.
+    // 2. Network table, station table, RF Guard tab & defensive alert list populated.
     QTabWidget* tabs = win.findChild<QTabWidget*>();
     assert(tabs != nullptr);
-    assert(tabs->count() == 2);
+    assert(tabs->count() == 3);
     auto* netTable = qobject_cast<QTableWidget*>(tabs->widget(0));
     auto* staTable = qobject_cast<QTableWidget*>(tabs->widget(1));
-    assert(netTable != nullptr && staTable != nullptr);
+    auto* rfTable = qobject_cast<QTableWidget*>(tabs->widget(2));
+    assert(netTable != nullptr && staTable != nullptr && rfTable != nullptr);
     assert(netTable->rowCount() == 2);
     assert(staTable->rowCount() == 1);
     assert(!netTable->accessibleName().isEmpty());
     assert(!staTable->accessibleName().isEmpty());
 
+    // Live filter narrows visible network rows, then restores on clear.
+    QLineEdit* filterEdit = nullptr;
+    for (QLineEdit* le : win.findChildren<QLineEdit*>()) {
+        if (le->placeholderText().contains("Filter")) {
+            filterEdit = le;
+            break;
+        }
+    }
+    assert(filterEdit != nullptr);
+    filterEdit->setText("dd:02");
+    QApplication::processEvents();
+    assert(netTable->rowCount() == 1);
+    filterEdit->clear();
+    QApplication::processEvents();
+    assert(netTable->rowCount() == 2);
+
+    // RF Guard tab populates BLE + Sub-GHz observations & threat banner clears on button click.
+    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0u, true,
+                                  zd::BleThreatKind::AirTagTracker}});
+    ctrl.ingestSubGhz(zd::SubGhzSignal{433920u, -48, "OOK", 6u, zd::SubGhzAnomaly::ReplayBurst});
+    ctrl.loadSession(sessPath);
+    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0u, true,
+                                  zd::BleThreatKind::AirTagTracker}});
+    win.show();
+    // Force a refresh tick via filter toggle so RF Guard tab mirrors current state immediately.
+    filterEdit->setText(" ");
+    filterEdit->clear();
+    QApplication::processEvents();
+    assert(rfTable->rowCount() >= 1);
+
     const auto lists = win.findChildren<QListWidget*>();
     assert(lists.size() == 1);
     assert(lists[0]->count() >= 1);
 
-    // 3. Selecting a station row allows its Associated BSSID cleanly.
+    // 3. Selecting a station row allows its Associated BSSID & Trust BSSID persists cleanly.
     tabs->setCurrentIndex(1);
     staTable->selectRow(0);
     QPushButton* allowBtn = nullptr;
+    QPushButton* trustBtn = nullptr;
+    QPushButton* clearThreatBtn = nullptr;
     for (QPushButton* btn : win.findChildren<QPushButton*>()) {
         if (btn->text().contains("Allow / Remove BSSID")) {
             allowBtn = btn;
-            break;
+        } else if (btn->text().contains("ust BSSID")) {
+            trustBtn = btn;
+        } else if (btn->text().contains("Clear") && btn->text().contains("Threat")) {
+            clearThreatBtn = btn;
         }
     }
-    assert(allowBtn != nullptr);
+    assert(allowBtn != nullptr && trustBtn != nullptr && clearThreatBtn != nullptr);
     allowBtn->click();
+    trustBtn->click();
     QApplication::processEvents();
     assert(ctrl.authorization().isAllowed("02:aa:bb:cc:dd:01"));
+    assert(zd::sec::isTrustedBssid(ctrl.secState(), "02:aa:bb:cc:dd:01"));
+    assert(!ctrl.petState().lastThreatLabel.empty());
+    assert(clearThreatBtn->isEnabled());
+    clearThreatBtn->click();
+    QApplication::processEvents();
+    assert(ctrl.petState().lastThreatLabel.empty());
 
     // 4. PetWidget exposes SecMood in accessibleDescription.
     auto* pet = win.findChild<zd::linux_gui::PetWidget*>();

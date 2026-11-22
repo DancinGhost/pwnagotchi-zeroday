@@ -285,6 +285,7 @@ struct UiFrame {
     // Theming & Ops HUD
     ThemeId theme;
     ThemeEffect themeEffect;
+    FaceStyle faceStyle;
     uint32_t animTick;
     ToastView toast;
     bool offensiveArmed = false;
@@ -387,91 +388,10 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     }
     footerLine = truncateText(footerLine, maxFrameCols);
 
-    // PetFace geometry
+    // PetFace geometry (Centered Hero Stack across all display profiles)
     const int16_t bodyTop = static_cast<int16_t>(headerDivY + 1);
     const int16_t bodyBottom = static_cast<int16_t>(footerDivY - 1);
     const int16_t bodyH = static_cast<int16_t>(bodyBottom - bodyTop);
-
-    FaceGeometry geom{};
-    int16_t speechX = 0;
-    int16_t speechTopY = 0;
-    int16_t lineStepY = 0;
-    std::size_t speechCols = 0;
-    std::size_t speechMaxLines = 0;
-
-    if (micro) {
-        // 128x64 OLED layout
-        geom.centerX = 28;
-        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) - 4);
-        geom.eyeOffsetX = 9;
-        geom.eyeY = static_cast<int16_t>(geom.centerY - 2);
-        geom.eyeRadius = 4;
-        geom.mouthY = static_cast<int16_t>(geom.centerY + 5);
-        geom.mouthRadius = 3;
-        geom.bracketOffsetX = 21;
-        geom.bracketHalfHeight = 10;
-        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 8);
-
-        speechX = 56;
-        speechTopY = static_cast<int16_t>(bodyTop + 2);
-        lineStepY = 9;
-        speechCols = static_cast<std::size_t>((std::max)(6, (dims.width - speechX - 2) / 6));
-        speechMaxLines = static_cast<std::size_t>((std::max)(2, (bodyH - 12) / 9));
-    } else if (compact) {
-        // 160x80 layout
-        geom.centerX = 35;
-        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) - 4);
-        geom.eyeOffsetX = 11;
-        geom.eyeY = static_cast<int16_t>(geom.centerY - 3);
-        geom.eyeRadius = 5;
-        geom.mouthY = static_cast<int16_t>(geom.centerY + 6);
-        geom.mouthRadius = 4;
-        geom.bracketOffsetX = 26;
-        geom.bracketHalfHeight = 13;
-        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 9);
-
-        speechX = 70;
-        speechTopY = static_cast<int16_t>(bodyTop + 3);
-        lineStepY = 10;
-        speechCols = static_cast<std::size_t>((dims.width - speechX - 3) / 6);
-        speechMaxLines = 4u;
-    } else if (wide) {
-        // 320x240+ QVGA cyberdeck layout
-        geom.centerX = 72;
-        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) - 8);
-        geom.eyeOffsetX = 22;
-        geom.eyeY = static_cast<int16_t>(geom.centerY - 5);
-        geom.eyeRadius = 10;
-        geom.mouthY = static_cast<int16_t>(geom.centerY + 13);
-        geom.mouthRadius = 8;
-        geom.bracketOffsetX = 54;
-        geom.bracketHalfHeight = 26;
-        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 14);
-
-        speechX = 144;
-        speechTopY = static_cast<int16_t>(bodyTop + 8);
-        lineStepY = 14;
-        speechCols = static_cast<std::size_t>((dims.width - speechX - 6) / 6);
-        speechMaxLines = static_cast<std::size_t>((std::max)(5, (bodyH - 38) / 14));
-    } else {
-        // 240x135 / 250x122 standard pocket & e-paper layout
-        geom.centerX = 55;
-        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) - 7);
-        geom.eyeOffsetX = 18;
-        geom.eyeY = static_cast<int16_t>(geom.centerY - 4);
-        geom.eyeRadius = 8;
-        geom.mouthY = static_cast<int16_t>(geom.centerY + 10);
-        geom.mouthRadius = 6;
-        geom.bracketOffsetX = 42;
-        geom.bracketHalfHeight = 20;
-        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 12);
-
-        speechX = 112;
-        speechTopY = static_cast<int16_t>(bodyTop + 6);
-        lineStepY = 12;
-        speechCols = static_cast<std::size_t>((dims.width - speechX - 4) / 6);
-        speechMaxLines = (bodyH >= 110) ? 4u : 3u;
-    }
 
     const ActivityScene scene =
         state.isScanning
@@ -482,45 +402,149 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
                           ? ActivityScene::ThreatShield
                           : ActivityScene::None));
 
-    const std::size_t promptMaxCols =
-        (scene != ActivityScene::None && speechCols > 5u) ? (speechCols - (compact ? 4u : 5u))
-                                                          : speechCols;
-    const std::string promptLabel = truncateText(state.petName + ">", promptMaxCols);
-    const std::vector<std::string> wrappedPhrase =
-        wrapWords(state.phrase, speechCols, speechMaxLines);
+    FaceGeometry geom{};
+    geom.centerX = static_cast<int16_t>(dims.width / 2);
+    int16_t speechX = 0;
+    int16_t speechTopY = 0;
+    int16_t lineStepY = 0;
+    std::size_t speechCols = 0;
+    std::size_t speechMaxLines = 0;
+
+    if (micro) {
+        // 128x64 OLED centered layout
+        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) + 1);
+        geom.eyeOffsetX = 9;
+        geom.eyeY = static_cast<int16_t>(geom.centerY - 2);
+        geom.eyeRadius = 4;
+        geom.mouthY = static_cast<int16_t>(geom.centerY + 5);
+        geom.mouthRadius = 3;
+        geom.bracketOffsetX = 21;
+        geom.bracketHalfHeight = 7;
+        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 8);
+
+        speechX = 4;
+        speechTopY = static_cast<int16_t>(bodyTop + 1);
+        lineStepY = 8;
+        const int16_t reserve = (scene != ActivityScene::None) ? 18 : 0;
+        speechCols = static_cast<std::size_t>((std::max)(6, (dims.width - 8 - reserve) / 6));
+        speechMaxLines = 1u;
+    } else if (compact) {
+        // 160x80 centered layout
+        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2));
+        geom.eyeOffsetX = 11;
+        geom.eyeY = static_cast<int16_t>(geom.centerY - 2);
+        geom.eyeRadius = 5;
+        geom.mouthY = static_cast<int16_t>(geom.centerY + 6);
+        geom.mouthRadius = 4;
+        geom.bracketOffsetX = 26;
+        geom.bracketHalfHeight = 10;
+        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 9);
+
+        speechX = 4;
+        speechTopY = static_cast<int16_t>(bodyTop + 2);
+        lineStepY = 9;
+        const int16_t reserve = (scene != ActivityScene::None) ? 24 : 0;
+        speechCols = static_cast<std::size_t>((std::max)(8, (dims.width - 8 - reserve) / 6));
+        speechMaxLines = 1u;
+    } else if (wide) {
+        // 320x240+ QVGA cyberdeck centered layout
+        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2) - 4);
+        geom.eyeOffsetX = 22;
+        geom.eyeY = static_cast<int16_t>(geom.centerY - 5);
+        geom.eyeRadius = 10;
+        geom.mouthY = static_cast<int16_t>(geom.centerY + 13);
+        geom.mouthRadius = 8;
+        geom.bracketOffsetX = 54;
+        geom.bracketHalfHeight = 26;
+        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 34);
+
+        speechX = 6;
+        speechTopY = static_cast<int16_t>(bodyTop + 4);
+        lineStepY = 11;
+        const int16_t reserve = (scene != ActivityScene::None) ? 40 : 0;
+        speechCols = static_cast<std::size_t>((std::max)(12, (dims.width - 12 - reserve) / 6));
+        speechMaxLines = 2u;
+    } else {
+        // 240x135 / 250x122 standard pocket & e-paper centered layout
+        geom.centerY = static_cast<int16_t>(bodyTop + (bodyH / 2));
+        geom.eyeOffsetX = 16;
+        geom.eyeY = static_cast<int16_t>(geom.centerY - 4);
+        geom.eyeRadius = 7;
+        geom.mouthY = static_cast<int16_t>(geom.centerY + 8);
+        geom.mouthRadius = 5;
+        geom.bracketOffsetX = 38;
+        geom.bracketHalfHeight = 14;
+        geom.moodBadgeY = static_cast<int16_t>(bodyBottom - 19);
+
+        speechX = 4;
+        speechTopY = static_cast<int16_t>(bodyTop + 2);
+        lineStepY = 9;
+        const int16_t reserve = (scene != ActivityScene::None) ? 32 : 0;
+        speechCols = static_cast<std::size_t>((std::max)(12, (dims.width - 8 - reserve) / 6));
+        speechMaxLines = 1u;
+    }
+
+    const bool onPetFace = (state.page == ScreenPage::PetFace);
+    const bool onRadar = (state.page == ScreenPage::NearbyRadar);
+    const bool onSpectrum = (state.page == ScreenPage::ChannelSpectrum);
+    const bool onRfGuard = (state.page == ScreenPage::RfGuard);
 
     const LevelInfo lvlInfo = deriveLevelInfo(state.xp);
+    std::string promptLabel;
+    std::vector<std::string> wrappedPhrase;
     std::string rankLine;
-    if (!compact) {
-        rankLine = truncateText(
-            "LV" + std::to_string(lvlInfo.level) + " HI:" + std::to_string(state.highScore),
-            speechCols > 7u ? (speechCols - 6u) : speechCols);
-    }
-
     std::string threatBanner;
     if (!state.lastThreatLabel.empty()) {
-        threatBanner = truncateText("! " + state.lastThreatLabel, speechCols);
+        threatBanner = truncateText("! " + state.lastThreatLabel, maxFrameCols);
     }
-
     std::string spotlightLabel;
-    if (!compact && !threatBanner.empty()) {
-        spotlightLabel = threatBanner;
-    } else if (!compact && state.latestScan.totalAps > 0u && !state.latestScan.strongestSsid.empty()) {
-        const std::string rawSpot =
-            "> " + state.latestScan.strongestSsid + " (" +
-            std::to_string(state.latestScan.strongestRssi) + ")";
-        spotlightLabel = truncateText(rawSpot, speechCols);
+    if (onPetFace) {
+        const std::size_t promptMaxCols =
+            compact ? (speechCols > 10u ? (std::min)(std::size_t{9}, speechCols / 2u) : speechCols)
+                    : speechCols;
+        promptLabel = truncateText(state.petName + ">", promptMaxCols);
+        const std::size_t phraseCols =
+            compact
+                ? ((speechCols > promptLabel.size() + 1u) ? (speechCols - promptLabel.size() - 1u)
+                                                         : 0u)
+                : speechCols;
+        wrappedPhrase = wrapWords(state.phrase, phraseCols, speechMaxLines);
+
+        if (!compact) {
+            const std::size_t maxRankCols =
+                wide ? ((dims.width > 68) ? static_cast<std::size_t>((dims.width - 64) / 6)
+                                          : maxFrameCols)
+                     : 16u;
+            rankLine = truncateText(
+                "LV" + std::to_string(lvlInfo.level) + " HI:" + std::to_string(state.highScore),
+                maxRankCols);
+        }
+
+        if (!compact && !threatBanner.empty()) {
+            spotlightLabel = threatBanner;
+        } else if (!compact && state.latestScan.totalAps > 0u &&
+                   !state.latestScan.strongestSsid.empty()) {
+            const std::string rawSpot =
+                "> " + state.latestScan.strongestSsid + " (" +
+                std::to_string(state.latestScan.strongestRssi) + ")";
+            spotlightLabel = truncateText(rawSpot, maxFrameCols);
+        }
     }
 
-    // NearbyRadar rows (purely mapped from topNetworks, scaled to screen height & width)
+    // Shared layout bounds for NearbyRadar and RfGuard row lists
     const int16_t radarRowStep = compact ? 12 : 15;
     const std::size_t maxRadarRows = static_cast<std::size_t>(
         (std::max)(2, (static_cast<int>(bodyH) - (compact ? 4 : 5)) / radarRowStep));
     const std::size_t maxSsidChars = static_cast<std::size_t>(
         (std::max)(6, (static_cast<int>(dims.width) - (micro ? 80 : (compact ? 88 : 126))) / 6));
-    const std::vector<AccessPoint> visibleAps = fp::take(state.latestScan.topNetworks, maxRadarRows);
-    const std::vector<RadarRowView> radarRows =
-        fp::map(visibleAps, [&](const AccessPoint& ap) -> RadarRowView {
+
+    // NearbyRadar rows (computed only when NearbyRadar page is active)
+    std::vector<RadarRowView> radarRows;
+    std::string radarEmptyHint;
+    if (onRadar) {
+        const std::vector<AccessPoint> visibleAps =
+            fp::take(state.latestScan.topNetworks, maxRadarRows);
+        radarRows = fp::map(visibleAps, [&](const AccessPoint& ap) -> RadarRowView {
             const std::string chStr =
                 (ap.channel > 0) ? ("c" + twoDigit(static_cast<uint32_t>(ap.channel))) : "c--";
             const std::string detail = chStr + " " + std::to_string(ap.rssi);
@@ -531,101 +555,102 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
                 ap.secure
             };
         });
+        radarEmptyHint = truncateText(
+            state.isScanning
+                ? "Scanning nearby WiFi..."
+                : (state.hasScannedOnce ? "No WiFi APs in range." : "Waiting for first scan..."),
+            maxFrameCols);
+    }
 
-    const std::string radarEmptyHint =
-        truncateText(state.isScanning
-                         ? "Scanning nearby WiFi..."
-                         : (state.hasScannedOnce ? "No WiFi APs in range."
-                                                 : "Waiting for first scan..."),
-                     maxFrameCols);
-
-    // ChannelSpectrum bars (channels 1..13, scaled to body height)
+    // ChannelSpectrum bars (computed only when ChannelSpectrum page is active)
     const int16_t chartBaseY = static_cast<int16_t>(bodyBottom - (micro ? 9 : (compact ? 11 : 14)));
     const int16_t chartMaxBarH = static_cast<int16_t>(
         (std::max)(14, static_cast<int>(chartBaseY - bodyTop) - (micro ? 12 : (compact ? 16 : 29))));
-
-    uint16_t maxChCount = 1u;
-    for (std::size_t ch = 1u; ch <= 13u; ++ch) {
-        if (state.latestScan.histogram.counts[ch] > maxChCount) {
-            maxChCount = state.latestScan.histogram.counts[ch];
-        }
-    }
-
     std::array<ChannelBarView, 13> channelBars{};
-    for (std::size_t idx = 0u; idx < 13u; ++idx) {
-        const uint16_t c = state.latestScan.histogram.counts[idx + 1u];
-        const int16_t barH = (c == 0u)
-                                 ? static_cast<int16_t>(0)
-                                 : static_cast<int16_t>((std::max)(
-                                       2, static_cast<int>((static_cast<int32_t>(c) * chartMaxBarH) /
-                                                           static_cast<int32_t>(maxChCount))));
-        channelBars[idx] = ChannelBarView{
-            static_cast<int32_t>(idx + 1u),
-            c,
-            barH
-        };
-    }
-
-    const std::string spectrumSummary =
-        compact
-            ? ("SEC:" + std::to_string(state.latestScan.secureAps) +
-               " OPN:" + std::to_string(state.latestScan.openAps))
-            : ("2.4GHz CH 1-13 | SEC:" + std::to_string(state.latestScan.secureAps) +
-               " OPEN:" + std::to_string(state.latestScan.openAps));
-
-    // RfGuard (BLE + Sub-GHz CC1101) rows
-    std::size_t bleThreatCnt = 0u;
-    for (const BleDevice& d : state.bleDevices) {
-        if (d.threat != BleThreatKind::None) {
-            ++bleThreatCnt;
+    std::string spectrumSummary;
+    if (onSpectrum) {
+        uint16_t maxChCount = 1u;
+        for (std::size_t ch = 1u; ch <= 13u; ++ch) {
+            if (state.latestScan.histogram.counts[ch] > maxChCount) {
+                maxChCount = state.latestScan.histogram.counts[ch];
+            }
         }
+        for (std::size_t idx = 0u; idx < 13u; ++idx) {
+            const uint16_t c = state.latestScan.histogram.counts[idx + 1u];
+            const int16_t barH =
+                (c == 0u) ? static_cast<int16_t>(0)
+                          : static_cast<int16_t>((std::max)(
+                                2, static_cast<int>((static_cast<int32_t>(c) * chartMaxBarH) /
+                                                    static_cast<int32_t>(maxChCount))));
+            channelBars[idx] = ChannelBarView{
+                static_cast<int32_t>(idx + 1u),
+                c,
+                barH
+            };
+        }
+        spectrumSummary =
+            compact ? ("SEC:" + std::to_string(state.latestScan.secureAps) +
+                       " OPN:" + std::to_string(state.latestScan.openAps))
+                    : ("2.4GHz CH 1-13 | SEC:" + std::to_string(state.latestScan.secureAps) +
+                       " OPEN:" + std::to_string(state.latestScan.openAps));
     }
-    const std::string rfGuardSummary =
-        compact
-            ? ("B:" + std::to_string(state.bleDevices.size()) +
-               " T:" + std::to_string(bleThreatCnt) + " " +
-               formatFreqMhz(state.subGhzFreqKhz))
-            : ("BLE:" + std::to_string(state.bleDevices.size()) +
-               " TAG:" + std::to_string(bleThreatCnt) + " | SUB:" +
-               formatFreqMhz(state.subGhzFreqKhz));
 
-    const std::size_t maxGuardRows = (maxRadarRows > 1u) ? (maxRadarRows - 1u) : 1u;
+    // RfGuard (BLE + Sub-GHz CC1101) rows (computed only when RfGuard page is active)
+    std::string rfGuardSummary;
     std::vector<RadarRowView> rfGuardRows;
-    for (const BleDevice& d : state.bleDevices) {
-        if (rfGuardRows.size() >= maxGuardRows) {
-            break;
+    std::string rfGuardEmptyHint;
+    if (onRfGuard) {
+        std::size_t bleThreatCnt = 0u;
+        for (const BleDevice& d : state.bleDevices) {
+            if (d.threat != BleThreatKind::None) {
+                ++bleThreatCnt;
+            }
         }
-        const bool isThreat = (d.threat != BleThreatKind::None);
-        const std::string title = isThreat
-                                      ? ("[" + std::string(bleThreatLabel(d.threat)) + "] " +
-                                         (d.name.empty() ? d.mac : d.name))
-                                      : (d.name.empty() ? d.mac : d.name);
-        const std::string detail = "BLE " + std::to_string(d.rssi);
-        rfGuardRows.push_back(RadarRowView{
-            truncateText(title, maxSsidChars),
-            detail,
-            rssiToBars(d.rssi),
-            isThreat
-        });
-    }
-    for (const SubGhzSignal& sig : state.subGhzSignals) {
-        if (rfGuardRows.size() >= maxGuardRows) {
-            break;
+        rfGuardSummary =
+            compact ? ("B:" + std::to_string(state.bleDevices.size()) +
+                       " T:" + std::to_string(bleThreatCnt) + " " +
+                       formatFreqMhz(state.subGhzFreqKhz))
+                    : ("BLE:" + std::to_string(state.bleDevices.size()) +
+                       " TAG:" + std::to_string(bleThreatCnt) + " | SUB:" +
+                       formatFreqMhz(state.subGhzFreqKhz));
+
+        const std::size_t maxGuardRows = (maxRadarRows > 1u) ? (maxRadarRows - 1u) : 1u;
+        for (const BleDevice& d : state.bleDevices) {
+            if (rfGuardRows.size() >= maxGuardRows) {
+                break;
+            }
+            const bool isThreat = (d.threat != BleThreatKind::None);
+            const std::string title = isThreat
+                                          ? ("[" + std::string(bleThreatLabel(d.threat)) + "] " +
+                                             (d.name.empty() ? d.mac : d.name))
+                                          : (d.name.empty() ? d.mac : d.name);
+            const std::string detail = "BLE " + std::to_string(d.rssi);
+            rfGuardRows.push_back(RadarRowView{
+                truncateText(title, maxSsidChars),
+                detail,
+                rssiToBars(d.rssi),
+                isThreat
+            });
         }
-        const bool isAnom = (sig.anomaly != SubGhzAnomaly::None);
-        const std::string title =
-            formatFreqMhz(sig.freqKhz) + " " + sig.protocol +
-            (isAnom ? (" " + std::string(subGhzAnomalyLabel(sig.anomaly))) : "");
-        const std::string detail = "SUB " + std::to_string(sig.rssi);
-        rfGuardRows.push_back(RadarRowView{
-            truncateText(title, maxSsidChars),
-            detail,
-            rssiToBars(sig.rssi),
-            isAnom
-        });
+        for (const SubGhzSignal& sig : state.subGhzSignals) {
+            if (rfGuardRows.size() >= maxGuardRows) {
+                break;
+            }
+            const bool isAnom = (sig.anomaly != SubGhzAnomaly::None);
+            const std::string title =
+                formatFreqMhz(sig.freqKhz) + " " + sig.protocol +
+                (isAnom ? (" " + std::string(subGhzAnomalyLabel(sig.anomaly))) : "");
+            const std::string detail = "SUB " + std::to_string(sig.rssi);
+            rfGuardRows.push_back(RadarRowView{
+                truncateText(title, maxSsidChars),
+                detail,
+                rssiToBars(sig.rssi),
+                isAnom
+            });
+        }
+        rfGuardEmptyHint = truncateText(
+            "RF Guard idle (" + formatFreqMhz(state.subGhzFreqKhz) + ")", maxFrameCols);
     }
-    const std::string rfGuardEmptyHint = truncateText(
-        "RF Guard idle (" + formatFreqMhz(state.subGhzFreqKhz) + ")", maxFrameCols);
 
     return UiFrame{
         dims,
@@ -657,6 +682,7 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         rfGuardEmptyHint,
         state.theme,
         themeSpec(state.theme).effect,
+        themeFaceStyle(state.theme),
         state.uptimeMs / 140u,
         buildThemeToast(state, dims, compact, bodyTop, bodyBottom),
         state.offensiveArmed,

@@ -121,14 +121,109 @@ inline std::vector<AccessPoint> parseNmcliScan(const std::string& text) {
     return out;
 }
 
-// Richer variant retaining BSSID + encryption, used to feed the security engine.
+// Richer variant retaining BSSID + encryption + WPS exposure, used to feed the security engine.
 struct ScannedAp {
     std::string bssid;
     std::string ssid;
-    int32_t channel;
-    int32_t rssi;
-    sec::Encryption enc;
+    int32_t channel = 0;
+    int32_t rssi = -100;
+    sec::Encryption enc = sec::Encryption::Unknown;
+    bool wps = false;
 };
+
+inline int32_t freqMhzToChannel(int32_t mhz) {
+    if (mhz >= 2412 && mhz <= 2472) {
+        return (mhz - 2407) / 5;
+    }
+    if (mhz == 2484) {
+        return 14;
+    }
+    if (mhz >= 5005 && mhz <= 5895) {
+        return (mhz - 5000) / 5;
+    }
+    return 0;
+}
+
+inline std::vector<ScannedAp> parseIwScanDetailed(const std::string& text) {
+    std::vector<ScannedAp> out;
+    std::istringstream in(text);
+    std::string line;
+
+    bool inBss = false;
+    ScannedAp cur{};
+    bool hasRsn = false;
+    bool hasWpa = false;
+    bool hasSae = false;
+    bool hasPrivacy = false;
+
+    auto flush = [&]() {
+        if (!inBss || !sec::isValidMac(cur.bssid)) {
+            return;
+        }
+        if (hasSae) {
+            cur.enc = sec::Encryption::Wpa3;
+        } else if (hasRsn) {
+            cur.enc = sec::Encryption::Wpa2;
+        } else if (hasWpa) {
+            cur.enc = sec::Encryption::Wpa;
+        } else if (hasPrivacy) {
+            cur.enc = sec::Encryption::Wep;
+        } else {
+            cur.enc = sec::Encryption::Open;
+        }
+        out.push_back(std::move(cur));
+        cur = ScannedAp{};
+        hasRsn = hasWpa = hasSae = hasPrivacy = false;
+        inBss = false;
+    };
+
+    while (std::getline(in, line)) {
+        const std::string t = trim(line);
+        if (t.rfind("BSS ", 0) == 0) {
+            flush();
+            std::string macPart = t.substr(4);
+            const auto paren = macPart.find('(');
+            if (paren != std::string::npos) {
+                macPart.resize(paren);
+            }
+            const auto space = macPart.find(' ');
+            if (space != std::string::npos) {
+                macPart.resize(space);
+            }
+            macPart = trim(macPart);
+            if (sec::isValidMac(macPart)) {
+                inBss = true;
+                cur = ScannedAp{};
+                cur.bssid = sec::normalizeMac(macPart);
+            }
+            continue;
+        }
+        if (!inBss) {
+            continue;
+        }
+        if (t.rfind("SSID:", 0) == 0) {
+            cur.ssid = sec::sanitizePrintableText(trim(t.substr(5)), 64u);
+        } else if (t.rfind("signal:", 0) == 0) {
+            cur.rssi = sec::detail::parseI32(trim(t.substr(7)));
+        } else if (t.rfind("DS Parameter set: channel", 0) == 0) {
+            cur.channel = sec::detail::parseI32(trim(t.substr(25)));
+        } else if (t.rfind("freq:", 0) == 0 && cur.channel == 0) {
+            cur.channel = freqMhzToChannel(sec::detail::parseI32(trim(t.substr(5))));
+        } else if (t.rfind("RSN:", 0) == 0) {
+            hasRsn = true;
+        } else if (t.rfind("WPA:", 0) == 0) {
+            hasWpa = true;
+        } else if (t.rfind("WPS:", 0) == 0) {
+            cur.wps = true;
+        } else if (t.find("SAE") != std::string::npos) {
+            hasSae = true;
+        } else if (t.rfind("capability:", 0) == 0 && t.find("Privacy") != std::string::npos) {
+            hasPrivacy = true;
+        }
+    }
+    flush();
+    return out;
+}
 
 inline std::vector<ScannedAp> parseNmcliScanDetailed(const std::string& text) {
     std::vector<ScannedAp> out;
@@ -363,7 +458,7 @@ inline std::optional<ScannedBleDevice> parseBluezBleLine(std::string_view rawLin
 
 // Parses compact Sub-GHz capture lines such as:
 //   "SUBGHZ|433920|-52|OOK|6|0"
-//   "433.92MHz|-55|Keeloq|2|0"
+//   "433.92MHz|-55|OOK_Keyfob|2|0"
 inline std::optional<ScannedSubGhzSignal> parseRtl433Line(std::string_view rawLine) {
     const std::string line = trim(std::string(rawLine));
     if (line.empty()) {

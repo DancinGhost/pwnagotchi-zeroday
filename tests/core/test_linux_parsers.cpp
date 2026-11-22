@@ -278,6 +278,34 @@ void testEapolPmkidAndRsnOui() {
     const auto d2 = decodeRadiotapFrame(eapolWithPmkid.data(), eapolWithPmkid.size(), 200u);
     assert(d2.has_value());
     assert(d2->kind == zd::sec::FrameKind::Pmkid);
+    assert(d2->hasPmkid && d2->eapolMsg == 1u);
+}
+
+void testIwScanDetailedParser() {
+    const std::string sample =
+        "BSS aa:bb:cc:dd:ee:01(on wlan0)\n"
+        "\tfreq: 5180\n"
+        "\tsignal: -48.00 dBm\n"
+        "\tSSID: Lab5G_WPS\n"
+        "\tRSN:\n"
+        "\t\t* Authentication suites: SAE\n"
+        "\tWPS:\n"
+        "BSS 00:11:22:33:44:55(on wlan0)\n"
+        "\tfreq: 2437\n"
+        "\tsignal: -71.00 dBm\n"
+        "\tcapability: ESS Privacy (0x0411)\n"
+        "\tSSID: LegacyWep\n"
+        "BSS 00:11:22:33:44:66(on wlan0)\n"
+        "\tfreq: 2412\n"
+        "\tsignal: -80.00 dBm\n"
+        "\tcapability: ESS (0x0401)\n"
+        "\tSSID: FreeCafe\n";
+    const auto aps = parseIwScanDetailed(sample);
+    assert(aps.size() == 3u);
+    assert(aps[0].bssid == "aa:bb:cc:dd:ee:01" && aps[0].channel == 36 && aps[0].wps);
+    assert(aps[0].enc == zd::sec::Encryption::Wpa3);
+    assert(aps[1].channel == 6 && aps[1].enc == zd::sec::Encryption::Wep && !aps[1].wps);
+    assert(aps[2].channel == 1 && aps[2].enc == zd::sec::Encryption::Open);
 }
 
 void testBleAndSubGhzParsers() {
@@ -310,6 +338,7 @@ int main() {
     testDecodedFrameFeedsEngine();
     testMalformedAndTruncatedFrames();
     testEapolPmkidAndRsnOui();
+    testIwScanDetailedParser();
     testBleAndSubGhzParsers();
     std::cout << "[linux-parsers] all backend parser/decoder tests passed\n";
     return 0;

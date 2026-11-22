@@ -6,6 +6,7 @@
 // accessible name/description for assistive technologies.
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -46,22 +47,17 @@ public:
         if (!surface_ || surface_->width() != frame.dims.width ||
             surface_->height() != frame.dims.height) {
             surface_ = std::make_unique<render::Rgb565Surface>(frame.dims.width, frame.dims.height);
-            image_ = QImage(frame.dims.width, frame.dims.height, QImage::Format_RGB888);
+            image_ = QImage(frame.dims.width, frame.dims.height, QImage::Format_RGB16);
         }
         render::paintUiFrame(*surface_, frame);
 
         const auto& pixels = surface_->pixels();
         const int w = frame.dims.width;
         const int h = frame.dims.height;
+        const std::size_t rowBytes = static_cast<std::size_t>(w) * sizeof(uint16_t);
         for (int y = 0; y < h; ++y) {
-            uchar* dst = image_.scanLine(y);
             const std::size_t rowOff = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
-            for (int x = 0; x < w; ++x) {
-                const Rgb888 c = fromRgb565(pixels[rowOff + static_cast<std::size_t>(x)]);
-                dst[x * 3 + 0] = c.r;
-                dst[x * 3 + 1] = c.g;
-                dst[x * 3 + 2] = c.b;
-            }
+            std::memcpy(image_.scanLine(y), pixels.data() + rowOff, rowBytes);
         }
 
         lastFrame_ = frame;
@@ -186,7 +182,8 @@ private:
         s += std::to_string(static_cast<int>(f.theme)) + "|";
         s += std::to_string(static_cast<int>(f.opsMode)) + "|" + f.modeBadge + "|";
         s += std::to_string(static_cast<int>(f.scene)) + "|" + f.rankLine + "|";
-        if (f.themeEffect != ThemeEffect::None || f.scene != ActivityScene::None) {
+        if (f.themeEffect != ThemeEffect::None || f.scene != ActivityScene::None ||
+            f.page == ScreenPage::PetFace) {
             s += std::to_string(f.animTick) + "|";
         }
         s += f.headerLine + "|" + f.footerLine + "|";

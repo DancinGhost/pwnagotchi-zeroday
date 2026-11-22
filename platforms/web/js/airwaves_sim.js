@@ -26,14 +26,14 @@
       subtitle: 'Packed hacker spectrum (14+ APs)',
       baseNetworks: [
         { ssid: 'SecCon-Open', rssi: -46, channel: 6, secure: false },
-        { ssid: 'Wall_Of_Sheep', rssi: -51, channel: 1, secure: false },
+        { ssid: 'Plaintext_Pit', rssi: -51, channel: 1, secure: false },
         { ssid: 'BadgeLife_Mesh', rssi: -54, channel: 11, secure: true },
-        { ssid: 'Gibson_Mainframe', rssi: -58, channel: 6, secure: true },
+        { ssid: 'Mainframe_Lab', rssi: -58, channel: 6, secure: true },
         { ssid: 'Packet_Village', rssi: -60, channel: 1, secure: true },
         { ssid: 'Rogue_Twin_AP_7', rssi: -63, channel: 6, secure: false },
         { ssid: 'Drop_Tables_LAN', rssi: -65, channel: 11, secure: true },
-        { ssid: 'ZeroCool_Uplink', rssi: -68, channel: 3, secure: true },
-        { ssid: 'AcidBurn_Deck', rssi: -70, channel: 8, secure: true },
+        { ssid: 'ByteShift_Uplink', rssi: -68, channel: 3, secure: true },
+        { ssid: 'HexCore_Deck', rssi: -70, channel: 8, secure: true },
         { ssid: 'ESP32_Swarm', rssi: -72, channel: 6, secure: true },
         { ssid: 'ESP32_Swarm', rssi: -79, channel: 1, secure: true },
         { ssid: 'Free_0dayz_Here', rssi: -74, channel: 13, secure: false },
@@ -78,17 +78,17 @@
 
   const FUNNY_HACKER_SSIDS = Object.freeze([
     'PrettyFlyForAWiFi',
-    'FBI_Van_#404',
+    'Packet_Van_404',
     'Shadow_Clan_LAN',
     'sudo_make_sandwich',
     '404_Net_Not_Found',
     'Cyber_Defense_2G',
     'It_Hurts_When_IP',
     'TellMyWiFiLoveHer',
-    'LAN_Solo',
+    'LAN_Ranger',
     'Router_McRouterface',
     'Pocket_SubGHz_Friend',
-    'Pwnagotchi_SnackBar',
+    'ZeroDay_SnackBar',
     'rm_-rf_slash_wifi',
     'chmod_777_guest',
     'Alice_And_Bob_Key',
@@ -253,7 +253,7 @@
 
   function generateSubGhzEvent(presetId, freqKhz, seed) {
     const s = fp.nextSeed(seed);
-    const protos = ['OOK_Keyfob', 'Keeloq', 'Weather433', 'TPMS_FSK'];
+    const protos = ['OOK_Keyfob', 'Rolling_FSK', 'Weather433', 'TPMS_FSK'];
     const protocol = protos[s % protos.length];
     const rssi = -46 - (s % 30);
     const isReplay = presetId === 'con' || (s % 4 === 0);

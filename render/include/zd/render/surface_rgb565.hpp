@@ -22,6 +22,8 @@ namespace zd {
 namespace render {
 
 // Classic 5x7 GLCD / Font0 printable ASCII (0x20 ' ' .. 0x7E '~'), 5 column bytes per glyph.
+// Copyright (c) 2012 Adafruit Industries (Adafruit_GFX glcdfont.c), redistributed under
+// BSD-2-Clause (see THIRD_PARTY_NOTICES.md for full license terms and disclaimer).
 inline constexpr std::array<std::array<uint8_t, 5>, 95> kFont5x7 = {{
     {{0x00, 0x00, 0x00, 0x00, 0x00}}, {{0x00, 0x00, 0x5F, 0x00, 0x00}}, {{0x00, 0x07, 0x00, 0x07, 0x00}},
     {{0x14, 0x7F, 0x14, 0x7F, 0x14}}, {{0x24, 0x2A, 0x7F, 0x2A, 0x12}}, {{0x23, 0x13, 0x08, 0x64, 0x62}},
@@ -132,17 +134,43 @@ public:
         }
     }
 
+    void fillHorizontalSpan(int x, int py, int len, uint16_t color) {
+        if (len <= 0) {
+            return;
+        }
+        if (py < 0 || py >= height_) {
+            clippedPixels_ += static_cast<uint32_t>(len);
+            return;
+        }
+        const int x0 = (std::max)(0, x);
+        const int x1 = (std::min)(static_cast<int>(width_), x + len);
+        const int drawn = (std::max)(0, x1 - x0);
+        if (drawn < len) {
+            clippedPixels_ += static_cast<uint32_t>(len - drawn);
+        }
+        if (drawn > 0) {
+            uint16_t* row =
+                pixels_.data() + static_cast<std::size_t>(py) * static_cast<std::size_t>(width_);
+            std::fill(row + x0, row + x1, color);
+        }
+    }
+
     void fillCircle(int cx, int cy, int r, uint16_t color) {
         if (r <= 0) {
             setPixel(cx, cy, color);
             return;
         }
         const int rSq = r * r;
-        for (int dy = -r; dy <= r; ++dy) {
-            for (int dx = -r; dx <= r; ++dx) {
-                if (dx * dx + dy * dy <= rSq) {
-                    setPixel(cx + dx, cy + dy, color);
-                }
+        int dx = r;
+        for (int dy = 0; dy <= r; ++dy) {
+            while (dx > 0 && (dx * dx + dy * dy) > rSq) {
+                --dx;
+            }
+            const int span = 2 * dx + 1;
+            const int xStart = cx - dx;
+            fillHorizontalSpan(xStart, cy + dy, span, color);
+            if (dy != 0) {
+                fillHorizontalSpan(xStart, cy - dy, span, color);
             }
         }
     }
@@ -226,20 +254,38 @@ public:
         if (s == nullptr) {
             return;
         }
+        const bool yInside = (y >= 0 && y + 8 <= height_);
+        const std::size_t wStride = static_cast<std::size_t>(width_);
         int cx = x;
         for (std::size_t i = 0; s[i] != '\0'; ++i) {
             const unsigned char ch = static_cast<unsigned char>(s[i]);
             const std::size_t idx = (ch >= 32u && ch <= 126u) ? (ch - 32u) : 31u;  // '?'
             const auto& glyph = kFont5x7[idx];
-            for (int col = 0; col < 5; ++col) {
-                const uint8_t bits = glyph[static_cast<std::size_t>(col)];
+            if (yInside && cx >= 0 && cx + 6 <= width_) {
+                uint16_t* base = pixels_.data() +
+                                 static_cast<std::size_t>(y) * wStride +
+                                 static_cast<std::size_t>(cx);
                 for (int row = 0; row < 8; ++row) {
-                    const bool on = (bits & static_cast<uint8_t>(1u << row)) != 0u;
-                    setPixel(cx + col, y + row, on ? textFg_ : textBg_);
+                    const uint8_t mask = static_cast<uint8_t>(1u << row);
+                    uint16_t* p = base + static_cast<std::size_t>(row) * wStride;
+                    p[0] = (glyph[0] & mask) ? textFg_ : textBg_;
+                    p[1] = (glyph[1] & mask) ? textFg_ : textBg_;
+                    p[2] = (glyph[2] & mask) ? textFg_ : textBg_;
+                    p[3] = (glyph[3] & mask) ? textFg_ : textBg_;
+                    p[4] = (glyph[4] & mask) ? textFg_ : textBg_;
+                    p[5] = textBg_;
                 }
-            }
-            for (int row = 0; row < 8; ++row) {
-                setPixel(cx + 5, y + row, textBg_);
+            } else {
+                for (int col = 0; col < 5; ++col) {
+                    const uint8_t bits = glyph[static_cast<std::size_t>(col)];
+                    for (int row = 0; row < 8; ++row) {
+                        const bool on = (bits & static_cast<uint8_t>(1u << row)) != 0u;
+                        setPixel(cx + col, y + row, on ? textFg_ : textBg_);
+                    }
+                }
+                for (int row = 0; row < 8; ++row) {
+                    setPixel(cx + 5, y + row, textBg_);
+                }
             }
             cx += 6;
         }

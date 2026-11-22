@@ -117,14 +117,15 @@ Binaries: `build_cmake/zd-linux`, `build_cmake/zd-gui`.
 
 ```bash
 ./zd-linux                       # interactive TUI dashboard (default on a terminal)
-./zd-linux --iface wlan0 tui
-./zd-linux scan                  # one active scan, print a table, exit (no root)
-sudo ./zd-linux watch --record session.zds   # monitor mode: stream alerts & record session
-./zd-linux replay session.zds    # deterministically replay a recorded session file
+./zd-linux --iface wlan0 --hop tui
+./zd-linux scan --ble --export report.md   # active scan + BLE + export Markdown/CSV/HTML
+sudo ./zd-linux watch --hop --pcap cap.pcap --record session.zds
+./zd-linux replay session.zds --export report.html
 ```
 
-TUI keys: `s` scan · `m` toggle monitor · `c` set channel · `p`/`Tab` toggle APs vs Stations/Probes ·
-`t`/`T` next/prev theme · ↑/↓ or `j`/`k` select row · `A` toggle authorization · `L` toggle allow-list on selected BSSID ·
+TUI keys: `s` scan · `m` toggle monitor · `h` toggle channel hopper · `c` set channel · `p`/`Tab` cycle APs / Stations / RF Guard ·
+`v`/`1-4` Pet ASCII panel (`V` hide) · `B` BLE scan · `K` clear threat · `u` trust BSSID · `e` export report ·
+`t`/`T`/`[`/`]` next/prev theme · ↑/↓ or `j`/`k` select row · `A` toggle authorization · `L` toggle allow-list on selected BSSID ·
 `x` deauth selected · `w` save session · `r` load session · `q` quit.
 
 ### GUI
@@ -134,8 +135,7 @@ TUI keys: `s` scan · `m` toggle monitor · `c` set channel · `p`/`Tab` toggle 
 ./zd-gui --replay session.zds
 ```
 
-Scan, toggle monitor mode, watch the network table and defensive alert feed fill in, and use
-the offensive panel (disabled until you arm it — see below).
+Includes live table search filter (`Ctrl+F`), `Networks` / `Stations / Probes` / `RF Guard` tabs, channel-hopper toggle, `PCAP…`, `Export…` (Markdown/CSV/HTML), `BLE Scan`, `Clear Threat`, `Trust BSSID`, and the authorization-gated offensive panel.
 
 ---
 

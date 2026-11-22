@@ -39,7 +39,7 @@ fi
 # 2. Package Web Cyberdeck
 if [ -d "$ROOT_DIR/platforms/web" ]; then
     echo "[+] Packaging Web Cyberdeck..."
-    (cd "$ROOT_DIR/platforms/web" && zip -r "$DIST_DIR/pwnagotchi-zd-web.zip" index.html styles.css js/)
+    (cd "$ROOT_DIR/platforms/web" && zip -r "$DIST_DIR/pwnagotchi-zd-web.zip" index.html styles.css manifest.json sw.js icon.svg js/)
     zip -j "$DIST_DIR/pwnagotchi-zd-web.zip" "$ROOT_DIR/LICENSE" "$ROOT_DIR/THIRD_PARTY_NOTICES.md"
 fi
 

@@ -376,7 +376,8 @@ inline std::optional<sec::CapturedFrame> decodeDot11(const uint8_t* f, std::size
         }
         if (looksLikeEapol(f, len)) {
             out.eapolMsg = classifyEapolKeyMessage(f, len);
-            out.kind = carriesPmkid(f, len) ? sec::FrameKind::Pmkid : sec::FrameKind::Eapol;
+            out.hasPmkid = carriesPmkid(f, len);
+            out.kind = out.hasPmkid ? sec::FrameKind::Pmkid : sec::FrameKind::Eapol;
             return out;
         }
         out.kind = sec::FrameKind::Data;

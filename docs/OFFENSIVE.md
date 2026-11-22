@@ -76,8 +76,7 @@ sec deauth aa:bb:cc:dd:ee:ff 16
 
 A request that has not cleared the gate returns `BLOCKED: ...` and is recorded as a
 `TxBlocked` alert + `DEAUTH BLOCKED` audit line; nothing is transmitted. The per-command burst
-is capped (64) — repeat the command rather than flooding. After a burst the radio returns to
-passive STA scanning for the pet loop.
+is capped (64) — repeat the command rather than flooding. After a burst the radio returns to passive STA scanning (and clears any interrupted async pet scan state) for the pet loop.
 
 ---
 

@@ -59,6 +59,24 @@ inline const char* encryptionLabel(Encryption e) {
 // dropped; a string without exactly 12 hex nibbles is returned trimmed+lowered as-is so
 // callers can still compare/display it (defensive: never throws).
 inline std::string normalizeMac(const std::string& raw) {
+    if (raw.size() == 17u) {
+        bool canonical = true;
+        for (std::size_t i = 0u; i < 17u; ++i) {
+            const unsigned char c = static_cast<unsigned char>(raw[i]);
+            if ((i % 3u) == 2u) {
+                if (c != ':') {
+                    canonical = false;
+                    break;
+                }
+            } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                canonical = false;
+                break;
+            }
+        }
+        if (canonical) {
+            return raw;
+        }
+    }
     std::string hex;
     hex.reserve(12);
     for (unsigned char c : raw) {
@@ -491,7 +509,38 @@ struct SecState {
     std::unordered_map<std::string, std::size_t> deauthIndex;
     std::unordered_map<std::string, std::size_t> bssidSsidIndex;
     std::unordered_map<std::string, std::vector<std::string>> ssidToBssids;
+    std::vector<std::string> trustedBssids;  // normalized sorted BSSIDs marked trusted by operator
 };
+
+inline bool isTrustedBssid(const SecState& s, const std::string& rawBssid) {
+    const std::string bssid = normalizeMac(rawBssid);
+    return !bssid.empty() &&
+           std::find(s.trustedBssids.begin(), s.trustedBssids.end(), bssid) !=
+               s.trustedBssids.end();
+}
+
+inline bool trustBssid(SecState& s, const std::string& rawBssid) {
+    const std::string bssid = normalizeMac(rawBssid);
+    if (!isValidMac(bssid) || isMulticastMac(bssid)) {
+        return false;
+    }
+    if (isTrustedBssid(s, bssid)) {
+        return true;
+    }
+    s.trustedBssids.push_back(bssid);
+    std::sort(s.trustedBssids.begin(), s.trustedBssids.end());
+    return true;
+}
+
+inline bool untrustBssid(SecState& s, const std::string& rawBssid) {
+    const std::string bssid = normalizeMac(rawBssid);
+    const auto it = std::find(s.trustedBssids.begin(), s.trustedBssids.end(), bssid);
+    if (it == s.trustedBssids.end()) {
+        return false;
+    }
+    s.trustedBssids.erase(it);
+    return true;
+}
 
 // --- Pure helpers (exposed for tests & shell convenience) ----------------------------
 
@@ -594,6 +643,32 @@ inline void addSsidBssid(SecState& s, const std::string& ssid, const std::string
     }
 }
 
+// Shared LRU eviction helper for bounded vectors paired with an O(1) swap-and-pop index map.
+template <typename Vec, typename IndexMap, typename KeyFn, typename TimeFn, typename OnEvict>
+inline void evictOldestIfFull(Vec& vec, IndexMap& index, std::size_t cap, uint32_t nowMs,
+                              KeyFn&& keyOf, TimeFn&& timeOf, OnEvict&& onEvict) {
+    if (vec.size() < cap || vec.empty()) {
+        return;
+    }
+    std::size_t oldestIdx = 0u;
+    uint32_t maxAge = wrapSafeAgeMs(nowMs, timeOf(vec[0]));
+    for (std::size_t i = 1u; i < vec.size(); ++i) {
+        const uint32_t age = wrapSafeAgeMs(nowMs, timeOf(vec[i]));
+        if (age > maxAge) {
+            maxAge = age;
+            oldestIdx = i;
+        }
+    }
+    onEvict(vec[oldestIdx]);
+    index.erase(keyOf(vec[oldestIdx]));
+    const std::size_t lastIdx = vec.size() - 1u;
+    if (oldestIdx != lastIdx) {
+        vec[oldestIdx] = std::move(vec[lastIdx]);
+        index[keyOf(vec[oldestIdx])] = oldestIdx;
+    }
+    vec.pop_back();
+}
+
 // Upserts a target AP, evicting the least-recently-seen one first if at kMaxTargets.
 inline WifiTarget& targetFor(SecState& s, const std::string& bssid, uint32_t nowMs,
                              bool* isNewOut = nullptr) {
@@ -603,25 +678,11 @@ inline WifiTarget& targetFor(SecState& s, const std::string& bssid, uint32_t now
         }
         return *existing;
     }
-    if (s.targets.size() >= kMaxTargets) {
-        std::size_t oldestIdx = 0u;
-        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.targets[0].lastSeenMs);
-        for (std::size_t i = 1u; i < s.targets.size(); ++i) {
-            const uint32_t age = wrapSafeAgeMs(nowMs, s.targets[i].lastSeenMs);
-            if (age > maxAge) {
-                maxAge = age;
-                oldestIdx = i;
-            }
-        }
-        removeSsidBssid(s, s.targets[oldestIdx].ssid, s.targets[oldestIdx].bssid);
-        s.targetIndex.erase(s.targets[oldestIdx].bssid);
-        const std::size_t lastIdx = s.targets.size() - 1u;
-        if (oldestIdx != lastIdx) {
-            s.targets[oldestIdx] = std::move(s.targets[lastIdx]);
-            s.targetIndex[s.targets[oldestIdx].bssid] = oldestIdx;
-        }
-        s.targets.pop_back();
-    }
+    evictOldestIfFull(
+        s.targets, s.targetIndex, kMaxTargets, nowMs,
+        [](const WifiTarget& t) -> const std::string& { return t.bssid; },
+        [](const WifiTarget& t) { return t.lastSeenMs; },
+        [&](const WifiTarget& victim) { removeSsidBssid(s, victim.ssid, victim.bssid); });
     const std::size_t newIdx = s.targets.size();
     s.targets.push_back(WifiTarget{});
     s.targets.back().bssid = bssid;
@@ -637,28 +698,13 @@ inline DeauthTracker& trackerFor(SecState& s, const std::string& bssid, uint32_t
     if (it != s.deauthIndex.end() && it->second < s.deauthTrackers.size()) {
         return s.deauthTrackers[it->second];
     }
-    if (s.deauthTrackers.size() >= kMaxDeauthTrackers) {
-        std::size_t oldestIdx = 0u;
-        const uint32_t firstLastMs =
-            s.deauthTrackers[0].recentMs.empty() ? 0u : s.deauthTrackers[0].recentMs.back();
-        uint32_t maxAge = wrapSafeAgeMs(nowMs, firstLastMs);
-        for (std::size_t i = 1u; i < s.deauthTrackers.size(); ++i) {
-            const uint32_t lastMs =
-                s.deauthTrackers[i].recentMs.empty() ? 0u : s.deauthTrackers[i].recentMs.back();
-            const uint32_t age = wrapSafeAgeMs(nowMs, lastMs);
-            if (age > maxAge) {
-                maxAge = age;
-                oldestIdx = i;
-            }
-        }
-        s.deauthIndex.erase(s.deauthTrackers[oldestIdx].bssid);
-        const std::size_t lastIdx = s.deauthTrackers.size() - 1u;
-        if (oldestIdx != lastIdx) {
-            s.deauthTrackers[oldestIdx] = std::move(s.deauthTrackers[lastIdx]);
-            s.deauthIndex[s.deauthTrackers[oldestIdx].bssid] = oldestIdx;
-        }
-        s.deauthTrackers.pop_back();
-    }
+    evictOldestIfFull(
+        s.deauthTrackers, s.deauthIndex, kMaxDeauthTrackers, nowMs,
+        [](const DeauthTracker& tr) -> const std::string& { return tr.bssid; },
+        [](const DeauthTracker& tr) {
+            return tr.recentMs.empty() ? 0u : tr.recentMs.back();
+        },
+        [](const DeauthTracker&) {});
     const std::size_t newIdx = s.deauthTrackers.size();
     s.deauthTrackers.push_back(DeauthTracker{bssid, {}, 0u});
     s.deauthIndex[bssid] = newIdx;
@@ -670,24 +716,11 @@ inline BssidSsids& ssidsFor(SecState& s, const std::string& bssid, uint32_t nowM
     if (it != s.bssidSsidIndex.end() && it->second < s.bssidSsids.size()) {
         return s.bssidSsids[it->second];
     }
-    if (s.bssidSsids.size() >= kMaxBssidSsids) {
-        std::size_t oldestIdx = 0u;
-        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.bssidSsids[0].lastSeenMs);
-        for (std::size_t i = 1u; i < s.bssidSsids.size(); ++i) {
-            const uint32_t age = wrapSafeAgeMs(nowMs, s.bssidSsids[i].lastSeenMs);
-            if (age > maxAge) {
-                maxAge = age;
-                oldestIdx = i;
-            }
-        }
-        s.bssidSsidIndex.erase(s.bssidSsids[oldestIdx].bssid);
-        const std::size_t lastIdx = s.bssidSsids.size() - 1u;
-        if (oldestIdx != lastIdx) {
-            s.bssidSsids[oldestIdx] = std::move(s.bssidSsids[lastIdx]);
-            s.bssidSsidIndex[s.bssidSsids[oldestIdx].bssid] = oldestIdx;
-        }
-        s.bssidSsids.pop_back();
-    }
+    evictOldestIfFull(
+        s.bssidSsids, s.bssidSsidIndex, kMaxBssidSsids, nowMs,
+        [](const BssidSsids& bs) -> const std::string& { return bs.bssid; },
+        [](const BssidSsids& bs) { return bs.lastSeenMs; },
+        [](const BssidSsids&) {});
     const std::size_t newIdx = s.bssidSsids.size();
     s.bssidSsids.push_back(BssidSsids{bssid, {}, 0u, nowMs});
     s.bssidSsidIndex[bssid] = newIdx;
@@ -703,24 +736,19 @@ inline Station& stationFor(SecState& s, const std::string& mac, uint32_t nowMs,
         }
         return *existing;
     }
-    if (s.stations.size() >= kMaxStations) {
-        std::size_t oldestIdx = 0u;
-        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.stations[0].lastSeenMs);
-        for (std::size_t i = 1u; i < s.stations.size(); ++i) {
-            const uint32_t age = wrapSafeAgeMs(nowMs, s.stations[i].lastSeenMs);
-            if (age > maxAge) {
-                maxAge = age;
-                oldestIdx = i;
+    evictOldestIfFull(
+        s.stations, s.stationIndex, kMaxStations, nowMs,
+        [](const Station& st) -> const std::string& { return st.mac; },
+        [](const Station& st) { return st.lastSeenMs; },
+        [&](const Station& victim) {
+            if (!victim.lastBssid.empty()) {
+                if (WifiTarget* t = findTarget(s, victim.lastBssid)) {
+                    if (t->clientCount > 0u) {
+                        t->clientCount -= 1u;
+                    }
+                }
             }
-        }
-        s.stationIndex.erase(s.stations[oldestIdx].mac);
-        const std::size_t lastIdx = s.stations.size() - 1u;
-        if (oldestIdx != lastIdx) {
-            s.stations[oldestIdx] = std::move(s.stations[lastIdx]);
-            s.stationIndex[s.stations[oldestIdx].mac] = oldestIdx;
-        }
-        s.stations.pop_back();
-    }
+        });
     const std::size_t newIdx = s.stations.size();
     s.stations.push_back(Station{});
     s.stations.back().mac = mac;
@@ -739,24 +767,11 @@ inline BleTarget& bleTargetFor(SecState& s, const std::string& mac, uint32_t now
         }
         return *existing;
     }
-    if (s.bleTargets.size() >= kMaxBleTargets) {
-        std::size_t oldestIdx = 0u;
-        uint32_t maxAge = wrapSafeAgeMs(nowMs, s.bleTargets[0].lastSeenMs);
-        for (std::size_t i = 1u; i < s.bleTargets.size(); ++i) {
-            const uint32_t age = wrapSafeAgeMs(nowMs, s.bleTargets[i].lastSeenMs);
-            if (age > maxAge) {
-                maxAge = age;
-                oldestIdx = i;
-            }
-        }
-        s.bleIndex.erase(s.bleTargets[oldestIdx].mac);
-        const std::size_t lastIdx = s.bleTargets.size() - 1u;
-        if (oldestIdx != lastIdx) {
-            s.bleTargets[oldestIdx] = std::move(s.bleTargets[lastIdx]);
-            s.bleIndex[s.bleTargets[oldestIdx].mac] = oldestIdx;
-        }
-        s.bleTargets.pop_back();
-    }
+    evictOldestIfFull(
+        s.bleTargets, s.bleIndex, kMaxBleTargets, nowMs,
+        [](const BleTarget& b) -> const std::string& { return b.mac; },
+        [](const BleTarget& b) { return b.lastSeenMs; },
+        [](const BleTarget&) {});
     const std::size_t newIdx = s.bleTargets.size();
     s.bleTargets.push_back(BleTarget{});
     s.bleTargets.back().mac = mac;
@@ -804,6 +819,13 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                 WifiTarget* t = &targetRef;
                 if (isNew) {
                     t->firstSeenMs = ev.nowMs;
+                    uint32_t priorClients = 0u;
+                    for (const Station& st : s.stations) {
+                        if (st.lastBssid == bssid) {
+                            ++priorClients;
+                        }
+                    }
+                    t->clientCount = priorClients;
                 }
                 const std::string prevSsid = t->ssid;
                 if (!isNew && prevSsid != cleanSsid) {
@@ -820,20 +842,38 @@ inline SecState reduce(SecState s, const SecEvent& event) {
                 t->beacons += 1u;
                 t->lastSeenMs = ev.nowMs;
 
+                const bool trustedSelf = isTrustedBssid(s, bssid);
+
                 // Evil-twin: a second BSSID now advertises this SSID (rate-limited per BSSID).
-                if (!cleanSsid.empty() && detail::bssidsAdvertising(s, cleanSsid) >= 2u &&
+                // Trusted BSSIDs suppress alerts for themselves; untrusted APs impersonating a
+                // trusted AP escalate to Critical.
+                if (!trustedSelf && !cleanSsid.empty() &&
+                    detail::bssidsAdvertising(s, cleanSsid) >= 2u &&
                     (isNew || prevSsid != cleanSsid) &&
                     (t->lastEvilTwinAlertMs == 0u ||
                      detail::elapsedAtLeast(ev.nowMs, t->lastEvilTwinAlertMs, kAlertCooldownMs))) {
+                    bool impersonatingTrusted = false;
+                    const auto ssidIt = s.ssidToBssids.find(cleanSsid);
+                    if (ssidIt != s.ssidToBssids.end()) {
+                        for (const std::string& otherBssid : ssidIt->second) {
+                            if (otherBssid != bssid && isTrustedBssid(s, otherBssid)) {
+                                impersonatingTrusted = true;
+                                break;
+                            }
+                        }
+                    }
                     t->lastEvilTwinAlertMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
-                    detail::pushAlert(s, Alert{ev.nowMs, Severity::Warn, AlertKind::EvilTwin,
-                                               bssid, cleanSsid,
-                                               "SSID '" + cleanSsid +
-                                                   "' advertised by multiple BSSIDs"});
+                    detail::pushAlert(
+                        s, Alert{ev.nowMs,
+                                 impersonatingTrusted ? Severity::Critical : Severity::Warn,
+                                 AlertKind::EvilTwin, bssid, cleanSsid,
+                                 impersonatingTrusted
+                                     ? ("Untrusted AP impersonating trusted SSID '" + cleanSsid + "'")
+                                     : ("SSID '" + cleanSsid + "' advertised by multiple BSSIDs")});
                 }
                 // Open-downgrade: SSID that was encrypted now seen Open on a different BSSID
                 // (rate-limited per BSSID so a fast rogue beacon cannot flood the alert ring).
-                if (ev.enc == Encryption::Open && !cleanSsid.empty() &&
+                if (!trustedSelf && ev.enc == Encryption::Open && !cleanSsid.empty() &&
                     (t->lastDowngradeAlertMs == 0u ||
                      detail::elapsedAtLeast(ev.nowMs, t->lastDowngradeAlertMs, kAlertCooldownMs))) {
                     const auto ssidIt = s.ssidToBssids.find(cleanSsid);
@@ -1507,6 +1547,86 @@ inline SecState replaySecEvents(const std::vector<SecEvent>& events) {
     }
     return s;
 }
+
+// Pure multi-band WiFi channel hopper with EAPOL handshake dwell hold.
+class ChannelHopper {
+public:
+    struct Config {
+        bool include5Ghz = false;
+        uint32_t dwellMs = 350u;
+        uint32_t handshakeHoldMs = 3000u;
+    };
+
+    ChannelHopper() : ChannelHopper(Config{}) {}
+
+    explicit ChannelHopper(Config cfg) : cfg_(cfg) {
+        channels_ = {1, 6, 11, 2, 7, 3, 8, 4, 9, 5, 10};
+        if (cfg_.include5Ghz) {
+            constexpr int k5Ghz[] = {36, 40, 44, 48, 149, 153, 157, 161, 165};
+            for (int ch : k5Ghz) {
+                channels_.push_back(ch);
+            }
+        }
+    }
+
+    const Config& config() const { return cfg_; }
+
+    void setInclude5Ghz(bool enable) {
+        if (enable == cfg_.include5Ghz) {
+            return;
+        }
+        cfg_.include5Ghz = enable;
+        *this = ChannelHopper(cfg_);
+    }
+
+    int currentChannel() const {
+        return channels_.empty() ? 1 : channels_[index_ % channels_.size()];
+    }
+
+    void notifyEapolActivity(uint32_t nowMs) {
+        uint32_t until = nowMs + cfg_.handshakeHoldMs;
+        if (until == 0u) {
+            until = 1u;
+        }
+        holdUntilMs_ = until;
+    }
+
+    bool isHolding(uint32_t nowMs) const {
+        if (holdUntilMs_ == 0u) {
+            return false;
+        }
+        const uint32_t remaining = holdUntilMs_ - nowMs;
+        return remaining > 0u && remaining < 0x80000000u;
+    }
+
+    // Advances to the next channel if dwellMs elapsed and no EAPOL handshake hold is active.
+    std::optional<int> step(uint32_t nowMs) {
+        if (channels_.empty() || isHolding(nowMs)) {
+            return std::nullopt;
+        }
+        if (!initialized_) {
+            initialized_ = true;
+            lastHopMs_ = nowMs;
+            return currentChannel();
+        }
+        if (detail::elapsedAtLeast(nowMs, lastHopMs_, cfg_.dwellMs)) {
+            index_ = (index_ + 1u) % channels_.size();
+            lastHopMs_ = nowMs;
+            return currentChannel();
+        }
+        return std::nullopt;
+    }
+
+    const std::vector<int>& schedule() const { return channels_; }
+
+private:
+    Config cfg_{};
+    std::vector<int> channels_{};
+    std::size_t index_ = 0u;
+    uint32_t lastHopMs_ = 0u;
+    uint32_t holdUntilMs_ = 0u;
+    bool initialized_ = false;
+};
 
 }  // namespace sec
 }  // namespace zd

@@ -46,21 +46,18 @@ not yet implemented.
 - [x] Surface `WifiTarget.wps` (`WPS*`) in both the `zd-linux` and `zd-gui` network tables.
 - [x] Surface `SecMood`/alert severity in the Linux GUI pet widget (amber/red bezel shift +
   `SEC: CALM/WATCHFUL/ALARMED` status badge) and `zd-linux` TUI header / `watch` stream.
-- [ ] Detect WPS in active scan paths (`nmcli`/`iw` recon parsers) in addition to the
+- [x] Detect WPS in active scan paths (`nmcli`/`iw` recon parsers) in addition to the
   monitor-mode 802.11 beacon/probe-response parser (`dot11.hpp`).
 
 ## Linux desktop (CLI/TUI + Qt6 GUI)
 
-- [ ] **Assessment report export** (HTML/CSV): networks seen, alerts raised,
-  handshakes/PMKIDs captured, generated from a session — a real deliverable for an
-  authorized engagement, not just a live view.
-- [ ] **GPS/wardriving mode**: tag `WifiTarget` with lat/lon from `gpsd`, pure KML/CSV
-  exporter for mapping captured networks.
-- [ ] **Multi-channel scheduling**: `channelDistribution`/`Band` classification already
-  exist in `secops.hpp`; add a channel-hop policy so `watch` covers more of 2.4+5GHz
-  instead of sitting on one fixed channel.
-- [ ] **Handshake/PMKID export button** in the GUI to hand `.pcap`/`.22000` files to
-  aircrack/hashcat — keeps cracking out of scope, just closes the capture→crack handoff.
+- [x] **Assessment report export** (Markdown/HTML/CSV): networks seen, alerts raised,
+  handshakes/PMKIDs captured, generated safely from a session (`--export` / GUI Export).
+- [ ] **GPS/wardriving mode** (Linux `gpsd` integration; pure WiGLE CSV wardriving is now
+  implemented for T-Deck + GPS/SD).
+- [x] **Multi-channel scheduling**: pure `ChannelHopper` covers 2.4 + 5 GHz channels with
+  3s EAPOL handshake dwell hold (`--hop` / `--5ghz` / TUI `h` / GUI `Hop ch`).
+- [x] **PCAP capture path selector** in GUI + deduped beacon/EAPOL `.pcap` capture.
 - [ ] **Desktop notifications** (libnotify) for `Critical` alerts so `watch` is useful
   running in the background, not just foregrounded in a terminal/window.
 - [ ] Config profiles ("lab" vs "field") presetting interface/channel/allow-list.
@@ -70,12 +67,12 @@ not yet implemented.
 - [ ] **ESP-IDF 5.x / Arduino-ESP32 3.x (PIOArduino) migration**: move off pinned
   `espressif32 @ 6.9.0` (ESP-IDF 4.4) onto maintained PIOArduino / ESP-IDF 5.x releases for
   long-term WiFi/SDK security fixes while validating `M5Unified` and `LovyanGFX` compatibility.
-- [ ] **BLE scanning** alongside WiFi — the hardware already has the radio; a
-  `BleObserved` event + a BLE radar view would be a natural sibling to the WiFi radar.
-- [ ] **Known-network memory in NVS**: remember trusted BSSIDs across reboot so the pet is
-  calm at home and alert near unknown APs.
-- [ ] **Buzzer/haptic alerts** tied to mood/severity — `platforms/web/js/buzzer_sfx.js`
-  already has the pattern for the browser; port it to the M5 piezo.
+- [x] **BLE scanning** alongside WiFi — asynchronous non-blocking `Esp32BleScanner` with
+  free-heap guard feeds BLE tracker/multi-tool detections into RF Guard (`ble on|off`).
+- [x] **Known-network memory**: trusted BSSID persistence in NVS (`ESP32`) and config
+  (`Linux`) suppresses self evil-twins and escalates untrusted impersonators to `Critical`.
+- [x] **Buzzer melodies** tied to mood/severity — `platforms/common/buzzer_melodies.hpp`
+  drives M5Unified speaker SFX (`sfx on|off` persisted in NVS).
 
 ## Native desktop simulator (`zd_sim`)
 
@@ -85,9 +82,8 @@ not yet implemented.
 
 ## Web port
 
-- [ ] PWA packaging (manifest + service worker) for offline installability — it's already
-  a pure client-side canvas toy, so this is nearly free.
-- [ ] Shareable permalink encoding theme/view/demo-scan in the URL hash.
+- [x] PWA packaging (`manifest.json` + `sw.js` + `icon.svg`) for offline installability.
+- [x] Shareable permalink (`Share Link` / `link`) encoding theme/view/mode/profile in the URL hash.
 
 ## Cross-cutting (not yet scoped to a specific platform)
 

@@ -147,29 +147,32 @@ void testResponsiveUiModels() {
     // Full M5StickC Plus / Plus2 resolution (240x135)
     const zd::UiFrame plusFrame = zd::buildUiFrame(state, {240, 135});
     assert(!plusFrame.compact);
+    assert(plusFrame.faceGeom.centerX == 120);
     assert(plusFrame.headerLine.size() <= 39u);
     assert(plusFrame.footerLine.size() <= 39u);
     for (const auto& line : plusFrame.phraseLines) {
-        assert(line.size() <= 20u);
+        assert(line.size() <= 38u);
     }
 
     // Compact M5StickC resolution (160x80)
     const zd::UiFrame compactFrame = zd::buildUiFrame(state, {160, 80});
     assert(compactFrame.compact);
+    assert(compactFrame.faceGeom.centerX == 80);
     assert(compactFrame.headerLine.size() <= 26u);
     assert(compactFrame.footerLine.size() <= 26u);
     for (const auto& line : compactFrame.phraseLines) {
-        assert(line.size() <= 14u);
+        assert(line.size() <= 16u);
     }
 
-    // Wide LILYGO T-Deck / T-Deck Plus resolution (320x240)
+    // Wide LILYGO T-Deck / T-Deck Plus / CYD resolution (320x240)
     const zd::UiFrame tdeckFrame = zd::buildUiFrame(state, {320, 240});
     assert(!tdeckFrame.compact);
     assert(tdeckFrame.dims.width == 320 && tdeckFrame.dims.height == 240);
+    assert(tdeckFrame.faceGeom.centerX == 160);
     assert(tdeckFrame.headerLine.size() <= 53u);
     assert(tdeckFrame.footerLine.size() <= 53u);
     for (const auto& line : tdeckFrame.phraseLines) {
-        assert(line.size() <= 28u);
+        assert(line.size() <= 51u);
     }
     assert(tdeckFrame.radarRows.size() <= 12u);
 
@@ -248,6 +251,12 @@ void testThemeCatalog() {
     assert(zd::themeSpec(zd::ThemeId::CodeRain).effect == zd::ThemeEffect::LightningStorm);
     assert(zd::themeSpec(zd::ThemeId::RedTeam).effect == zd::ThemeEffect::SatelliteBeam);
     assert(zd::themeSpec(zd::ThemeId::BlueTeam).effect == zd::ThemeEffect::TacticalHud);
+    assert(zd::themeFaceStyle(zd::ThemeId::PaperInk) == zd::FaceStyle::ClassicFace);
+    assert(zd::themeFaceStyle(zd::ThemeId::CodeRain) == zd::FaceStyle::ClassicFace);
+    assert(zd::themeFaceStyle(zd::ThemeId::ZeroDayCyan) == zd::FaceStyle::PixelArtMascot);
+    assert(zd::themeFaceStyle(zd::ThemeId::AmberCrt) == zd::FaceStyle::PixelArtMascot);
+    assert(zd::themeFaceStyle(zd::ThemeId::RedTeam) == zd::FaceStyle::PixelArtMascot);
+    assert(zd::themeFaceStyle(zd::ThemeId::BlueTeam) == zd::FaceStyle::PixelArtMascot);
     assert(zd::themeLabel(zd::ThemeId::CodeRain) == "STORM RAIN");
     assert(zd::themeLabel(zd::ThemeId::AmberCrt) == "AMBER PULSE");
     assert(zd::toRgb888Packed({0x12, 0x34, 0x56}) == 0x123456u);
@@ -417,6 +426,49 @@ void testExpandedLevelsHighscoreAndMultiRadio() {
 
     const zd::AppState sLvlTick = zd::reduce(s, zd::TickEvent{500u, 95, false});
     assert(sLvlTick.mood == zd::Mood::LevelUp);
+
+    // Offensive arm/disarm preserves prior preArmedOpsMode (Recon stays Recon; Defensive stays Defensive).
+    zd::AppState recon = zd::initialState(99u);
+    recon = zd::reduce(recon, zd::SetOffensiveArmedEvent{100u, true});
+    assert(recon.opsMode == zd::OpsMode::Offensive && recon.offensiveArmed);
+    recon = zd::reduce(recon, zd::SetOffensiveArmedEvent{200u, false});
+    assert(recon.opsMode == zd::OpsMode::Recon && !recon.offensiveArmed);
+
+    // Threat banner auto-expires after kThreatDisplayTimeoutMs and can be manually cleared.
+    zd::AppState thr = zd::initialState(5u);
+    thr = zd::reduce(thr, zd::SetOpsModeEvent{100u, zd::OpsMode::Defensive});
+    thr = zd::reduce(thr, zd::SubGhzObservedEvent{
+                              200u,
+                              zd::SubGhzSignal{433920u, -45, "OOK", 8u, zd::SubGhzAnomaly::ReplayBurst}});
+    assert(!thr.lastThreatLabel.empty());
+    assert(thr.mood == zd::Mood::ThreatAlert);
+    const zd::AppState cleared = zd::reduce(thr, zd::ClearThreatEvent{300u});
+    assert(cleared.lastThreatLabel.empty() && cleared.lastThreatMs == 0u);
+    assert(cleared.mood == zd::Mood::ShieldGuard);
+    const zd::AppState expired = zd::reduce(
+        thr, zd::TickEvent{200u + zd::kThreatDisplayTimeoutMs, 90, false});
+    assert(expired.lastThreatLabel.empty() && expired.mood == zd::Mood::ShieldGuard);
+
+    // SyncMonitorSnapshotEvent updates AP/BLE views without inflating XP or completedScans.
+    zd::AppState snap = zd::initialState(7u);
+    snap = zd::reduce(snap, zd::SyncMonitorSnapshotEvent{
+                                1000u, {{"Lab", -44, 6, true}}, {}, 2u, "EVIL-TWIN Lab"});
+    assert(snap.xp == 0u && snap.completedScans == 0u);
+    assert(snap.latestScan.totalAps == 1u && snap.threatsDetected == 2u);
+    assert(snap.lastThreatLabel == "EVIL-TWIN Lab");
+
+    // Off-page fields skipped in buildUiFrame
+    const zd::UiFrame faceOnly = zd::buildUiFrame(snap, {240, 135});
+    assert(faceOnly.radarRows.empty() && faceOnly.rfGuardRows.empty());
+    const zd::UiFrame radarPage = zd::buildUiFrame(
+        zd::reduce(snap, zd::SetPageEvent{1100u, zd::ScreenPage::NearbyRadar}), {240, 135});
+    assert(radarPage.radarRows.size() == 1u && radarPage.promptLabel.empty());
+
+    // BLE 16-bit Service UUID AD parser (0x03 UUID list and 0x16 Service Data)
+    const uint8_t adList[] = {0x03u, 0x03u, 0x82u, 0x30u};
+    assert(zd::extractBle16ServiceUuid(adList, sizeof(adList)) == 0x3082u);
+    const uint8_t adSvc[] = {0x04u, 0x16u, 0xEDu, 0xFEu, 0x01u};
+    assert(zd::extractBle16ServiceUuid(adSvc, sizeof(adSvc)) == 0xFEEDu);
 }
 
 }  // namespace

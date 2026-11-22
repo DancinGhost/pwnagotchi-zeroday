@@ -410,12 +410,27 @@ inline fp::RngPick<std::string> selectThemePhrase(ThemeId theme, uint32_t seed) 
     }
 }
 
+constexpr uint32_t kThreatDisplayTimeoutMs = 30000u;
+
+inline void sortAndCapBleDevices(std::vector<BleDevice>& devices) {
+    std::sort(devices.begin(), devices.end(), [](const BleDevice& a, const BleDevice& b) {
+        if ((a.threat != BleThreatKind::None) != (b.threat != BleThreatKind::None)) {
+            return a.threat != BleThreatKind::None;
+        }
+        return a.rssi > b.rssi;
+    });
+    if (devices.size() > 16u) {
+        devices.resize(16u);
+    }
+}
+
 // Pure page transition shared by ButtonA and semantic page events.
-inline AppState applyPage(const AppState& state, ScreenPage page, uint32_t nowMs) {
-    AppState next = state;
+inline AppState applyPage(AppState next, ScreenPage page, uint32_t nowMs) {
     next.uptimeMs = nowMs;
     next.lastInteractionMs = nowMs;
-    next.page = isValidPage(page) ? page : state.page;
+    if (isValidPage(page)) {
+        next.page = page;
+    }
     if (!next.isScanning && next.mood == Mood::Sleepy) {
         next.mood = idleMoodForState(next);
         const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
@@ -427,11 +442,12 @@ inline AppState applyPage(const AppState& state, ScreenPage page, uint32_t nowMs
 }
 
 // Pure theme transition shared by every theme-changing event.
-inline AppState applyTheme(const AppState& state, ThemeId theme, uint32_t nowMs, bool announce) {
-    AppState next = state;
+inline AppState applyTheme(AppState next, ThemeId theme, uint32_t nowMs, bool announce) {
     next.uptimeMs = nowMs;
     next.lastInteractionMs = nowMs;
-    next.theme = isValidTheme(theme) ? theme : state.theme;
+    if (isValidTheme(theme)) {
+        next.theme = theme;
+    }
     if (announce) {
         next.themeToastUntilMs = nowMs + kThemeToastMs;
         if (next.themeToastUntilMs == 0u) {
@@ -480,15 +496,32 @@ constexpr bool shouldTriggerScan(const AppState& state,
 }
 
 // Pure state reducer: (AppState, AppEvent) -> AppState
-// Never mutates input `state`; returns a new AppState value.
-inline AppState reduce(const AppState& state, const AppEvent& event) {
+// Never mutates caller state unless explicitly moved in; returns a new AppState value.
+inline AppState reduce(AppState state, const AppEvent& event) {
     return std::visit(
         fp::Overloaded{
             [&](const TickEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.batteryPercent = fp::clampVal<int32_t>(ev.batteryPercent, 0, 100);
                 next.isCharging = ev.isCharging;
+
+                // Auto-expire stale threat banners after kThreatDisplayTimeoutMs.
+                if (!next.lastThreatLabel.empty() && next.lastThreatMs != 0u) {
+                    const uint32_t elapsed = ev.nowMs - next.lastThreatMs;
+                    if (elapsed < 0x80000000u && elapsed >= kThreatDisplayTimeoutMs) {
+                        next.lastThreatLabel.clear();
+                        next.lastThreatMs = 0u;
+                        if (!next.isScanning && next.mood == Mood::ThreatAlert) {
+                            next.mood = idleMoodForState(next);
+                            const auto picked =
+                                selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                            next.phrase = picked.value;
+                            next.rngSeed = picked.nextSeed;
+                            next.lastPhraseChangeMs = ev.nowMs;
+                        }
+                    }
+                }
 
                 if (next.isScanning) {
                     // Animate eyes left/right (or dish sweep) every 450ms during active async scan.
@@ -537,19 +570,21 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const ButtonAPressedEvent& ev) -> AppState {
-                return applyPage(state, nextPage(state.page), ev.nowMs);
+                const ScreenPage nextPg = nextPage(state.page);
+                return applyPage(std::move(state), nextPg, ev.nowMs);
             },
 
             [&](const CyclePageEvent& ev) -> AppState {
-                return applyPage(state, cyclePage(state.page, ev.step), ev.nowMs);
+                const ScreenPage nextPg = cyclePage(state.page, ev.step);
+                return applyPage(std::move(state), nextPg, ev.nowMs);
             },
 
             [&](const SetPageEvent& ev) -> AppState {
-                return applyPage(state, ev.page, ev.nowMs);
+                return applyPage(std::move(state), ev.page, ev.nowMs);
             },
 
             [&](const ButtonBPressedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.lastInteractionMs = ev.nowMs;
                 if (!next.isScanning) {
@@ -559,23 +594,36 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const ButtonBLongPressedEvent& ev) -> AppState {
-                return applyTheme(state, nextTheme(state.theme), ev.nowMs, true);
+                const ThemeId nextTh = nextTheme(state.theme);
+                return applyTheme(std::move(state), nextTh, ev.nowMs, true);
             },
 
             [&](const CycleThemeEvent& ev) -> AppState {
-                return applyTheme(state, cycleTheme(state.theme, ev.step), ev.nowMs, true);
+                const ThemeId nextTh = cycleTheme(state.theme, ev.step);
+                return applyTheme(std::move(state), nextTh, ev.nowMs, true);
             },
 
             [&](const SetThemeEvent& ev) -> AppState {
-                return applyTheme(state, ev.theme, ev.nowMs, ev.announce);
+                return applyTheme(std::move(state), ev.theme, ev.nowMs, ev.announce);
             },
 
             [&](const SetOffensiveArmedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.lastInteractionMs = ev.nowMs;
+                if (ev.armed && !next.offensiveArmed) {
+                    if (next.opsMode != OpsMode::Offensive) {
+                        next.preArmedOpsMode = next.opsMode;
+                    }
+                    next.opsMode = OpsMode::Offensive;
+                } else if (!ev.armed && next.offensiveArmed) {
+                    next.opsMode = (next.preArmedOpsMode == OpsMode::Offensive)
+                                       ? OpsMode::Recon
+                                       : next.preArmedOpsMode;
+                } else if (ev.armed) {
+                    next.opsMode = OpsMode::Offensive;
+                }
                 next.offensiveArmed = ev.armed;
-                next.opsMode = ev.armed ? OpsMode::Offensive : OpsMode::Defensive;
                 if (!next.isScanning) {
                     next.mood = idleMoodForState(next);
                     const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
@@ -587,10 +635,13 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const CycleOpsModeEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.lastInteractionMs = ev.nowMs;
-                next.opsMode = cycleOpsMode(state.opsMode);
+                next.opsMode = cycleOpsMode(next.opsMode);
+                if (next.opsMode != OpsMode::Offensive) {
+                    next.preArmedOpsMode = next.opsMode;
+                }
                 if (!next.isScanning) {
                     next.mood = idleMoodForState(next);
                     const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
@@ -602,10 +653,13 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const SetOpsModeEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.lastInteractionMs = ev.nowMs;
                 next.opsMode = ev.mode;
+                if (next.opsMode != OpsMode::Offensive) {
+                    next.preArmedOpsMode = next.opsMode;
+                }
                 if (!next.isScanning) {
                     next.mood = idleMoodForState(next);
                     const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
@@ -617,7 +671,7 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const BleScanCompletedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.bleDevices.clear();
                 next.bleDevices.reserve(ev.devices.size());
@@ -639,20 +693,11 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
                     }
                     next.bleDevices.push_back(std::move(d));
                 }
-                std::sort(next.bleDevices.begin(), next.bleDevices.end(),
-                          [](const BleDevice& a, const BleDevice& b) {
-                              if ((a.threat != BleThreatKind::None) !=
-                                  (b.threat != BleThreatKind::None)) {
-                                  return a.threat != BleThreatKind::None;
-                              }
-                              return a.rssi > b.rssi;
-                          });
-                if (next.bleDevices.size() > 16u) {
-                    next.bleDevices.resize(16u);
-                }
+                sortAndCapBleDevices(next.bleDevices);
                 if (threatCount > 0u) {
                     next.threatsDetected += threatCount;
                     next.lastThreatLabel = topThreat;
+                    next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
                     awardXp(next, 25u, ev.nowMs);
                     if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
                         !next.offensiveArmed) {
@@ -667,7 +712,7 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const SubGhzObservedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.subGhzFreqKhz = ev.signal.freqKhz;
                 next.subGhzSignals.insert(next.subGhzSignals.begin(), ev.signal);
@@ -679,6 +724,7 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
                     next.lastThreatLabel =
                         formatFreqMhz(ev.signal.freqKhz) + " " +
                         subGhzAnomalyLabel(ev.signal.anomaly);
+                    next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
                     awardXp(next, 25u, ev.nowMs);
                     if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
                         !next.offensiveArmed) {
@@ -693,7 +739,7 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const SetSubGhzFreqEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.lastInteractionMs = ev.nowMs;
                 if (ev.freqKhz >= 300000u && ev.freqKhz <= 928000u) {
@@ -705,7 +751,7 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const SetHighScoreEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 if (ev.xp > next.xp) {
                     next.xp = ev.xp;
@@ -720,8 +766,71 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
                 return next;
             },
 
+            [&](const ClearThreatEvent& ev) -> AppState {
+                AppState next = std::move(state);
+                next.uptimeMs = ev.nowMs;
+                next.lastInteractionMs = ev.nowMs;
+                next.lastThreatLabel.clear();
+                next.lastThreatMs = 0u;
+                if (!next.isScanning) {
+                    next.mood = idleMoodForState(next);
+                    const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                    next.phrase = picked.value;
+                    next.rngSeed = picked.nextSeed;
+                    next.lastPhraseChangeMs = ev.nowMs;
+                }
+                return next;
+            },
+
+            [&](const SyncMonitorSnapshotEvent& ev) -> AppState {
+                AppState next = std::move(state);
+                next.uptimeMs = ev.nowMs;
+                next.latestScan = summarizeScan(ev.aps, 12u);
+                if (!ev.aps.empty()) {
+                    next.hasScannedOnce = true;
+                }
+                if (next.latestScan.totalAps > next.peakApCount) {
+                    next.peakApCount = static_cast<uint32_t>(next.latestScan.totalAps);
+                }
+                next.bleDevices.clear();
+                next.bleDevices.reserve(ev.bleDevices.size());
+                for (BleDevice d : ev.bleDevices) {
+                    d.threat = (d.threat != BleThreatKind::None)
+                                   ? d.threat
+                                   : classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid,
+                                                       d.trackerPayload);
+                    next.bleDevices.push_back(std::move(d));
+                }
+                sortAndCapBleDevices(next.bleDevices);
+                if (ev.threatCount > next.threatsDetected) {
+                    next.threatsDetected = ev.threatCount;
+                }
+                if (!ev.topThreatLabel.empty() && ev.topThreatLabel != next.lastThreatLabel) {
+                    next.lastThreatLabel = ev.topThreatLabel;
+                    next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
+                        !next.offensiveArmed) {
+                        next.mood = Mood::ThreatAlert;
+                        next.phrase = "ALERT! " + ev.topThreatLabel;
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
+                } else if (!next.isScanning && next.mood != Mood::LevelUp &&
+                           next.mood != Mood::ThreatAlert) {
+                    const Mood targetMood = idleMoodForState(next);
+                    if (targetMood != next.mood) {
+                        next.mood = targetMood;
+                        const auto picked =
+                            selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                        next.phrase = picked.value;
+                        next.rngSeed = picked.nextSeed;
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
+                }
+                return next;
+            },
+
             [&](const ScanStartedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.isScanning = true;
                 next.manualScanRequested = false;
@@ -737,13 +846,13 @@ inline AppState reduce(const AppState& state, const AppEvent& event) {
             },
 
             [&](const ScanCompletedEvent& ev) -> AppState {
-                AppState next = state;
+                AppState next = std::move(state);
                 next.uptimeMs = ev.nowMs;
                 next.isScanning = false;
                 next.manualScanRequested = false;
                 next.hasScannedOnce = true;
                 next.lastScanCompleteMs = ev.nowMs;
-                next.completedScans = state.completedScans + 1u;
+                next.completedScans = next.completedScans + 1u;
                 next.latestScan = summarizeScan(ev.rawNetworks, 12u);
                 if (next.latestScan.totalAps > next.peakApCount) {
                     next.peakApCount = static_cast<uint32_t>(next.latestScan.totalAps);

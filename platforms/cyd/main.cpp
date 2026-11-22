@@ -45,6 +45,7 @@
 
 namespace {
 
+using zd::esp32_common::Esp32BleScanner;
 using zd::esp32_common::Esp32WifiScanner;
 using zd::esp32_common::NvsThemeStore;
 
@@ -171,9 +172,9 @@ public:
 // --- Banded RGB565 Sprite Adapter (No-PSRAM Safe Double Buffering) ---
 //
 // Classic ESP32-WROOM-32 lacks PSRAM, so allocating a full 320x240x2 (150 KB) contiguous
-// RGB565 sprite alongside WiFi STA buffers fails or fragments DRAM. Rendering in 4 horizontal
-// strips of 320x60 (37.5 KB) preserves lossless 16-bit RGB565 fidelity, zero flicker, and a
-// single template instantiation of `zd::render::paintUiFrame<BandedSpriteGfx>`.
+// RGB565 sprite alongside WiFi STA buffers fails or fragments DRAM. Rendering in 8 horizontal
+// strips of 320x30 using two 19.2 KB ping-pong DMA bands preserves lossless 16-bit RGB565
+// fidelity, zero flicker, and a single template instantiation of `zd::render::paintUiFrame<BandedSpriteGfx>`.
 
 class BandedSpriteGfx {
 public:
@@ -244,7 +245,7 @@ private:
 
 class CydDisplaySink final : public zd::hal::IDisplaySink {
 public:
-    static constexpr int16_t kBandHeight = 60; // 320 x 60 x 2 = 38.4 KB (4 strips cover 240 px)
+    static constexpr int16_t kBandHeight = 30; // 320 x 30 x 2 = 19.2 KB x 2 ping-pong DMA bands
 
     void init() {
         // 1. Keep MicroSD CS idle HIGH and turn off the active-LOW rear RGB LED
@@ -263,11 +264,17 @@ public:
         lcd_.setRotation(ZD_CYD_ROTATION);
         lcd_.setBrightness(brightness_);
 
-        // 3. Allocate banded RGB565 sprite in internal DRAM
-        band_.setColorDepth(16);
-        bandReady_ = band_.createSprite(lcd_.width(), kBandHeight);
+        // 3. Allocate two internal-DRAM RGB565 ping-pong bands for overlapped SPI DMA
+        bool ok = true;
+        for (int i = 0; i < 2; ++i) {
+            bands_[i].setColorDepth(16);
+            if (!bands_[i].createSprite(lcd_.width(), kBandHeight)) {
+                ok = false;
+            }
+        }
+        bandReady_ = ok;
         if (!bandReady_) {
-            Serial.println("[DISPLAY] ERROR: band createSprite failed; screen output disabled");
+            Serial.println("[DISPLAY] ERROR: ping-pong band createSprite failed; screen output disabled");
         }
     }
 
@@ -294,16 +301,26 @@ public:
         if (!bandReady_) {
             return;
         }
-        band_.setFont(&fonts::Font0);
-        band_.setTextSize(1);
-
         const int32_t totalH = lcd_.height();
+        int cur = 0;
+        bool dmaStarted = false;
         lcd_.startWrite();
         for (int32_t yOff = 0; yOff < totalH; yOff += kBandHeight) {
             const int32_t stripH = (std::min)(static_cast<int32_t>(kBandHeight), totalH - yOff);
-            BandedSpriteGfx gfx(band_, yOff, stripH);
+            lgfx::LGFX_Sprite& spr = bands_[cur];
+            spr.setFont(&fonts::Font0);
+            spr.setTextSize(1);
+            BandedSpriteGfx gfx(spr, yOff, stripH);
             zd::render::paintUiFrame(gfx, frame);
-            band_.pushSprite(0, yOff);
+            if (dmaStarted) {
+                lcd_.waitDMA();
+            }
+            spr.pushSprite(0, yOff);
+            dmaStarted = true;
+            cur = 1 - cur;
+        }
+        if (dmaStarted) {
+            lcd_.waitDMA();
         }
         lcd_.endWrite();
     }
@@ -312,7 +329,7 @@ public:
 
 private:
     LGFX_CYD lcd_;
-    lgfx::LGFX_Sprite band_{&lcd_};
+    lgfx::LGFX_Sprite bands_[2] = {lgfx::LGFX_Sprite(&lcd_), lgfx::LGFX_Sprite(&lcd_)};
     bool bandReady_ = false;
     uint8_t brightness_ = 200;
 };
@@ -320,6 +337,7 @@ private:
 // --- Runtime State & Adapters ---
 
 Esp32WifiScanner gRadio;
+Esp32BleScanner gBle;
 zd::hal::FixedPowerSensor gPower{100, /*charging=*/true}; // CYD is USB-powered
 NvsThemeStore gThemeStore;
 CydDisplaySink gDisplay;
@@ -332,13 +350,50 @@ zd::esp32_common::OffensiveConsole gOffensive;
 zd::esp32_common::DirtyFramePacer gFramePacer;
 std::string gSerialLine;
 
-// BOOT button (GPIO 0) state
-bool gBootActive = false;
-bool gBootLongHandled = false;
-uint32_t gBootStartMs = 0;
-
-// XPT2046 resistive touchscreen gesture state
+// BOOT button (GPIO 0) state & touch gesture state
+zd::esp32_common::ShortLongButton gBootBtn;
 zd::esp32_common::TouchZoneGesture gTouchGesture;
+
+bool gAutoBacklight = true;
+uint32_t gLastLdrPollMs = 0u;
+bool gLedEnabled = true;
+
+void setRgbLed(bool r, bool g, bool b) {
+    // Active-LOW on Sunton CYD rear RGB LED
+    digitalWrite(PIN_LED_R, r ? LOW : HIGH);
+    digitalWrite(PIN_LED_G, g ? LOW : HIGH);
+    digitalWrite(PIN_LED_B, b ? LOW : HIGH);
+}
+
+void updateStatusLed(const zd::AppState& st) {
+    if (!gLedEnabled) {
+        setRgbLed(false, false, false);
+        return;
+    }
+    if (!st.lastThreatLabel.empty() || st.mood == zd::Mood::ThreatAlert || st.offensiveArmed) {
+        setRgbLed(true, false, false);
+    } else if (st.isScanning) {
+        setRgbLed(false, false, true);
+    } else if (st.opsMode == zd::OpsMode::Defensive) {
+        setRgbLed(false, true, false);
+    } else {
+        setRgbLed(false, false, false);
+    }
+}
+
+void stepAutoBacklight(uint32_t nowMs) {
+    if (!gAutoBacklight || (nowMs - gLastLdrPollMs) < 500u) {
+        return;
+    }
+    gLastLdrPollMs = nowMs;
+    const int raw = analogRead(PIN_LDR_ADC);
+    const int clamped = (std::max)(200, (std::min)(3600, raw));
+    const int mapped = 240 - ((clamped - 200) * 195) / 3400;
+    const uint8_t target = static_cast<uint8_t>((std::max)(45, (std::min)(240, mapped)));
+    if (std::abs(static_cast<int>(target) - static_cast<int>(gDisplay.brightness())) >= 10) {
+        gDisplay.setBrightness(target);
+    }
+}
 
 void logSerialStatus(const char* eventTag) {
     zd::esp32_common::printSerialStatus(gSession, eventTag);
@@ -363,7 +418,27 @@ void pollSerialCli(uint32_t nowMs) {
             Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
             return;
         }
-        if (line == "ldr") {
+        if (line == "autobl on") {
+            gAutoBacklight = true;
+            Serial.println("Auto backlight (LDR): enabled");
+        } else if (line == "autobl off") {
+            gAutoBacklight = false;
+            Serial.println("Auto backlight (LDR): disabled");
+        } else if (line == "led on") {
+            gLedEnabled = true;
+            updateStatusLed(gSession.state());
+            Serial.println("Status RGB LED: enabled");
+        } else if (line == "led off") {
+            gLedEnabled = false;
+            updateStatusLed(gSession.state());
+            Serial.println("Status RGB LED: disabled");
+        } else if (line == "ble on") {
+            gBle.setEnabled(true);
+            Serial.println("BLE scanner: enabled");
+        } else if (line == "ble off") {
+            gBle.setEnabled(false);
+            Serial.println("BLE scanner: disabled");
+        } else if (line == "ldr") {
             const int raw = analogRead(PIN_LDR_ADC);
             const uint32_t mv = analogReadMilliVolts(PIN_LDR_ADC);
             Serial.printf("LDR (GPIO %u): raw=%d | %lu mV\n",
@@ -376,11 +451,13 @@ void pollSerialCli(uint32_t nowMs) {
                 Serial.println("Invalid backlight value (expected integer 10..255)");
                 return;
             }
+            gAutoBacklight = false;
             gDisplay.setBrightness(static_cast<uint8_t>(val));
-            Serial.printf("Backlight set to %u/255\n", static_cast<unsigned>(val));
+            Serial.printf("Backlight set to %u/255 (manual)\n", static_cast<unsigned>(val));
         } else if (line == "bl") {
-            Serial.printf("Backlight: %u/255 (use 'bl <10-255>')\n",
-                          static_cast<unsigned>(gDisplay.brightness()));
+            Serial.printf("Backlight: %u/255 [%s] (use 'bl <10-255>' or 'autobl on|off')\n",
+                          static_cast<unsigned>(gDisplay.brightness()),
+                          gAutoBacklight ? "auto" : "manual");
         } else if (line.rfind("rot ", 0) == 0) {
             int val = 0;
             if (!parseStrictRangeInt(line.c_str() + 4, 1, 3, val) || (val != 1 && val != 3)) {
@@ -407,26 +484,18 @@ void pollSerialCli(uint32_t nowMs) {
 }
 
 void pollBootButton(uint32_t nowMs) {
-    const bool pressed = (digitalRead(PIN_BTN_BOOT) == LOW);
-    if (pressed && !gBootActive) {
-        gBootActive = true;
-        gBootStartMs = nowMs;
-        gBootLongHandled = false;
-    } else if (pressed && gBootActive && !gBootLongHandled) {
-        // Hold BOOT for 600ms -> trigger immediate WiFi scan
-        if ((nowMs - gBootStartMs) >= 600u) {
-            gBootLongHandled = true;
+    using Ev = zd::esp32_common::ShortLongButton::Event;
+    switch (gBootBtn.update(digitalRead(PIN_BTN_BOOT) == LOW, nowMs, 600u, 25u)) {
+        case Ev::LongHold:
             gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
             logSerialStatus("BOOT_HOLD_SCAN");
-        }
-    } else if (!pressed && gBootActive) {
-        gBootActive = false;
-        const uint32_t duration = nowMs - gBootStartMs;
-        if (!gBootLongHandled && duration >= 25u) {
-            // Short BOOT click -> cycle screen view / wake pet
+            break;
+        case Ev::ShortClick:
             gSession.dispatch(zd::ButtonAPressedEvent{nowMs}, &gThemeStore);
             logSerialStatus("BOOT_CLICK_VIEW");
-        }
+            break;
+        case Ev::None:
+            break;
     }
 }
 
@@ -434,34 +503,10 @@ void pollTouch(uint32_t nowMs, LGFX_CYD& lcd) {
     uint16_t tx = 0;
     uint16_t ty = 0;
     const bool isTouched = lcd.getTouch(&tx, &ty);
-    using Act = zd::esp32_common::TouchZoneGesture::Action;
-    switch (gTouchGesture.update(isTouched, tx, ty, nowMs, 35u)) {
-        case Act::PrevTheme:
-            gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
-            logSerialStatus("TOUCH_THEME_PREV");
-            break;
-        case Act::NextTheme:
-            gSession.dispatch(zd::CycleThemeEvent{nowMs, +1}, &gThemeStore);
-            logSerialStatus("TOUCH_THEME");
-            break;
-        case Act::PrevView:
-            gSession.dispatch(zd::CyclePageEvent{nowMs, -1}, &gThemeStore);
-            logSerialStatus("TOUCH_VIEW_PREV");
-            break;
-        case Act::NextView:
-            gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
-            logSerialStatus("TOUCH_VIEW_NEXT");
-            break;
-        case Act::Scan:
-            gSession.dispatch(zd::ButtonBPressedEvent{nowMs}, &gThemeStore);
-            logSerialStatus("TOUCH_SCAN");
-            break;
-        case Act::CycleMode:
-            gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
-            logSerialStatus("TOUCH_MODE");
-            break;
-        case Act::None:
-            break;
+    if (const char* tag = zd::esp32_common::dispatchTouchAction(
+            gTouchGesture.update(isTouched, tx, ty, nowMs, 35u, gDisplay.dimensions()),
+            nowMs, gSession, &gThemeStore)) {
+        logSerialStatus(tag);
     }
 }
 
@@ -476,6 +521,7 @@ void setup() {
 
     gDisplay.init();
     gRadio.init();
+    gBle.init();
     gThemeStore.init();
     gOffensive.begin();
 
@@ -493,12 +539,14 @@ void loop() {
     pollBootButton(nowMs);
     pollSerialCli(nowMs);
 
-    // 2. Step non-blocking radio scanner & periodic telemetry tick
-    if (const char* scanTag = gSession.stepRadio(
-            nowMs, gRadio, zd::hal::PlatformSession::kDefaultScanTimeoutMs, &gThemeStore)) {
+    // 2. Step non-blocking multi-radio scanner & periodic telemetry tick
+    if (const char* scanTag = gSession.stepMultiRadio(
+            nowMs, gRadio, &gBle, nullptr, &gThemeStore)) {
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);
+    stepAutoBacklight(nowMs);
+    updateStatusLed(gSession.state());
 
     // 3. Refresh display only when state changed, animating, or on 1 Hz uptime tick
     if (gFramePacer.shouldRender(gSession.state(), nowMs)) {

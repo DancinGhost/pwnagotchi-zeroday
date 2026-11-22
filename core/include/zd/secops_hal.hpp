@@ -42,6 +42,7 @@ struct CapturedFrame {
     int32_t rssi = -100;
     Encryption enc = Encryption::Unknown;
     bool wps = false;             // WPS vendor IE (00:50:F2:04) present in beacon/probe-resp
+    bool hasPmkid = false;        // true when EAPOL frame (e.g. M1) carries a non-zero RSN PMKID
     uint8_t eapolMsg = 0u;        // 0 = synthetic/pre-validated; 1..4 = EAPOL M1..M4; 255 = ignore
     bool hasStation = false;      // true when decoded Data/EAPOL provides `station` explicitly
     std::string station{};        // wireless STA MAC (empty for WDS 4-address frames)
@@ -116,6 +117,15 @@ public:
     const SecState& state() const { return state_; }
     SecState& mutableState() { return state_; }
 
+    bool trustBssid(const std::string& bssid) { return zd::sec::trustBssid(state_, bssid); }
+    bool untrustBssid(const std::string& bssid) { return zd::sec::untrustBssid(state_, bssid); }
+    void setTrustedBssids(const std::vector<std::string>& bssids) {
+        state_.trustedBssids.clear();
+        for (const auto& b : bssids) {
+            zd::sec::trustBssid(state_, b);
+        }
+    }
+
     Authorization& authorization() { return auth_; }
     const Authorization& authorization() const { return auth_; }
 
@@ -140,6 +150,7 @@ public:
     void loadEvents(const std::vector<SecEvent>& recorded) {
         state_ = replaySecEvents(recorded);
         eapolState_.clear();
+        lastEapolMs_ = 0u;
         events_.clear();
         if (maxRecordedEvents_ == 0u) {
             return;
@@ -170,10 +181,11 @@ public:
                 break;
             case FrameKind::Data: {
                 dispatch(DataFrameObserved{f.nowMs, f.bssid});
-                const std::string& sta = f.hasStation ? f.station : f.source;
-                if (!sta.empty() && !isBroadcastMac(sta) &&
-                    normalizeMac(sta) != normalizeMac(f.bssid)) {
-                    dispatch(ClientObserved{f.nowMs, f.bssid, sta});
+                const std::string& rawSta = f.hasStation ? f.station : f.source;
+                const std::string normSta = normalizeMac(rawSta);
+                if (!normSta.empty() && !isBroadcastMac(normSta) &&
+                    normSta != normalizeMac(f.bssid)) {
+                    dispatch(ClientObserved{f.nowMs, f.bssid, normSta});
                 }
                 break;
             }
@@ -181,46 +193,22 @@ public:
             case FrameKind::Disassoc:
                 dispatch(DeauthObserved{f.nowMs, f.bssid, f.source, f.dest});
                 break;
-            case FrameKind::Eapol: {
-                if (f.eapolMsg == 0u) {
-                    dispatch(HandshakeObserved{f.nowMs, f.bssid});
-                    break;
-                }
-                if (f.eapolMsg < 1u || f.eapolMsg > 4u) {
-                    break;
-                }
-                const std::string bssid = normalizeMac(f.bssid);
-                std::string rawSta;
-                if (f.hasStation) {
-                    rawSta = f.station;
-                } else if (!f.source.empty() && normalizeMac(f.source) != bssid) {
-                    rawSta = f.source;
-                } else {
-                    rawSta = f.dest;
-                }
-                const std::string sta = normalizeMac(rawSta);
-                if (bssid.empty() || sta.empty() || isBroadcastMac(sta) || isMulticastMac(sta) ||
-                    sta == bssid) {
-                    break;
-                }
-                const std::string key = bssid + "|" + sta;
-                if (eapolState_.size() >= kMaxEapolTrackers &&
-                    eapolState_.find(key) == eapolState_.end()) {
-                    eapolState_.clear();
-                }
-                uint8_t& mask = eapolState_[key];
-                mask = static_cast<uint8_t>(mask | static_cast<uint8_t>(1u << (f.eapolMsg - 1u)));
-                // Require at least an observed M1+M2 or M2+M3 exchange for a valid handshake.
-                if ((mask & 0x03u) == 0x03u || (mask & 0x06u) == 0x06u) {
-                    dispatch(HandshakeObserved{f.nowMs, f.bssid});
+            case FrameKind::Eapol:
+                trackEapolHandshake(f);
+                if (f.hasPmkid) {
+                    dispatch(PmkidObserved{f.nowMs, f.bssid});
                 }
                 break;
-            }
             case FrameKind::Pmkid:
                 dispatch(PmkidObserved{f.nowMs, f.bssid});
+                if (f.eapolMsg >= 1u && f.eapolMsg <= 4u) {
+                    trackEapolHandshake(f);
+                }
                 break;
         }
     }
+
+    uint32_t lastEapolMs() const { return lastEapolMs_; }
 
     void dispatch(const SecEvent& ev) {
         state_ = reduce(std::move(state_), ev);
@@ -288,10 +276,46 @@ public:
     }
 
 private:
+    void trackEapolHandshake(const CapturedFrame& f) {
+        lastEapolMs_ = f.nowMs;
+        if (f.eapolMsg == 0u) {
+            dispatch(HandshakeObserved{f.nowMs, f.bssid});
+            return;
+        }
+        if (f.eapolMsg < 1u || f.eapolMsg > 4u) {
+            return;
+        }
+        const std::string bssid = normalizeMac(f.bssid);
+        std::string rawSta;
+        if (f.hasStation) {
+            rawSta = f.station;
+        } else {
+            const std::string normSrc = normalizeMac(f.source);
+            rawSta = (!normSrc.empty() && normSrc != bssid) ? f.source : f.dest;
+        }
+        const std::string sta = normalizeMac(rawSta);
+        if (bssid.empty() || sta.empty() || isBroadcastMac(sta) || isMulticastMac(sta) ||
+            sta == bssid) {
+            return;
+        }
+        const std::string key = bssid + "|" + sta;
+        if (eapolState_.size() >= kMaxEapolTrackers &&
+            eapolState_.find(key) == eapolState_.end()) {
+            eapolState_.clear();
+        }
+        uint8_t& mask = eapolState_[key];
+        mask = static_cast<uint8_t>(mask | static_cast<uint8_t>(1u << (f.eapolMsg - 1u)));
+        // Require at least an observed M1+M2 or M2+M3 exchange for a valid handshake.
+        if ((mask & 0x03u) == 0x03u || (mask & 0x06u) == 0x06u) {
+            dispatch(HandshakeObserved{f.nowMs, f.bssid});
+        }
+    }
+
     SecState state_{};
     Authorization auth_{};
     std::deque<SecEvent> events_{};
     std::unordered_map<std::string, uint8_t> eapolState_{};
+    uint32_t lastEapolMs_ = 0u;
     std::size_t maxRecordedEvents_ = kMaxRecordedEvents;
     ISessionRecorder* recorder_ = nullptr;
 };

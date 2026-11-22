@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "zd/hal.hpp"
+#include "zd/report.hpp"
 #include "zd/secops_hal.hpp"
 #include "zd/ui_model.hpp"
 
@@ -53,6 +54,8 @@ public:
     explicit AppController(std::string iface = "wlan0")
         : iface_(sec::isValidIfaceName(iface) ? std::move(iface) : std::string("wlan0")) {}
 
+    AppController(const AppController&) = delete;
+    AppController& operator=(const AppController&) = delete;
     ~AppController() { shutdown(); }
 
     // Synchronously wait for any in-flight background job and restore managed WiFi if
@@ -84,13 +87,14 @@ public:
 
     void boot(uint32_t seed = 0xC0FFEEu) {
         pet_.boot(seed, nowMs(), &themeStore_);
+        sec_.setTrustedBssids(themeStore_.loadTrustedBssids());
     }
 
     // --- Per-tick drive (call ~10 Hz from the UI) ---
     void step() {
         pollAsyncJobs();
         const uint32_t now = nowMs();
-        if (!monitoring_ && !actionJob_.running()) {
+        if (!replayMode_ && !monitoring_ && !actionJob_.running()) {
             const char* tag = pet_.stepRadio(now, scanner_);
             if (tag != nullptr && std::string(tag) == "SCAN_DONE") {
                 feedScanIntoSecurity(now);
@@ -99,12 +103,77 @@ public:
         if (monitoring_ && capture_ && capture_->running()) {
             for (const sec::CapturedFrame& f : capture_->poll()) {
                 sec_.ingest(f);
+                if (f.kind == sec::FrameKind::Eapol || f.kind == sec::FrameKind::Pmkid) {
+                    channelHopper_.notifyEapolActivity(now);
+                }
+            }
+            if (hopEnabled_ && !actionJob_.running()) {
+                if (const auto nextCh = channelHopper_.step(now)) {
+                    (void)setChannel(*nextCh);
+                }
             }
             if (sec_.state().revision != lastPetSyncRev_ && (now - lastPetSyncMs_) >= 2000u) {
                 syncPetFromSec(now);
             }
         }
+        if (ble_.available()) {
+            auto devs = ble_.pollBleDevices(now);
+            if (!devs.empty()) {
+                ingestBle(devs);
+            }
+        }
+        if (subGhz_.available()) {
+            if (auto sig = subGhz_.pollSignal(now)) {
+                ingestSubGhz(*sig);
+            }
+        }
         pet_.stepTick(now, power_);
+    }
+
+    // --- Channel hopping & BLE/SubGHz/Report controls ---
+    void setChannelHopEnabled(bool on) { hopEnabled_ = on; }
+    bool channelHopEnabled() const { return hopEnabled_; }
+    void setHop5Ghz(bool on) { channelHopper_.setInclude5Ghz(on); }
+    bool hop5Ghz() const { return channelHopper_.config().include5Ghz; }
+    int currentHopChannel() const { return channelHopper_.currentChannel(); }
+
+    ActionResult requestBleScan() {
+        if (!ble_.available()) {
+            return {false, "bluetoothctl not found on this system"};
+        }
+        return ble_.startAsyncScan() ? ActionResult{true, "BLE scan started..."}
+                                     : ActionResult{false, "BLE scan already in progress"};
+    }
+    bool bleAvailable() const { return ble_.available(); }
+    void clearThreat() { pet_.dispatch(ClearThreatEvent{nowMs()}, &themeStore_); }
+
+    bool toggleTrustBssid(const std::string& bssid) {
+        const bool wasTrusted = sec::isTrustedBssid(sec_.state(), bssid);
+        const bool ok = wasTrusted ? sec_.untrustBssid(bssid) : sec_.trustBssid(bssid);
+        if (ok) {
+            themeStore_.saveTrustedBssids(sec_.state().trustedBssids);
+        }
+        return !wasTrusted && ok;
+    }
+
+    ActionResult exportReport(const std::string& path) const {
+        if (path.empty()) {
+            return {false, "missing output path"};
+        }
+        const std::optional<sec::ReportFormat> fmt = sec::reportFormatFromPath(path);
+        if (!fmt.has_value()) {
+            return {false, "unknown report extension (expected .md, .csv, or .html)"};
+        }
+        const uint32_t refMs = replayMode_ ? sec_.state().lastEventMs : nowMs();
+        const std::string body = sec::formatReport(sec_.state(), *fmt, refMs);
+        const int fd = linux_backend::openSecureWriteRegular(path, /*append=*/false);
+        if (fd < 0) {
+            return {false, "failed to open report file: " + path};
+        }
+        const bool wrote = linux_backend::writeAllFd(fd, body.data(), body.size());
+        ::close(fd);
+        return wrote ? ActionResult{true, "exported report to " + path}
+                     : ActionResult{false, "failed to write report to " + path};
     }
 
     // --- Recon (active scan via NetworkManager; no monitor mode needed) ---
@@ -339,7 +408,8 @@ public:
         }
         replayMode_ = true;
         sec_.loadEvents(*decoded);
-        syncPetFromSec(nowMs());
+        sec_.setTrustedBssids(themeStore_.loadTrustedBssids());
+        syncPetFromSec(sec_.state().lastEventMs);
         return {true, "replayed " + std::to_string(decoded->size()) + " event(s) from " + path +
                           " (" + std::to_string(sec_.state().targets.size()) + " APs, " +
                           std::to_string(sec_.state().stations.size()) + " stations)"};
@@ -418,31 +488,29 @@ private:
                 t.enc != sec::Encryption::Open && t.enc != sec::Encryption::Unknown
             });
         }
-        pet_.dispatch(ScanCompletedEvent{now, std::move(aps)}, &themeStore_);
-        if (!sec_.state().bleTargets.empty()) {
-            std::vector<BleDevice> devs;
-            devs.reserve(sec_.state().bleTargets.size());
-            for (const sec::BleTarget& bt : sec_.state().bleTargets) {
-                devs.push_back(BleDevice{bt.mac, bt.name, bt.rssi, bt.companyId, bt.serviceUuid,
-                                         bt.trackerPayload, bt.threat});
+        std::vector<BleDevice> devs;
+        devs.reserve(sec_.state().bleTargets.size());
+        std::string topThreat;
+        for (const sec::BleTarget& bt : sec_.state().bleTargets) {
+            devs.push_back(BleDevice{bt.mac, bt.name, bt.rssi, bt.companyId, bt.serviceUuid,
+                                     bt.trackerPayload, bt.threat});
+        }
+        for (auto it = sec_.state().alerts.rbegin(); it != sec_.state().alerts.rend(); ++it) {
+            if (it->severity == sec::Severity::Critical || it->severity == sec::Severity::Warn) {
+                topThreat = std::string(sec::alertKindLabel(it->kind)) + " " +
+                            (it->ssid.empty() ? it->bssid : it->ssid);
+                break;
             }
-            pet_.dispatch(BleScanCompletedEvent{now, std::move(devs)}, &themeStore_);
         }
-        if (!sec_.state().subGhzCaptures.empty()) {
-            const sec::SubGhzCapture& c = sec_.state().subGhzCaptures.back();
-            const SubGhzAnomaly anom =
-                c.continuousCarrier
-                    ? SubGhzAnomaly::JammingCarrier
-                    : (c.burstCount >= 5u ? SubGhzAnomaly::ReplayBurst : SubGhzAnomaly::None);
-            pet_.dispatch(
-                SubGhzObservedEvent{now, SubGhzSignal{c.freqKhz, c.rssi, c.protocol, c.burstCount, anom}},
-                &themeStore_);
-        }
+        pet_.dispatch(SyncMonitorSnapshotEvent{
+            now, std::move(aps), std::move(devs),
+            static_cast<uint32_t>(sec_.state().totalAlertsEmitted), std::move(topThreat)},
+            &themeStore_);
     }
 
     void feedScanIntoSecurity(uint32_t now) {
         for (const linux_backend::ScannedAp& ap : scanner_.detailed()) {
-            sec_.dispatch(sec::ApObserved{now, ap.bssid, ap.ssid, ap.channel, ap.rssi, ap.enc});
+            sec_.dispatch(sec::ApObserved{now, ap.bssid, ap.ssid, ap.channel, ap.rssi, ap.enc, ap.wps});
         }
     }
 
@@ -474,9 +542,13 @@ private:
     linux_backend::FileSessionRecorder recorder_;
     std::unique_ptr<sec::ICaptureSource> capture_;
     std::unique_ptr<sec::IInjector> injector_;
+    linux_backend::CliBleScanner ble_;
+    linux_backend::Rtl433Source subGhz_;
+    sec::ChannelHopper channelHopper_;
     CaptureEngine engine_ = CaptureEngine::None;
     bool monitoring_ = false;
     bool replayMode_ = false;
+    bool hopEnabled_ = false;
     uint64_t lastPetSyncRev_ = UINT64_MAX;
     uint32_t lastPetSyncMs_ = 0u;
 

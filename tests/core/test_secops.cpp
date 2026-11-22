@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "zd/report.hpp"
 #include "zd/secops.hpp"
 #include "zd/secops_hal.hpp"
 
@@ -605,6 +606,92 @@ void testBleAndSubGhzDefense() {
     assert(hasAlert(replayed, AlertKind::SubGhzAnomaly));
 }
 
+void testClientBeforeApEvictionTrustHopperAndReport() {
+    // 1. Canonical lowercase normalizeMac fast path matches mixed-case path
+    assert(normalizeMac("aa:bb:cc:dd:ee:ff") == "aa:bb:cc:dd:ee:ff");
+
+    // 2. ClientObserved before ApObserved still counts toward clientCount once beacon arrives
+    SecState s;
+    s = reduce(std::move(s), ClientObserved{100u, "02:aa:bb:cc:dd:01", "02:11:22:33:44:01"});
+    s = reduce(std::move(s), ClientObserved{110u, "02:aa:bb:cc:dd:01", "02:11:22:33:44:02"});
+    s = reduce(std::move(s), ApObserved{120u, "02:aa:bb:cc:dd:01", "Office", 6, -42, Encryption::Wpa2});
+    assert(findTarget(s, "02:aa:bb:cc:dd:01")->clientCount == 2u);
+
+    // 3. Evicting oldest station (> kMaxStations) decrements AP clientCount
+    char staBuf[24];
+    for (uint32_t i = 0u; i < kMaxStations; ++i) {
+        std::snprintf(staBuf, sizeof(staBuf), "02:77:00:00:%02x:%02x", (i >> 8) & 0xff, i & 0xff);
+        s = reduce(std::move(s), ClientObserved{200u + i, "02:aa:bb:cc:dd:01", staBuf});
+    }
+    assert(s.stations.size() == kMaxStations);
+    assert(findTarget(s, "02:aa:bb:cc:dd:01")->clientCount == kMaxStations);
+    // Adding a station for another BSSID evicts one from 02:aa:bb:cc:dd:01 and decrements its count
+    s = reduce(std::move(s), ApObserved{800u, "02:bb:bb:bb:bb:01", "Guest", 1, -60, Encryption::Open});
+    s = reduce(std::move(s), ClientObserved{810u, "02:bb:bb:bb:bb:01", "02:88:00:00:00:01"});
+    assert(findTarget(s, "02:aa:bb:cc:dd:01")->clientCount == kMaxStations - 1u);
+    assert(findTarget(s, "02:bb:bb:bb:bb:01")->clientCount == 1u);
+
+    // 4. Trusted BSSID memory: suppresses self evil-twin alerts & escalates impersonation to Critical
+    SecState tr;
+    assert(trustBssid(tr, "02:aa:bb:cc:dd:10"));
+    assert(isTrustedBssid(tr, "02:AA:BB:CC:DD:10"));
+    tr = reduce(std::move(tr), ApObserved{100u, "02:aa:bb:cc:dd:10", "HomeWiFi", 1, -40, Encryption::Wpa2});
+    assert(trustBssid(tr, "02:aa:bb:cc:dd:11"));
+    tr = reduce(std::move(tr), ApObserved{200u, "02:aa:bb:cc:dd:11", "HomeWiFi", 6, -44, Encryption::Wpa2});
+    assert(!hasAlert(tr, AlertKind::EvilTwin));  // trusted mesh BSSID does not trigger alert
+    tr = reduce(std::move(tr), ApObserved{300u, "02:aa:bb:cc:dd:99", "HomeWiFi", 11, -35, Encryption::Wpa2});
+    assert(hasAlert(tr, AlertKind::EvilTwin, "02:aa:bb:cc:dd:99"));
+    assert(tr.alerts.back().severity == Severity::Critical);
+    assert(untrustBssid(tr, "02:aa:bb:cc:dd:11"));
+    assert(!isTrustedBssid(tr, "02:aa:bb:cc:dd:11"));
+
+    // 5. ChannelHopper 2.4/5GHz + 3s EAPOL handshake hold
+    ChannelHopper hopper(ChannelHopper::Config{false, 350u, 3000u});
+    assert(hopper.step(0u).value_or(-1) == 1);
+    assert(!hopper.step(200u).has_value());
+    assert(hopper.step(350u).value_or(-1) == 6);
+    hopper.notifyEapolActivity(400u);
+    assert(!hopper.step(2000u).has_value());
+    assert(hopper.step(3400u).value_or(-1) == 11);
+    hopper.setInclude5Ghz(true);
+    assert(hopper.schedule().size() > 11u);
+
+    // 6. M1 carrying PMKID + M2 records BOTH pmkid AND handshake
+    SecSession pmSess;
+    CapturedFrame m1p{};
+    m1p.nowMs = 100u;
+    m1p.kind = FrameKind::Pmkid;
+    m1p.bssid = "02:aa:bb:cc:dd:ee";
+    m1p.station = "02:11:22:33:44:55";
+    m1p.hasStation = true;
+    m1p.eapolMsg = 1u;
+    m1p.hasPmkid = true;
+    pmSess.ingest(m1p);
+    CapturedFrame m2{};
+    m2 = m1p;
+    m2.nowMs = 120u;
+    m2.kind = FrameKind::Eapol;
+    m2.eapolMsg = 2u;
+    m2.hasPmkid = false;
+    pmSess.ingest(m2);
+    const WifiTarget* pmTgt = findTarget(pmSess.state(), "02:aa:bb:cc:dd:ee");
+    assert(pmTgt != nullptr && pmTgt->pmkid && pmTgt->handshake);
+
+    // 7. Pure Report Exporter escaping (CSV formula injection + HTML XSS)
+    SecState repState;
+    repState = reduce(std::move(repState),
+                      ApObserved{100u, "02:11:22:33:44:55", "=cmd|<script>alert(1)</script>",
+                                 6, -50, Encryption::Open, true});
+    const std::string csv = formatReport(repState, ReportFormat::Csv, 500u);
+    assert(csv.find("\"'=cmd") != std::string::npos);
+    const std::string html = formatReport(repState, ReportFormat::Html, 500u);
+    assert(html.find("<script>") == std::string::npos);
+    assert(html.find("&lt;script&gt;") != std::string::npos);
+    assert(reportFormatFromPath("out.HTML") == ReportFormat::Html);
+    assert(reportFormatFromPath("out.md") == ReportFormat::Markdown);
+    assert(!reportFormatFromPath("out.txt").has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -631,6 +718,7 @@ int main() {
     testStationZeroTimestampAndClockSkew();
     testHardeningInvariants();
     testBleAndSubGhzDefense();
+    testClientBeforeApEvictionTrustHopperAndReport();
     std::cout << "[secops] all security-engine tests passed\n";
     return 0;
 }

@@ -26,6 +26,11 @@
     SatelliteBeam: 'SatelliteBeam'
   });
 
+  const FaceStyle = Object.freeze({
+    ClassicFace: 'ClassicFace',
+    PixelArtMascot: 'PixelArtMascot'
+  });
+
   const THEME_TOAST_MS = 1600;
 
   function rgb565(r, g, b) {
@@ -137,6 +142,14 @@
     return idx >= 0 ? THEME_CATALOG[idx] : THEME_CATALOG[0];
   }
 
+  function themeFaceStyle(id) {
+    const resolved = themeSpec(id).id;
+    if (resolved === ThemeId.PaperInk || resolved === ThemeId.CodeRain) {
+      return FaceStyle.ClassicFace;
+    }
+    return FaceStyle.PixelArtMascot;
+  }
+
   function resolvePalette(id) {
     return themeSpec(id).palette;
   }
@@ -204,6 +217,7 @@
   const themes = Object.freeze({
     ThemeId,
     ThemeEffect,
+    FaceStyle,
     THEME_CATALOG,
     THEME_COUNT: THEME_CATALOG.length,
     THEME_TOAST_MS,
@@ -212,6 +226,7 @@
     themeIndex,
     isValidTheme,
     themeSpec,
+    themeFaceStyle,
     resolvePalette,
     cycleTheme,
     nextTheme,

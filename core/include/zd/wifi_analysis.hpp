@@ -163,6 +163,50 @@ inline ScanSummary summarizeScan(const std::vector<AccessPoint>& rawNetworks,
 
 // --- Pure BLE Tracker / Multi-Tool & Sub-GHz Helpers ----------------------------------
 
+// Extracts a primary 16-bit BLE Service UUID (0x02/0x03 UUID lists or 0x16 Service Data AD)
+// from a raw BLE advertisement payload, prioritizing multi-tool/tracker signatures.
+inline uint16_t extractBle16ServiceUuid(const uint8_t* payload, std::size_t len) {
+    if (payload == nullptr || len == 0u) {
+        return 0u;
+    }
+    uint16_t firstUuid = 0u;
+    std::size_t pos = 0u;
+    while (pos < len) {
+        const uint8_t adLen = payload[pos];
+        if (adLen == 0u || pos + 1u + static_cast<std::size_t>(adLen) > len) {
+            break;
+        }
+        const uint8_t adType = payload[pos + 1u];
+        const std::size_t dataStart = pos + 2u;
+        const std::size_t dataEnd = pos + 1u + static_cast<std::size_t>(adLen);
+        if ((adType == 0x02u || adType == 0x03u) && (dataEnd - dataStart) >= 2u) {
+            for (std::size_t k = dataStart; k + 1u < dataEnd; k += 2u) {
+                const uint16_t uuid = static_cast<uint16_t>(
+                    static_cast<uint16_t>(payload[k]) |
+                    (static_cast<uint16_t>(payload[k + 1u]) << 8u));
+                if (uuid == 0xFEEDu || (uuid >= 0x3080u && uuid <= 0x3083u)) {
+                    return uuid;
+                }
+                if (firstUuid == 0u && uuid != 0u) {
+                    firstUuid = uuid;
+                }
+            }
+        } else if (adType == 0x16u && (dataEnd - dataStart) >= 2u) {
+            const uint16_t uuid = static_cast<uint16_t>(
+                static_cast<uint16_t>(payload[dataStart]) |
+                (static_cast<uint16_t>(payload[dataStart + 1u]) << 8u));
+            if (uuid == 0xFEEDu || (uuid >= 0x3080u && uuid <= 0x3083u)) {
+                return uuid;
+            }
+            if (firstUuid == 0u && uuid != 0u) {
+                firstUuid = uuid;
+            }
+        }
+        pos = dataEnd;
+    }
+    return firstUuid;
+}
+
 inline std::string toLowerAscii(std::string_view s) {
     std::string out;
     out.reserve(s.size());

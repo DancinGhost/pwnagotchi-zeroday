@@ -17,6 +17,10 @@ else
     HAVE_PCAP := 1
 endif
 
+HAVE_NCURSES := $(shell (pkg-config --exists ncurses 2>/dev/null || test -f /usr/include/ncurses.h || test -f /usr/include/ncurses/ncurses.h) && echo 1 || echo 0)
+NCURSES_CFLAGS := $(shell pkg-config --cflags ncurses 2>/dev/null)
+NCURSES_LIBS   := $(or $(shell pkg-config --libs ncurses 2>/dev/null),-lncurses)
+
 .PHONY: all test sim demo linux web-serve clean dist
 
 all: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops \
@@ -53,12 +57,19 @@ $(BUILD)/zd_sim: platforms/native/main.cpp core/include/zd/*.hpp render/include/
 # Linux desktop CLI/TUI (hybrid backend; native libpcap capture/injection + CLI fallback).
 # The Qt6 GUI (zd-gui) is built via CMake: cmake -B build_cmake && cmake --build build_cmake
 $(BUILD)/zd-linux: platforms/linux/cli/main.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp platforms/linux/app/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) $(if $(filter 1,$(HAVE_PCAP)),-DZD_WITH_LIBPCAP) $(LINUX_INCLUDES) $(PCAP_CFLAGS) \
-		platforms/linux/cli/main.cpp $(HARDEN_LDFLAGS) -lncurses -lpthread $(PCAP_LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) $(if $(filter 1,$(HAVE_PCAP)),-DZD_WITH_LIBPCAP) $(LINUX_INCLUDES) $(PCAP_CFLAGS) $(NCURSES_CFLAGS) \
+		platforms/linux/cli/main.cpp $(HARDEN_LDFLAGS) $(NCURSES_LIBS) -lpthread $(PCAP_LIBS) -o $@
 
+ifeq ($(HAVE_NCURSES),1)
 linux: $(BUILD)/zd-linux
+LINUX_DEP := $(BUILD)/zd-linux
+else
+linux:
+	@echo "[skip] ncurses headers not found; skipping zd-linux"
+LINUX_DEP :=
+endif
 
-test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell $(BUILD)/test_esp32_common $(BUILD)/zd-linux $(BUILD)/zd_sim
+test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $(BUILD)/test_linux_parsers $(BUILD)/test_dot11_frames $(BUILD)/test_linux_shell $(BUILD)/test_esp32_common $(BUILD)/zd_sim $(LINUX_DEP)
 	./$(BUILD)/test_functional_core
 	./$(BUILD)/test_painter
 	./$(BUILD)/test_secops
@@ -67,7 +78,11 @@ test: $(BUILD)/test_functional_core $(BUILD)/test_painter $(BUILD)/test_secops $
 	./$(BUILD)/test_linux_shell
 	./$(BUILD)/test_esp32_common
 	python3 tests/scripts/test_flasher.py
+ifeq ($(HAVE_NCURSES),1)
 	python3 tests/scripts/test_linux_cli.py --zd-linux ./$(BUILD)/zd-linux --zd-sim ./$(BUILD)/zd_sim
+else
+	@echo "[skip] ncurses not found; skipping zd-linux CLI smoke tests"
+endif
 	node platforms/web/test_web_core.js
 
 sim: $(BUILD)/zd_sim

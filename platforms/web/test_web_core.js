@@ -154,7 +154,7 @@ function testStateReducerAndPlayfulEvents() {
   const sPwn = logic.reduce(sSnack, {
     type: 'ToyHandshake',
     nowMs: 99000,
-    targetSsid: 'Gibson_Mainframe'
+    targetSsid: 'Mainframe_Lab'
   });
   assert.strictEqual(sPwn.mood, logic.Mood.Mischief);
   assert.strictEqual(sPwn.toyHandshakes, 1);
@@ -226,25 +226,29 @@ function testResponsiveUiAndPixelRasterizer() {
   assert.ok(compactFrame.headerLine.length <= 26);
   assert.ok(compactFrame.footerLine.length <= 26);
 
-  // Paint every mood and every page onto pixel buffer without error and verify foreground pixels exist
+  // Paint every mood (both ClassicFace and PixelArtMascot themes) onto pixel buffer without error
   const allMoods = Object.values(logic.Mood);
-  for (const mood of allMoods) {
-    const moodState = Object.assign({}, state, { mood });
-    const frame = ui.buildUiFrame(moodState, { width: 240, height: 135 });
-    const buf = gfxMod.createPixelBuffer(240, 135);
-    gfxMod.paintUiFrame(buf, frame, { blink: false });
+  for (const themeId of [themes.ThemeId.PaperInk, themes.ThemeId.ZeroDayCyan]) {
+    for (const mood of allMoods) {
+      const moodState = Object.assign({}, state, { mood, theme: themeId });
+      const frame = ui.buildUiFrame(moodState, { width: 240, height: 135 });
+      assert.strictEqual(frame.faceGeom.centerX, 120);
+      assert.strictEqual(frame.faceStyle, themes.themeFaceStyle(themeId));
+      const buf = gfxMod.createPixelBuffer(240, 135);
+      gfxMod.paintUiFrame(buf, frame, { blink: false });
 
-    let nonBgPixels = 0;
-    for (let p = 0; p < buf.data.length; p += 4) {
-      if (
-        buf.data[p] !== frame.palette.bg.r ||
-        buf.data[p + 1] !== frame.palette.bg.g ||
-        buf.data[p + 2] !== frame.palette.bg.b
-      ) {
-        nonBgPixels++;
+      let nonBgPixels = 0;
+      for (let p = 0; p < buf.data.length; p += 4) {
+        if (
+          buf.data[p] !== frame.palette.bg.r ||
+          buf.data[p + 1] !== frame.palette.bg.g ||
+          buf.data[p + 2] !== frame.palette.bg.b
+        ) {
+          nonBgPixels++;
+        }
       }
+      assert.ok(nonBgPixels > 250, 'Expected visible foreground pixels for mood ' + mood);
     }
-    assert.ok(nonBgPixels > 250, 'Expected visible foreground pixels for mood ' + mood);
   }
 
   for (const page of Object.values(logic.ScreenPage)) {
@@ -280,6 +284,14 @@ function testThemesMultiDeviceAndCppParity() {
   assert.strictEqual(themes.themeFromKey('crimson'), themes.ThemeId.RedTeam);
   assert.strictEqual(themes.themeFromKey('redrain'), themes.ThemeId.RedTeam);
   assert.strictEqual(themes.themeFromKey('operator'), themes.ThemeId.BlueTeam);
+
+  // FaceStyle parity across Classic vs PixelArtMascot themes
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.PaperInk), themes.FaceStyle.ClassicFace);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.CodeRain), themes.FaceStyle.ClassicFace);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.ZeroDayCyan), themes.FaceStyle.PixelArtMascot);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.AmberCrt), themes.FaceStyle.PixelArtMascot);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.RedTeam), themes.FaceStyle.PixelArtMascot);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.BlueTeam), themes.FaceStyle.PixelArtMascot);
 
   // Toast lifecycle & multi-device rendering across all 5 screen profiles
   let s = logic.initialState(77);
@@ -333,7 +345,15 @@ function testThemesMultiDeviceAndCppParity() {
     'matrix',
     'airtag',
     'findmy',
-    'smarttag'
+    'smarttag',
+    'wall_of_sheep',
+    'gibson',
+    'zerocool',
+    'acidburn',
+    'keeloq',
+    'lan_solo',
+    'starbucks',
+    'xfinity'
   ];
   for (const kind of Object.values(wifi.BleThreatKind)) {
     const lbl = wifi.bleThreatLabel(kind).toLowerCase();
@@ -391,6 +411,17 @@ function testThemesMultiDeviceAndCppParity() {
         lower.includes(term),
         false,
         'FUNNY_HACKER_SSIDS entry "' + ssid + '" must not contain restricted brand term "' + term + '"'
+      );
+    }
+  }
+  for (let i = 0; i < 12; i++) {
+    const subEv = sim.generateSubGhzEvent('con', 433920, 100 + i * 37);
+    const proto = String(subEv.signal.protocol || '').toLowerCase();
+    for (const term of bannedTerms) {
+      assert.strictEqual(
+        proto.includes(term),
+        false,
+        'SubGHz protocol "' + subEv.signal.protocol + '" must not contain restricted brand term "' + term + '"'
       );
     }
   }
@@ -503,13 +534,66 @@ function testWebAccessibilityMarkup() {
   assert.ok(css.includes('min-width: 24px') && css.includes('min-height: 24px'),
     'Remove button targets must meet WCAG 2.5.8 24x24px minimum');
 
-  // Verify canvas_gfx zero-copy backing buffer & cross-product fillArc parity.
+  // Parity check: deriveLevelInfo integer truncation & OpsMode decoupling & threat expiry
+  assert.strictEqual(logic.deriveLevelInfo(45).progressPct, 7, 'Math.floor((5*100)/70) === 7 matching C++');
+  const baseSt = logic.initialState(42);
+  const cycOff = logic.reduce(baseSt, { type: 'SetOpsMode', nowMs: 100, mode: logic.OpsMode.Offensive });
+  assert.strictEqual(cycOff.opsMode, logic.OpsMode.Offensive);
+  assert.strictEqual(cycOff.offensiveArmed, false, 'SetOpsMode must not flip offensiveArmed');
+  const thrEv = logic.reduce(baseSt, {
+    type: 'SubGhzObserved',
+    nowMs: 1000,
+    signal: { freqKhz: 433920, rssi: -50, protocol: 'OOK', burstCount: 6, anomaly: wifi.SubGhzAnomaly.ReplayBurst }
+  });
+  assert.ok(thrEv.lastThreatLabel.length > 0 && thrEv.lastThreatMs === 1000);
+  const thrExpired = logic.reduce(thrEv, {
+    type: 'Tick',
+    nowMs: 1000 + logic.THREAT_DISPLAY_TIMEOUT_MS,
+    batteryPercent: 90,
+    isCharging: false
+  });
+  assert.strictEqual(thrExpired.lastThreatLabel, '');
+  const thrAck = logic.reduce(thrEv, { type: 'ClearThreat', nowMs: 1500 });
+  assert.strictEqual(thrAck.lastThreatLabel, '');
+
+  // Exact faceForMood C++ <-> JS parity
+  const petLogicCppPath = path.resolve(__dirname, '../../core/include/zd/pet_logic.hpp');
+  const petLogicCpp = fs.readFileSync(petLogicCppPath, 'utf8');
+  const faceRe =
+    /case\s+Mood::(\w+):\s+return\s+\{EyeGlyph::(\w+),\s*MouthGlyph::(\w+),\s*(true|false),\s*(true|false),\s*(true|false),\s*"([^"]+)",\s*"([^"]+)"\};/g;
+  let fm;
+  let faceChecked = 0;
+  while ((fm = faceRe.exec(petLogicCpp)) !== null) {
+    const jf = logic.faceForMood(fm[1]);
+    assert.strictEqual(jf.eyes, fm[2], 'EyeGlyph mismatch for Mood::' + fm[1]);
+    assert.strictEqual(jf.mouth, fm[3], 'MouthGlyph mismatch for Mood::' + fm[1]);
+    assert.strictEqual(jf.showBlush, fm[4] === 'true');
+    assert.strictEqual(jf.showTear, fm[5] === 'true');
+    assert.strictEqual(jf.showZzz, fm[6] === 'true');
+    assert.strictEqual(jf.asciiFace, fm[7], 'asciiFace mismatch for Mood::' + fm[1]);
+    assert.strictEqual(jf.moodLabel, fm[8], 'moodLabel mismatch for Mood::' + fm[1]);
+    faceChecked++;
+  }
+  assert.strictEqual(faceChecked, 16, 'Expected 16 C++ faceForMood entries');
+
+  // Verify canvas_gfx zero-copy backing buffer, cross-product fillArc, & no trademarked mascot symbols
   const gfxSrc = fs.readFileSync(path.resolve(__dirname, './js/canvas_gfx.js'), 'utf8');
+  assert.strictEqual(/flipper/i.test(gfxSrc), false, 'canvas_gfx.js must not contain trademarked mascot names');
+  const painterCpp = fs.readFileSync(path.resolve(__dirname, '../../render/include/zd/render/painter.hpp'), 'utf8');
+  assert.strictEqual(/flipper/i.test(painterCpp), false, 'painter.hpp must not contain trademarked mascot names');
   assert.strictEqual(gfxSrc.includes('Math.atan2'), false,
     'canvas_gfx.js fillArc should use cross-product half-plane test matching surface_rgb565.hpp');
   const shared = new Uint8ClampedArray(128 * 64 * 4);
   const directBuf = gfxMod.createPixelBuffer(128, 64, shared);
   assert.strictEqual(directBuf.data, shared, 'createPixelBuffer must write directly into backing array');
+
+  // Verify PWA manifest, service worker, icon SVG & Share Link button
+  assert.ok(html.includes('id="btn-share-link"'), 'Must include Share Link permalink button');
+  assert.ok(html.includes('rel="manifest" href="./manifest.json"'), 'index.html must link manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, './manifest.json'), 'utf8'));
+  assert.ok(manifest.name && Array.isArray(manifest.icons) && manifest.icons.length > 0);
+  assert.ok(fs.existsSync(path.resolve(__dirname, './sw.js')), 'sw.js must exist');
+  assert.ok(fs.readFileSync(path.resolve(__dirname, './icon.svg'), 'utf8').includes('<svg'));
 
   // Lightweight DOM harness smoke-test of app.js interactions & CSP-safe behavior.
   const vm = require('vm');

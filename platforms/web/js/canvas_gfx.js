@@ -8,6 +8,7 @@
     (typeof require === 'function' ? require('./pet_logic.js') : null);
 
   // Classic 5x7 GLCD / Adafruit GFX Font0 printable ASCII (0x20 ' ' .. 0x7E '~'), 5 bytes/char.
+  // Copyright (c) 2012 Adafruit Industries (Adafruit_GFX glcdfont.c), BSD-2-Clause (see THIRD_PARTY_NOTICES.md).
   // Bit 0 (0x01) = top pixel row, Bit 6 (0x40) = bottom pixel row, Bit 7 (0x80) = descender.
   const FONT_5X7 = [
     [0x00, 0x00, 0x00, 0x00, 0x00], // 32 ' '
@@ -107,6 +108,18 @@
     [0x08, 0x04, 0x08, 0x10, 0x08]  // 126 '~'
   ];
 
+  const IS_LITTLE_ENDIAN =
+    new Uint8Array(new Uint32Array([0x01020304]).buffer)[0] === 0x04;
+
+  function packRgba32(col) {
+    const r = col.r & 0xFF;
+    const g = col.g & 0xFF;
+    const b = col.b & 0xFF;
+    return IS_LITTLE_ENDIAN
+      ? (((255 << 24) | (b << 16) | (g << 8) | r) >>> 0)
+      : (((r << 24) | (g << 16) | (b << 8) | 255) >>> 0);
+  }
+
   // Headless-safe RGBA pixel buffer mimicking M5Canvas / M5GFX primitives.
   // Accepts an optional pre-allocated Uint8ClampedArray (e.g. ImageData.data) for zero-copy blitting.
   function createPixelBuffer(width, height, backingData) {
@@ -115,6 +128,9 @@
     const data = backingData && backingData.length === w * h * 4
       ? backingData
       : new Uint8ClampedArray(w * h * 4);
+    const data32 = (data.byteOffset % 4 === 0 && (data.byteLength % 4) === 0)
+      ? new Uint32Array(data.buffer, data.byteOffset, w * h)
+      : null;
     let textFg = { r: 255, g: 255, b: 255 };
     let textBg = null;
 
@@ -130,6 +146,10 @@
     }
 
     function fillScreen(col) {
+      if (data32) {
+        data32.fill(packRgba32(col));
+        return;
+      }
       for (let i = 0; i < data.length; i += 4) {
         data[i] = col.r;
         data[i + 1] = col.g;
@@ -143,6 +163,15 @@
       const y0 = Math.max(0, Math.trunc(y));
       const x1 = Math.min(w, Math.trunc(x) + Math.trunc(rw));
       const y1 = Math.min(h, Math.trunc(y) + Math.trunc(rh));
+      if (x0 >= x1 || y0 >= y1) return;
+      if (data32) {
+        const p32 = packRgba32(col);
+        for (let py = y0; py < y1; py++) {
+          const row = py * w;
+          data32.fill(p32, row + x0, row + x1);
+        }
+        return;
+      }
       for (let py = y0; py < y1; py++) {
         let idx = (py * w + x0) * 4;
         for (let px = x0; px < x1; px++) {
@@ -190,12 +219,16 @@
         setPixel(cx, cy, col);
         return;
       }
-      const limitSq = r * r + r * 0.4;
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (dx * dx + dy * dy <= limitSq) {
-            setPixel(cx + dx, cy + dy, col);
-          }
+      const rSq = r * r;
+      let dx = r;
+      for (let dy = 0; dy <= r; dy++) {
+        while (dx > 0 && dx * dx + dy * dy > rSq) {
+          dx--;
+        }
+        const span = 2 * dx + 1;
+        fillRect(cx - dx, cy + dy, span, 1, col);
+        if (dy !== 0) {
+          fillRect(cx - dx, cy - dy, span, 1, col);
         }
       }
     }
@@ -205,18 +238,25 @@
       const y = Math.trunc(yIn);
       const rw = Math.trunc(rwIn);
       const rh = Math.trunc(rhIn);
+      if (rw <= 0 || rh <= 0) return;
       const rad = Math.max(0, Math.min(Math.trunc(radiusIn), Math.floor(Math.min(rw, rh) / 2)));
-      if (rad <= 0) {
-        fillRect(x, y, rw, rh, col);
-        return;
-      }
       fillRect(x + rad, y, rw - 2 * rad, rh, col);
       fillRect(x, y + rad, rad, rh - 2 * rad, col);
       fillRect(x + rw - rad, y + rad, rad, rh - 2 * rad, col);
-      fillCircle(x + rad, y + rad, rad, col);
-      fillCircle(x + rw - rad - 1, y + rad, rad, col);
-      fillCircle(x + rad, y + rh - rad - 1, rad, col);
-      fillCircle(x + rw - rad - 1, y + rh - rad - 1, rad, col);
+      if (rad > 0) {
+        const rSq = rad * rad;
+        let dx = rad;
+        for (let dy = 0; dy <= rad; dy++) {
+          while (dx > 0 && dx * dx + dy * dy > rSq) {
+            dx--;
+          }
+          const topX = x + rad - dx;
+          fillRect(topX, y + rad - dy, dx + 1, 1, col);
+          fillRect(x + rw - 1 - rad, y + rad - dy, dx + 1, 1, col);
+          fillRect(topX, y + rh - 1 - rad + dy, dx + 1, 1, col);
+          fillRect(x + rw - 1 - rad, y + rh - 1 - rad + dy, dx + 1, 1, col);
+        }
+      }
     }
 
     // M5GFX fillArc convention: 0 deg = +X (right), 90 deg = +Y (down),
@@ -697,49 +737,358 @@
     }
   }
 
-  function drawPetFacePage(gfx, frame, opts) {
-    drawPwnagotchiFace(gfx, frame, opts);
-    drawActivitySceneWidget(gfx, frame);
+  function drawClassicFaceProps(gfx, frame) {
+    if (frame.dims.width < 160 || frame.dims.height < 72) return;
+    const g = frame.faceGeom;
+    const pal = frame.palette;
+    const animTick = frame.animTick >>> 0;
+    const tipCol = (animTick & 1) !== 0 ? pal.highlight : pal.accent;
 
-    if (!frame.compact) {
-      gfx.drawLine(
-        frame.speechX - 6,
-        frame.headerDividerY + 5,
-        frame.speechX - 6,
-        frame.footerDividerY - 5,
-        frame.palette.muted
-      );
+    const antW = frame.compact ? 2 : 3;
+    const antH = frame.compact ? 4 : 6;
+    const antY = g.centerY - g.bracketHalfHeight + 2;
+    const lAntX = g.centerX - g.bracketOffsetX - antW;
+    const rAntX = g.centerX + g.bracketOffsetX;
+    if (lAntX >= 2 && rAntX + antW < frame.dims.width - 2 && antY > frame.headerDividerY + 2) {
+      gfx.fillRect(lAntX, antY, antW, antH, pal.accent);
+      gfx.fillRect(lAntX + Math.trunc(antW / 2), antY - 2, 1, 2, pal.fg);
+      gfx.fillRect(lAntX + Math.trunc(antW / 2) - 1, antY - 3, 2, 2, tipCol);
+
+      gfx.fillRect(rAntX, antY, antW, antH, pal.accent);
+      gfx.fillRect(rAntX + Math.trunc(antW / 2), antY - 2, 1, 2, pal.fg);
+      gfx.fillRect(rAntX + Math.trunc(antW / 2), antY - 3, 2, 2, tipCol);
     }
+
+    if (frame.compact || frame.dims.width < 220) return;
+    const p = frame.dims.width >= 300 && frame.dims.height >= 180 ? 2 : 1;
+    const lx = g.centerX - g.bracketOffsetX - 13 * p - 6;
+    const ly = g.centerY - 3 * p;
+    if (lx >= 4 && ly + 9 * p < g.moodBadgeY) {
+      gfx.fillRect(lx + p, ly, 9 * p, 6 * p, pal.accent);
+      gfx.fillRect(lx + 2 * p, ly + p, 7 * p, 4 * p, pal.bg);
+      gfx.fillRect(lx + 3 * p, ly + 2 * p, 4 * p, p, pal.fg);
+      gfx.fillRect(lx + 3 * p, ly + 4 * p, ((animTick & 1) ? 5 : 3) * p, p, pal.highlight);
+      gfx.fillRect(lx, ly + 6 * p, 11 * p, 2 * p, pal.fg);
+    }
+    const rx = g.centerX + g.bracketOffsetX + 7;
+    const ry = g.centerY - 4 * p;
+    const rw = 14 * p;
+    const rh = 11 * p;
+    if (rx + rw <= frame.dims.width - 4 && ry + rh < g.moodBadgeY) {
+      if (frame.scene === 'RadarDish' || frame.face.moodLabel.charAt(0) === 'D') {
+        drawPixelArtDish(gfx, rx, ry, rw, rh, pal, animTick);
+      } else if (frame.scene === 'SatelliteBeam') {
+        drawPixelArtSatellite(gfx, rx, ry, rw, rh, pal, animTick);
+      } else if (frame.scene === 'ThreatShield') {
+        drawPixelArtShield(gfx, rx, ry, 12 * p, rh, pal, animTick, Boolean(frame.threatBanner));
+      } else {
+        gfx.fillRect(rx, ry + 9 * p, 12 * p, 2 * p, pal.accent);
+        for (let i = 0; i < 4; i++) {
+          const lv = ((animTick + i) % 4) + 1;
+          const bh = lv * 2 * p;
+          gfx.fillRect(rx + i * 3 * p + p, ry + 9 * p - bh, 2 * p, bh, lv >= 4 ? pal.highlight : pal.fg);
+        }
+      }
+    }
+  }
+
+  function drawMascotEyes(gfx, cx, cy, px, style, pal, animTick) {
+    const r = function (gx, gy, gw, gh, col) {
+      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
+    };
+
+    switch (style) {
+      case logic.EyeGlyph.RoundCenter:
+        r(-5, -5, 3, 3, pal.fg); r(-5, -5, 1, 1, pal.bg);
+        r(2, -5, 3, 3, pal.fg); r(2, -5, 1, 1, pal.bg);
+        break;
+      case logic.EyeGlyph.RoundLeft:
+        r(-6, -5, 3, 3, pal.fg); r(-6, -5, 1, 1, pal.bg);
+        r(1, -5, 3, 3, pal.fg); r(1, -5, 1, 1, pal.bg);
+        break;
+      case logic.EyeGlyph.RoundRight:
+        r(-4, -5, 3, 3, pal.fg); r(-4, -5, 1, 1, pal.bg);
+        r(3, -5, 3, 3, pal.fg); r(3, -5, 1, 1, pal.bg);
+        break;
+      case logic.EyeGlyph.HappyArc:
+        r(-5, -3, 1, 1, pal.fg); r(-4, -4, 1, 1, pal.fg); r(-3, -3, 1, 1, pal.fg);
+        r(2, -3, 1, 1, pal.fg); r(3, -4, 1, 1, pal.fg); r(4, -3, 1, 1, pal.fg);
+        break;
+      case logic.EyeGlyph.WideSparkle:
+        r(-6, -5, 4, 3, pal.fg); r(-5, -4, 2, 1, pal.bg); r(-5, -4, 1, 1, pal.highlight);
+        r(2, -5, 4, 3, pal.fg); r(3, -4, 2, 1, pal.bg); r(4, -4, 1, 1, pal.highlight);
+        break;
+      case logic.EyeGlyph.Sunglasses:
+        r(-6, -5, 5, 3, pal.fg); r(-5, -5, 1, 1, pal.bg);
+        r(1, -5, 5, 3, pal.fg); r(2, -5, 1, 1, pal.bg);
+        r(-1, -5, 2, 1, pal.fg);
+        break;
+      case logic.EyeGlyph.SadDroop:
+        r(-6, -6, 2, 1, pal.fg); r(-5, -5, 2, 3, pal.fg);
+        r(4, -6, 2, 1, pal.fg); r(3, -5, 2, 3, pal.fg);
+        break;
+      case logic.EyeGlyph.HalfLid:
+        r(-5, -4, 3, 1, pal.fg); r(-5, -3, 2, 1, pal.accent);
+        r(2, -4, 3, 1, pal.fg); r(3, -3, 2, 1, pal.accent);
+        break;
+      case logic.EyeGlyph.SleepingLine:
+        r(-5, -3, 3, 1, pal.fg);
+        r(2, -3, 3, 1, pal.fg);
+        break;
+      case logic.EyeGlyph.CyberWink:
+        r(-5, -5, 1, 1, pal.fg); r(-4, -4, 1, 1, pal.fg); r(-5, -3, 1, 1, pal.fg);
+        r(2, -5, 3, 3, pal.fg); r(3, -4, 1, 1, pal.highlight);
+        break;
+      case logic.EyeGlyph.LaserVisor: {
+        r(-6, -4, 12, 2, pal.fg);
+        const lx = -5 + ((animTick * 2) % 9);
+        r(lx, -4, 2, 2, pal.highlight);
+        break;
+      }
+      case logic.EyeGlyph.ShieldVisor:
+        r(-6, -5, 5, 3, pal.fg); r(-5, -4, 3, 1, pal.bg); r(-4, -4, 1, 1, pal.accent);
+        r(1, -5, 5, 3, pal.fg); r(2, -4, 3, 1, pal.bg); r(3, -4, 1, 1, pal.accent);
+        break;
+      case logic.EyeGlyph.StarEyes: {
+        const sc = (animTick & 1) !== 0 ? pal.highlight : pal.fg;
+        r(-5, -4, 3, 1, sc); r(-4, -5, 1, 3, sc);
+        r(2, -4, 3, 1, sc); r(3, -5, 1, 3, sc);
+        break;
+      }
+      case logic.EyeGlyph.AlertRing:
+        r(-5, -5, 3, 3, pal.highlight);
+        r(-4, -4, 1, 1, (animTick & 1) === 0 ? pal.fg : pal.bg);
+        r(2, -5, 3, 3, pal.highlight);
+        r(3, -4, 1, 1, (animTick & 1) === 0 ? pal.fg : pal.bg);
+        break;
+    }
+  }
+
+  function drawMascotMouth(gfx, cx, cy, px, mouth, pal) {
+    const r = function (gx, gy, gw, gh, col) {
+      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
+    };
+
+    switch (mouth) {
+      case logic.MouthGlyph.DoubleSmile:
+        r(-3, 0, 2, 1, pal.fg); r(-1, -1, 2, 1, pal.fg); r(1, 0, 2, 1, pal.fg);
+        break;
+      case logic.MouthGlyph.BigGrin:
+        r(-3, -1, 6, 1, pal.fg); r(-2, 0, 4, 2, pal.fg); r(-1, 0, 2, 1, pal.highlight);
+        break;
+      case logic.MouthGlyph.Smirk:
+        r(-3, 0, 5, 1, pal.fg); r(2, -1, 1, 1, pal.fg);
+        break;
+      case logic.MouthGlyph.FlatLine:
+        r(-3, 0, 6, 1, pal.fg);
+        break;
+      case logic.MouthGlyph.SadWave:
+        r(-2, 0, 4, 1, pal.fg); r(-3, 1, 1, 1, pal.fg); r(2, 1, 1, 1, pal.fg);
+        break;
+      case logic.MouthGlyph.Fangs:
+        r(-3, 0, 6, 1, pal.fg); r(-3, 1, 1, 1, pal.fg); r(2, 1, 1, 1, pal.fg);
+        break;
+    }
+  }
+
+  function drawPixelArtMascot(gfx, frame, opts) {
+    const g = frame.faceGeom;
+    const pal = frame.palette;
+    const f = frame.face;
+    const animTick = frame.animTick >>> 0;
+    const blink = Boolean(opts && opts.blink) && canBlinkStyle(f.eyes);
+    const eyeStyle = blink ? logic.EyeGlyph.SleepingLine : f.eyes;
+
+    const micro = frame.dims.width < 150 || frame.dims.height < 72;
+    const wide = frame.dims.width >= 300 && frame.dims.height >= 180;
+    const px = micro || frame.compact ? 1 : wide ? 3 : 2;
+    const cx = g.centerX;
+    const cy = g.centerY;
+
+    const r = function (gx, gy, gw, gh, col) {
+      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
+    };
+
+    // Ears & antenna
+    r(-7, -9, 2, 2, pal.fg); r(-6, -10, 1, 1, pal.accent);
+    r(5, -9, 2, 2, pal.fg); r(5, -10, 1, 1, pal.accent);
+    r(0, -9, 1, 2, pal.accent);
+    r(-1, -10, 3, 1, (animTick & 1) !== 0 ? pal.highlight : pal.fg);
+
+    // Headphones & head chassis
+    r(-10, -5, 2, 5, pal.accent); r(-11, -4, 1, 3, pal.highlight);
+    r(8, -5, 2, 5, pal.accent); r(10, -4, 1, 3, pal.highlight);
+    r(-8, -7, 16, 10, pal.fg);
+    r(-8, -7, 1, 1, pal.bg); r(7, -7, 1, 1, pal.bg);
+    r(-8, 2, 1, 1, pal.bg); r(7, 2, 1, 1, pal.bg);
+    r(-7, -6, 14, 8, pal.bg);
+
+    drawMascotEyes(gfx, cx, cy, px, eyeStyle, pal, animTick);
+    drawMascotMouth(gfx, cx, cy, px, f.mouth, pal);
+
+    if (f.showBlush) {
+      r(-6, -1, 2, 1, pal.highlight);
+      r(4, -1, 2, 1, pal.highlight);
+    }
+    if (f.showTear) {
+      r(5, -2, 1, 2, pal.accent);
+    }
+    if (f.showZzz) {
+      r(9, -9, 3, 1, pal.accent);
+      r(10, -8, 1, 1, pal.accent);
+      r(9, -7, 3, 1, pal.accent);
+    }
+
+    // Torso, core LED, feet & paws
+    r(-6, 3, 12, 6, pal.accent);
+    r(-4, 4, 8, 4, pal.bg);
+    r(-1, 5, 2, 2, (animTick & 1) !== 0 ? pal.highlight : pal.fg);
+    r(-5, 9, 3, 2, pal.fg);
+    r(2, 9, 3, 2, pal.fg);
+
+    const pawLift = (animTick & 1) !== 0 ? 0 : 1;
+    r(-8, 5 + pawLift, 2, 2, pal.fg);
+    r(6, 6 - pawLift, 2, 2, pal.fg);
+
+    // Left prop: hacker terminal
+    r(-26, -1, 11, 7, pal.accent);
+    r(-25, 0, 9, 5, pal.bg);
+    r(-24, 1, 5, 1, pal.fg);
+    r(-24, 3, (animTick & 1) !== 0 ? 7 : 4, 1, pal.highlight);
+    r(-27, 6, 13, 3, pal.fg);
+    r(-25, 7, 9, 1, pal.muted);
+    r(-25, 9, 2, 2, pal.muted);
+    r(-17, 9, 2, 2, pal.muted);
+
+    // Right prop: mood/mode-reactive RF gear
+    const isScanningScene =
+      frame.scene === 'RadarDish' ||
+      f.eyes === logic.EyeGlyph.RoundLeft ||
+      f.eyes === logic.EyeGlyph.RoundRight;
+    const isOffenseScene = frame.scene === 'SatelliteBeam';
+    const isDefenseScene =
+      frame.scene === 'ThreatShield' || f.eyes === logic.EyeGlyph.AlertRing;
+
+    if (isScanningScene) {
+      r(16, 8, 1, 3, pal.accent);
+      r(20, 8, 1, 3, pal.accent);
+      r(17, 7, 3, 1, pal.accent);
+      const tilt = animTick % 3 === 1 ? 1 : 0;
+      r(15, 2 + tilt, 2, 4, pal.fg);
+      r(17, 4 + tilt, 3, 3, pal.fg);
+      r(19, 6 + tilt, 3, 1, pal.fg);
+      r(18, 2 + tilt, 1, 2, pal.accent);
+      r(19, 1 + tilt, 2, 2, pal.highlight);
+      const wavePhase = animTick % 3;
+      r(22, 0, 1, 2, wavePhase === 0 ? pal.highlight : pal.accent);
+      r(24, -2, 1, 3, wavePhase === 1 ? pal.highlight : pal.accent);
+      r(26, -4, 1, 4, wavePhase === 2 ? pal.highlight : pal.accent);
+    } else if (isOffenseScene) {
+      r(15, 7, 10, 4, pal.accent);
+      r(17, 8, 6, 2, pal.fg);
+      r(19, -9, 3, 3, pal.fg);
+      r(15, -8, 4, 2, pal.accent);
+      r(22, -8, 4, 2, pal.accent);
+      r(20, -6, 1, 13, pal.muted);
+      const pulseY = -5 + ((animTick * 2) % 10);
+      r(20, pulseY, 1, 2, pal.highlight);
+    } else if (isDefenseScene) {
+      const alertActive = Boolean(frame.threatBanner) || f.eyes === logic.EyeGlyph.AlertRing;
+      const shieldCol = alertActive ? pal.highlight : pal.accent;
+      r(15, -1, 10, 9, shieldCol);
+      r(17, 8, 6, 2, shieldCol);
+      r(19, 10, 2, 1, shieldCol);
+      r(17, 1, 6, 6, pal.bg);
+      const sx = (animTick & 1) !== 0 ? 20 : 18;
+      const sy = (animTick & 2) !== 0 ? 4 : 2;
+      r(sx, sy, 2, 2, alertActive ? pal.highlight : pal.fg);
+    } else if (f.showZzz) {
+      r(14, 6, 12, 4, pal.accent);
+      r(15, 7, 10, 2, pal.bg);
+      const fill = 2 + (animTick % 3) * 3;
+      r(16, 7, fill, 2, pal.fg);
+      r(18, 1, 3, 1, pal.accent);
+      r(19, 2, 1, 1, pal.accent);
+      r(18, 3, 3, 1, pal.accent);
+    } else {
+      r(14, 7, 12, 4, pal.accent);
+      r(15, 8, 10, 2, pal.bg);
+      for (let i = 0; i < 4; i++) {
+        const bh = 2 + ((animTick + i) % 4) * 2;
+        r(15 + i * 3, 7 - bh, 2, bh, bh >= 8 ? pal.highlight : pal.fg);
+      }
+    }
+
+    const badge = '[' + f.moodLabel + ']';
+    const badgeW = badge.length * 6;
+    gfx.setTextColor(pal.accent, pal.bg);
+    gfx.drawString(badge, Math.max(2, g.centerX - Math.trunc(badgeW / 2)), g.moodBadgeY);
+  }
+
+  function drawPetFacePage(gfx, frame, opts) {
+    if (frame.faceStyle === 'PixelArtMascot') {
+      drawPixelArtMascot(gfx, frame, opts);
+    } else {
+      drawPwnagotchiFace(gfx, frame, opts);
+      drawClassicFaceProps(gfx, frame);
+    }
+    drawActivitySceneWidget(gfx, frame);
 
     gfx.setTextColor(frame.palette.accent, frame.palette.bg);
     gfx.drawString(frame.promptLabel, frame.speechX, frame.speechTopY);
 
     gfx.setTextColor(frame.palette.fg, frame.palette.bg);
-    let y = frame.speechTopY + frame.lineStepY + (frame.compact ? 1 : 2);
-    for (let i = 0; i < frame.phraseLines.length; i++) {
-      gfx.drawString(frame.phraseLines[i], frame.speechX, y);
-      y += frame.lineStepY;
-    }
-
-    if (!frame.compact && frame.rankLine && frame.rankLine.length > 0) {
-      gfx.setTextColor(frame.palette.accent, frame.palette.bg);
-      gfx.drawString(frame.rankLine, frame.speechX, frame.footerDividerY - 21);
-      const barW = 28;
-      const barX = frame.dims.width - barW - 4;
-      const barY = frame.footerDividerY - 19;
-      if (barX > frame.speechX + frame.rankLine.length * 6 + 2) {
-        gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
-        const fillW = Math.trunc((barW * (frame.xpProgressPct || 0)) / 100);
-        if (fillW > 0) {
-          gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
-        }
+    if (frame.compact) {
+      if (frame.phraseLines.length > 0) {
+        const inlineX = frame.speechX + (frame.promptLabel.length + 1) * 6;
+        gfx.drawString(frame.phraseLines[0], inlineX, frame.speechTopY);
+      }
+    } else {
+      const wide = frame.dims.width >= 300 && frame.dims.height >= 180;
+      let y = frame.speechTopY + frame.lineStepY + (wide ? 2 : 0);
+      for (let i = 0; i < frame.phraseLines.length; i++) {
+        gfx.drawString(frame.phraseLines[i], frame.speechX, y);
+        y += frame.lineStepY;
       }
     }
 
-    if (frame.spotlightLabel && frame.spotlightLabel.length > 0) {
-      const spotCol = frame.threatBanner ? frame.palette.highlight : frame.palette.accent;
-      gfx.setTextColor(spotCol, frame.palette.bg);
-      gfx.drawString(frame.spotlightLabel, frame.speechX, frame.footerDividerY - 11);
+    if (!frame.compact) {
+      const wide = frame.dims.width >= 300 && frame.dims.height >= 180;
+      const padX = wide ? 6 : 4;
+      const rankY = wide ? frame.footerDividerY - 21 : frame.footerDividerY - 10;
+      const barW = wide ? 48 : 24;
+      const barX = frame.dims.width - barW - padX;
+      const barY = rankY + 2;
+
+      if (frame.rankLine && frame.rankLine.length > 0) {
+        gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+        gfx.drawString(frame.rankLine, padX, rankY);
+        if (barX > padX + frame.rankLine.length * 6 + 4) {
+          gfx.fillRect(barX, barY, barW, 4, frame.palette.muted);
+          const fillW = Math.trunc((barW * (frame.xpProgressPct || 0)) / 100);
+          if (fillW > 0) {
+            gfx.fillRect(barX, barY, fillW, 4, frame.palette.highlight);
+          }
+        }
+      }
+
+      if (frame.spotlightLabel && frame.spotlightLabel.length > 0) {
+        const spotCol = frame.threatBanner ? frame.palette.highlight : frame.palette.accent;
+        gfx.setTextColor(spotCol, frame.palette.bg);
+        if (wide) {
+          gfx.drawString(frame.spotlightLabel, padX, frame.footerDividerY - 11);
+        } else {
+          const leftEnd = padX + (frame.rankLine ? frame.rankLine.length : 0) * 6 + 6;
+          const availPx = barX - 4 - leftEnd;
+          if (availPx >= 30) {
+            const maxChars = Math.floor(availPx / 6);
+            const s = frame.spotlightLabel;
+            const clipped =
+              s.length <= maxChars ? s : (maxChars <= 2 ? s.slice(0, maxChars) : s.slice(0, maxChars - 2) + '..');
+            gfx.drawString(clipped, leftEnd, rankY);
+          }
+        }
+      }
     }
   }
 
@@ -853,9 +1202,14 @@
     const animTick = (frame.animTick >>> 0);
 
     const g = frame.faceGeom;
-    const faceLeft = g.centerX - g.bracketOffsetX - 6;
-    const faceRight = g.centerX + g.bracketOffsetX + 6;
-    const faceTop = g.centerY - g.bracketHalfHeight - 6;
+    const micro = frame.dims.width < 150 || frame.dims.height < 72;
+    const wide = frame.dims.width >= 300 && frame.dims.height >= 180;
+    const px = micro || frame.compact ? 1 : wide ? 3 : 2;
+    const halfArtW = frame.faceStyle === 'PixelArtMascot' ? 28 * px : g.bracketOffsetX + 6;
+    const halfArtH = frame.faceStyle === 'PixelArtMascot' ? 11 * px : g.bracketHalfHeight + 6;
+    const faceLeft = g.centerX - halfArtW;
+    const faceRight = g.centerX + halfArtW;
+    const faceTop = g.centerY - halfArtH;
     const faceBottom = g.moodBadgeY + 9;
 
     for (let col = 0; ; col++) {

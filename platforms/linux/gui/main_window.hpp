@@ -13,6 +13,7 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPushButton>
@@ -47,13 +48,22 @@ private slots:
     void onLoadSession();
     void onSaveSession();
     void onToggleRecord();
+    void onSelectPcap();
+    void onExportReport();
+    void onBleScan();
+    void onClearThreat();
+    void onTrustSelected();
+    void onFilterChanged();
     void onAuthToggled(bool on);
     void onAllowSelected();
     void onDeauthSelected();
 
 private:
+    static constexpr ScreenDimensions kPetDims{240, 135};
+
     void refreshNetworks(bool force = false);
     void refreshStations(bool force = false);
+    void refreshRfGuard(bool force = false);
     void refreshAlerts();
     void refreshStatus();
     void refreshChannels(bool force = false);
@@ -69,15 +79,20 @@ private:
     QLabel* engineLabel_ = nullptr;
     QLabel* authBanner_ = nullptr;
     QLabel* channelsLabel_ = nullptr;
+    QLineEdit* filterEdit_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QTableWidget* table_ = nullptr;
     QTableWidget* stationsTable_ = nullptr;
+    QTableWidget* rfGuardTable_ = nullptr;
     QListWidget* alerts_ = nullptr;
     QCheckBox* authCheck_ = nullptr;
     QCheckBox* freezeSortCheck_ = nullptr;
+    QCheckBox* hopCheck_ = nullptr;
     QPushButton* monitorBtn_ = nullptr;
     QPushButton* modeBtn_ = nullptr;
     QPushButton* recordBtn_ = nullptr;
+    QPushButton* bleBtn_ = nullptr;
+    QPushButton* clearThreatBtn_ = nullptr;
     QSpinBox* channelSpin_ = nullptr;
     QPushButton* channelBtn_ = nullptr;
     QPushButton* deauthBtn_ = nullptr;
@@ -87,6 +102,7 @@ private:
     std::uint32_t lastTableRefreshMs_ = 0;
     std::uint64_t lastNetworksRev_ = UINT64_MAX;
     std::uint64_t lastStationsRev_ = UINT64_MAX;
+    std::uint64_t lastRfGuardRev_ = UINT64_MAX;
     std::uint64_t lastChannelsRev_ = UINT64_MAX;
     int lastSecMoodStyled_ = -1;
     int lastAuthStyled_ = -1;

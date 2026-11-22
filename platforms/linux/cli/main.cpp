@@ -51,9 +51,13 @@ struct Args {
     std::string recordFile;
     std::string replayFile;
     std::string pcapFile;
+    std::string exportFile;
     uint32_t count = 16;
     int channel = 0;
     bool authorized = false;
+    bool hop = false;
+    bool hop5Ghz = false;
+    bool ble = false;
     std::vector<std::string> allow;
 };
 
@@ -88,6 +92,15 @@ Args parseArgs(int argc, char** argv) {
             a.replayFile = argv[++i];
         } else if (s == "--pcap" && i + 1 < argc) {
             a.pcapFile = argv[++i];
+        } else if (s == "--export" && i + 1 < argc) {
+            a.exportFile = argv[++i];
+        } else if (s == "--hop") {
+            a.hop = true;
+        } else if (s == "--5ghz") {
+            a.hop = true;
+            a.hop5Ghz = true;
+        } else if (s == "--ble") {
+            a.ble = true;
         } else if (s == "--count" && i + 1 < argc) {
             const std::string rawCount = argv[++i];
             int parsed = 0;
@@ -149,11 +162,11 @@ zd::linux_app::ActionResult waitForAsyncResult(AppController& app) {
 void printHelp() {
     std::cout <<
         "pwnagotchi-zeroday Linux CLI/TUI\n"
-        "  zd-linux [--iface wlan0] [--record FILE] [--replay FILE] [--pcap FILE] tui\n"
-        "  zd-linux scan [--record FILE]           One active scan, print table\n"
-        "  zd-linux watch [--channel N] [--record FILE] [--pcap FILE]\n"
-        "                                          Monitor mode; stream defensive alerts\n"
-        "  zd-linux replay <FILE>                  Replay recorded session & print summary\n"
+        "  zd-linux [--iface wlan0] [--hop] [--5ghz] [--ble] [--record FILE] [--replay FILE] [--pcap FILE] [--export FILE] tui\n"
+        "  zd-linux scan [--ble] [--record FILE] [--export FILE]   One active scan, print summary\n"
+        "  zd-linux watch [--channel N] [--hop] [--5ghz] [--record FILE] [--pcap FILE] [--export FILE]\n"
+        "                                                          Monitor mode; stream defensive alerts\n"
+        "  zd-linux replay <FILE> [--export FILE]                  Replay recorded session & print summary\n"
         "  zd-linux deauth <BSSID> [--client MAC] [--count N] --i-am-authorized --allow <BSSID>\n"
         "\nSafety: deauth requires --i-am-authorized AND --allow <that BSSID>. All transmit\n"
         "decisions are logged. Only test networks you own or are authorized to assess.\n";
@@ -245,7 +258,10 @@ void printSecSummary(const zd::sec::SecState& secState, uint32_t now) {
     }
 }
 
-int runScan(AppController& app) {
+int runScan(AppController& app, const Args& a) {
+    if (a.ble) {
+        (void)app.requestBleScan();
+    }
     app.requestScan();
     // Drive the controller until the scan completes (bounded).
     for (int i = 0; i < 100 && !app.petState().hasScannedOnce; ++i) {
@@ -258,20 +274,30 @@ int runScan(AppController& app) {
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
     printSecSummary(app.secState(), nowMs());
+    if (!a.exportFile.empty()) {
+        const auto exp = app.exportReport(a.exportFile);
+        std::fprintf(stderr, "[export] %s\n", exp.message.c_str());
+        if (!exp.ok) return 1;
+    }
     return 0;
 }
 
-int runReplay(AppController& app, const std::string& path) {
-    if (path.empty()) {
+int runReplay(AppController& app, const Args& a) {
+    if (a.replayFile.empty()) {
         std::fprintf(stderr, "replay: missing session file path\n");
         return 2;
     }
-    const auto res = app.loadSession(path);
+    const auto res = app.loadSession(a.replayFile);
     std::fprintf(stderr, "[replay] %s\n", res.message.c_str());
     if (!res.ok) {
         return 1;
     }
     printSecSummary(app.secState(), app.secState().lastEventMs);
+    if (!a.exportFile.empty()) {
+        const auto exp = app.exportReport(a.exportFile);
+        std::fprintf(stderr, "[export] %s\n", exp.message.c_str());
+        if (!exp.ok) return 1;
+    }
     return 0;
 }
 
@@ -317,6 +343,10 @@ int runWatch(AppController& app, const Args& a) {
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
     }
     app.shutdown();
+    if (!a.exportFile.empty()) {
+        const auto exp = app.exportReport(a.exportFile);
+        std::fprintf(stderr, "[export] %s\n", exp.message.c_str());
+    }
     return 0;
 }
 
@@ -383,6 +413,8 @@ int runDeauth(AppController& app, const Args& a) {
 
 // --- ncurses dashboard ---------------------------------------------------------------
 
+enum class TuiViewMode { Networks = 0, Stations = 1, RfGuard = 2 };
+
 struct TuiCache {
     uint64_t revision = UINT64_MAX;
     std::vector<zd::sec::WifiTarget> targets;
@@ -400,8 +432,26 @@ struct TuiCache {
     }
 };
 
+std::string clipCols(const std::string& raw, int maxCols) {
+    if (maxCols <= 0) {
+        return {};
+    }
+    return zd::sec::sanitizePrintableText(raw, static_cast<std::size_t>(maxCols));
+}
+
+void drawClippedLine(int y, int x, int maxx, const std::string& text) {
+    const int avail = maxx - x;
+    if (avail <= 0) {
+        return;
+    }
+    const std::string safe = clipCols(text, avail);
+    mvaddnstr(y, x, safe.c_str(), avail);
+    clrtoeol();
+}
+
 void drawDashboard(AppController& app, const TuiCache& cache, int selected, int scrollOffset,
-                   bool showStations, bool showHelp, const std::string& lastActionMsg, bool busy) {
+                   TuiViewMode viewMode, bool showPetPanel, bool showHelp,
+                   const std::string& lastActionMsg, bool busy) {
     erase();
     int maxy = 0;
     int maxx = 0;
@@ -413,65 +463,80 @@ void drawDashboard(AppController& app, const TuiCache& cache, int selected, int 
         return;
     }
 
-    // Header: pet face + status + SecMood + optional REC badge.
     const zd::AppState& ps = app.petState();
     const zd::sec::SecMood sm = app.secMood();
     const int secColor = (sm == zd::sec::SecMood::Alarmed)
                              ? 1
                              : (sm == zd::sec::SecMood::Watchful ? 3 : 2);
-    attron(A_BOLD);
-    mvprintw(0, 1, "pwnagotchi-zeroday %s [%s|%s] Lv.%u(HI:%u) mood:%s batt:%d%% engine:%s",
-             zd::faceForMood(ps.mood).asciiFace,
-             zd::themeSpec(ps.theme).name, zd::opsModeLabel(ps.opsMode), ps.level, ps.highScore,
-             zd::faceForMood(ps.mood).moodLabel, ps.batteryPercent,
-             app.monitoring() ? app.engineLabel().c_str() : "idle (scan only)");
-    attroff(A_BOLD);
-    attron(COLOR_PAIR(secColor) | A_BOLD);
-    printw("  sec:%s", zd::sec::secMoodLabel(sm));
-    attroff(COLOR_PAIR(secColor) | A_BOLD);
-    if (app.recording()) {
-        attron(COLOR_PAIR(1) | A_BOLD);
-        printw("  [REC]");
-        attroff(COLOR_PAIR(1) | A_BOLD);
-    }
-    const std::string cleanPhrase = zd::sec::sanitizePrintableText(ps.phrase, 120u);
-    mvprintw(1, 1, "\"%s\"", cleanPhrase.c_str());
+    const std::string engineStr = app.monitoring() ? app.engineLabel() : std::string("idle");
+    const std::string hopStr =
+        app.channelHopEnabled() ? (" hop:ch" + std::to_string(app.currentHopChannel()))
+                                : std::string{};
+    const std::string threatStr =
+        ps.lastThreatLabel.empty() ? std::string{} : (" !" + ps.lastThreatLabel);
+    char headBuf[256];
+    std::snprintf(headBuf, sizeof(headBuf),
+                  "pwnagotchi-zeroday %s [%s|%s] Lv.%u(HI:%u) %s batt:%d%% %s%s sec:%s%s%s",
+                  zd::faceForMood(ps.mood).asciiFace,
+                  zd::themeSpec(ps.theme).name, zd::opsModeLabel(ps.opsMode),
+                  static_cast<unsigned>(ps.level), static_cast<unsigned>(ps.highScore),
+                  zd::faceForMood(ps.mood).moodLabel, static_cast<int>(ps.batteryPercent),
+                  engineStr.c_str(), hopStr.c_str(), zd::sec::secMoodLabel(sm),
+                  app.recording() ? " [REC]" : "", threatStr.c_str());
+    attron(A_BOLD | COLOR_PAIR(secColor));
+    drawClippedLine(0, 1, maxx, headBuf);
+    attroff(A_BOLD | COLOR_PAIR(secColor));
 
-    // Authorization banner + table mode tabs.
+    drawClippedLine(1, 1, maxx, "\"" + ps.phrase + "\"");
+
     const auto& auth = app.authorization();
     const bool armed = auth.operatorConfirmed;
+    const char* tabName = (viewMode == TuiViewMode::Networks)
+                              ? "NETWORKS (APs)"
+                              : ((viewMode == TuiViewMode::Stations) ? "STATIONS / PROBES"
+                                                                     : "RF GUARD (BLE/SUB)");
     attron(armed ? (COLOR_PAIR(1) | A_BOLD) : COLOR_PAIR(2));
-    mvprintw(2, 1, " AUTH: %s  allow-list:%zu%s ", armed ? "ARMED (TX CONFIRMED)" : "SAFE (passive)",
-             auth.allowedBssids.size(), auth.allowAll ? " (ALL!)" : "");
+    char authBuf[220];
+    std::snprintf(authBuf, sizeof(authBuf),
+                  "AUTH:%s allow:%zu%s | [p] View:%s (APs:%zu STA:%zu RF:%zu)",
+                  armed ? "ARMED" : "SAFE", auth.allowedBssids.size(), auth.allowAll ? "*" : "",
+                  tabName, cache.targets.size(), cache.stations.size(),
+                  app.secState().bleTargets.size() + app.secState().subGhzCaptures.size());
+    drawClippedLine(2, 1, maxx, authBuf);
     attroff(armed ? (COLOR_PAIR(1) | A_BOLD) : COLOR_PAIR(2));
-    printw("   [p] Table: %s (%zu APs | %zu Stations)",
-           showStations ? "STATIONS / PROBES" : "NETWORKS (APs)",
-           cache.targets.size(), cache.stations.size());
 
-    // Channel distribution across both bands.
     {
         std::string band24;
         std::string band5;
         for (const auto& c : cache.channels) {
             const std::string part =
                 "ch" + std::to_string(c.channel) + "x" + std::to_string(c.count) + " ";
-            if (c.band == zd::sec::Band::Band24GHz) {
-                band24 += part;
-            } else if (c.band == zd::sec::Band::Band5GHz) {
-                band5 += part;
-            }
+            if (c.band == zd::sec::Band::Band24GHz) band24 += part;
+            else if (c.band == zd::sec::Band::Band5GHz) band5 += part;
         }
-        mvprintw(3, 1, "2.4GHz: %-28s 5GHz: %s", band24.empty() ? "-" : band24.c_str(),
-                 band5.empty() ? "-" : band5.c_str());
-        clrtoeol();
+        drawClippedLine(3, 1, maxx,
+                        "2.4GHz: " + (band24.empty() ? std::string("-") : band24) +
+                            "  5GHz: " + (band5.empty() ? std::string("-") : band5));
     }
 
     int row = 4;
+    if (showPetPanel && maxy >= 22) {
+        const std::string ascii = zd::renderAsciiPreview(
+            app.petFrame(zd::ScreenDimensions{240, 135}));
+        std::istringstream pin(ascii);
+        std::string pline;
+        int drawn = 0;
+        while (drawn < 8 && std::getline(pin, pline)) {
+            drawClippedLine(row++, 1, maxx, pline);
+            ++drawn;
+        }
+    }
+
     const int tableRows = (maxy - row - 8 > 0) ? (maxy - row - 8) : 4;
-    if (!showStations) {
+    if (viewMode == TuiViewMode::Networks) {
         attron(A_UNDERLINE);
-        mvprintw(row++, 1, "%-18s %-20s %3s %5s %-5s %-4s %4s %-4s %-3s", "BSSID", "SSID", "CH",
-                 "dBm", "ENC", "WPS", "CLI", "CAP", "ALW");
+        drawClippedLine(row++, 1, maxx,
+                        "BSSID              SSID                 CH   dBm ENC   WPS  CLI CAP TR  ALW");
         attroff(A_UNDERLINE);
         const int total = static_cast<int>(cache.targets.size());
         for (int vis = 0; vis < tableRows && (scrollOffset + vis) < total; ++vis) {
@@ -479,22 +544,23 @@ void drawDashboard(AppController& app, const TuiCache& cache, int selected, int 
             const auto& t = cache.targets[static_cast<std::size_t>(idx)];
             const bool sel = (idx == selected);
             const std::string cleanSsid = zd::sec::sanitizePrintableText(t.ssid, 20u);
-            if (sel) {
-                attron(A_REVERSE);
-            }
-            mvprintw(row + vis, 1, "%-18s %-20s %3d %5d %-5s %-4s %4u %-4s %-3s", t.bssid.c_str(),
-                     (cleanSsid.empty() ? "<hidden>" : cleanSsid.c_str()), t.channel,
-                     t.rssi, encLabel(t.enc), t.wps ? "WPS*" : "-", t.clientCount,
-                     t.handshake ? "HS" : (t.pmkid ? "PMK" : "-"),
-                     auth.isAllowed(t.bssid) ? "YES" : "-");
-            if (sel) {
-                attroff(A_REVERSE);
-            }
+            const bool trusted = zd::sec::isTrustedBssid(app.secState(), t.bssid);
+            char lineBuf[160];
+            std::snprintf(lineBuf, sizeof(lineBuf),
+                          "%-18s %-20s %3d %5d %-5s %-4s %3u %-3s %-3s %-3s",
+                          t.bssid.c_str(),
+                          (cleanSsid.empty() ? "<hidden>" : cleanSsid.c_str()),
+                          t.channel, t.rssi, encLabel(t.enc), t.wps ? "WPS" : "-",
+                          t.clientCount, t.handshake ? "HS" : (t.pmkid ? "PMK" : "-"),
+                          trusted ? "TRU" : "-", auth.isAllowed(t.bssid) ? "YES" : "-");
+            if (sel) attron(A_REVERSE);
+            drawClippedLine(row + vis, 1, maxx, lineBuf);
+            if (sel) attroff(A_REVERSE);
         }
-    } else {
+    } else if (viewMode == TuiViewMode::Stations) {
         attron(A_UNDERLINE);
-        mvprintw(row++, 1, "%-18s %-18s %6s %-6s %s", "STATION MAC", "ASSOC BSSID", "PROBES",
-                 "RISK", "PROBED SSIDS");
+        drawClippedLine(row++, 1, maxx,
+                        "STATION MAC        ASSOC BSSID        PROBES RISK   PROBED SSIDS");
         attroff(A_UNDERLINE);
         const std::size_t maxProbedWidth =
             (maxx > 56) ? static_cast<std::size_t>(maxx - 56) : 20u;
@@ -504,82 +570,118 @@ void drawDashboard(AppController& app, const TuiCache& cache, int selected, int 
             const auto& st = cache.stations[static_cast<std::size_t>(idx)];
             const bool sel = (idx == selected);
             const bool weak = zd::sec::hasWeakOrDefaultProbe(st);
-            const std::string cleanProbes =
-                zd::sec::sanitizePrintableText(joinProbedSsids(st.probedSsids, maxProbedWidth),
-                                               maxProbedWidth);
-            if (sel) {
-                attron(A_REVERSE);
-            } else if (weak) {
-                attron(COLOR_PAIR(3));
+            const std::string cleanProbes = joinProbedSsids(st.probedSsids, maxProbedWidth);
+            char lineBuf[220];
+            std::snprintf(lineBuf, sizeof(lineBuf), "%-18s %-18s %6u %-6s %s",
+                          st.mac.c_str(), st.lastBssid.empty() ? "-" : st.lastBssid.c_str(),
+                          st.probeCount, weak ? "WEAK!" : "-", cleanProbes.c_str());
+            if (sel) attron(A_REVERSE);
+            else if (weak) attron(COLOR_PAIR(3));
+            drawClippedLine(row + vis, 1, maxx, lineBuf);
+            if (sel) attroff(A_REVERSE);
+            else if (weak) attroff(COLOR_PAIR(3));
+        }
+    } else {
+        attron(A_UNDERLINE);
+        drawClippedLine(row++, 1, maxx,
+                        "RADIO  ADDR / FREQ       NAME / PROTOCOL      RSSI  THREAT      COUNT");
+        attroff(A_UNDERLINE);
+        const auto& ble = app.secState().bleTargets;
+        const auto& sub = app.secState().subGhzCaptures;
+        const int total = static_cast<int>(ble.size() + sub.size());
+        for (int vis = 0; vis < tableRows && (scrollOffset + vis) < total; ++vis) {
+            const int idx = scrollOffset + vis;
+            const bool sel = (idx == selected);
+            char lineBuf[180];
+            bool warn = false;
+            if (idx < static_cast<int>(ble.size())) {
+                const auto& b = ble[static_cast<std::size_t>(idx)];
+                warn = (b.threat != zd::BleThreatKind::None);
+                const std::string cname = zd::sec::sanitizePrintableText(b.name, 20u);
+                std::snprintf(lineBuf, sizeof(lineBuf), "%-6s %-17s %-20s %5d %-11s %5u",
+                              "BLE", b.mac.c_str(), cname.empty() ? "-" : cname.c_str(),
+                              b.rssi, zd::bleThreatLabel(b.threat), b.seenCount);
+            } else {
+                const auto& sc = sub[static_cast<std::size_t>(idx - static_cast<int>(ble.size()))];
+                warn = (sc.continuousCarrier || sc.burstCount >= 5u);
+                const std::string cproto = zd::sec::sanitizePrintableText(sc.protocol, 20u);
+                const std::string freqStr = zd::formatFreqMhz(sc.freqKhz);
+                std::snprintf(lineBuf, sizeof(lineBuf), "%-6s %-17s %-20s %5d %-11s %5u",
+                              "SUBGHZ", freqStr.c_str(),
+                              cproto.empty() ? "-" : cproto.c_str(), sc.rssi,
+                              sc.continuousCarrier ? "JAMMING!"
+                                                   : (sc.burstCount >= 5u ? "REPLAY!" : "OK"),
+                              sc.burstCount);
             }
-            mvprintw(row + vis, 1, "%-18s %-18s %6u %-6s %s", st.mac.c_str(),
-                     st.lastBssid.empty() ? "-" : st.lastBssid.c_str(), st.probeCount,
-                     weak ? "WEAK!" : "-", cleanProbes.c_str());
-            if (sel) {
-                attroff(A_REVERSE);
-            } else if (weak) {
-                attroff(COLOR_PAIR(3));
-            }
+            if (sel) attron(A_REVERSE);
+            else if (warn) attron(COLOR_PAIR(1));
+            drawClippedLine(row + vis, 1, maxx, lineBuf);
+            if (sel) attroff(A_REVERSE);
+            else if (warn) attroff(COLOR_PAIR(1));
         }
     }
 
-    // Alerts (defensive) pane.
     const auto& alerts = app.secState().alerts;
     int aRow = maxy - 7;
     attron(A_BOLD);
-    mvprintw(aRow++, 1, "Defensive alerts (%u total):", app.secState().totalAlertsEmitted);
+    drawClippedLine(aRow++, 1, maxx,
+                    "Defensive alerts (" + std::to_string(app.secState().totalAlertsEmitted) + " total):");
     attroff(A_BOLD);
     const int shown = 4;
     const int start = (static_cast<int>(alerts.size()) > shown)
                           ? static_cast<int>(alerts.size()) - shown
                           : 0;
     for (int i = start; i < static_cast<int>(alerts.size()); ++i) {
-        const auto& al = alerts[i];
+        const auto& al = alerts[static_cast<std::size_t>(i)];
         const int cp = (al.severity == zd::sec::Severity::Critical) ? 1 : 3;
-        const std::size_t maxMsg = (maxx > 36) ? static_cast<std::size_t>(maxx - 36) : 0u;
-        const std::string cleanMsg = zd::sec::sanitizePrintableText(al.message, maxMsg);
+        char alBuf[240];
+        std::snprintf(alBuf, sizeof(alBuf), "%-14s %-17s %s",
+                      zd::sec::alertKindLabel(al.kind), al.bssid.c_str(), al.message.c_str());
         attron(COLOR_PAIR(cp));
-        mvprintw(aRow++, 2, "%-14s %-17s %s", zd::sec::alertKindLabel(al.kind), al.bssid.c_str(),
-                 cleanMsg.c_str());
+        drawClippedLine(aRow++, 2, maxx, alBuf);
         attroff(COLOR_PAIR(cp));
     }
 
-    // Last background action result.
     if (busy || !lastActionMsg.empty()) {
-        const std::string cleanAction = zd::sec::sanitizePrintableText(lastActionMsg, 120u);
         attron(A_BOLD);
-        mvprintw(maxy - 2, 1, "%s", busy ? "working..." : cleanAction.c_str());
-        clrtoeol();
+        drawClippedLine(maxy - 2, 1, maxx, busy ? std::string("working...") : lastActionMsg);
         attroff(A_BOLD);
     }
 
-    // Key help.
-    mvprintw(maxy - 1, 1,
-             "[s]can [m]on [c]h [o]ps [v/1-4]view [p]robes [[/]/t]heme [A]uth [l/L]allow [x]deauth [w]save [r]load [?]help [q]uit");
+    drawClippedLine(
+        maxy - 1, 1, maxx,
+        "[s]can [m]on [h]op [c]h [B]le [K]ack [u]trust [e]xport [v/1-4]pet [p]tab [A]uth [l]allow [x]deauth [?]help [q]uit");
     if (showHelp) {
         const int r0 = 4;
-        mvprintw(r0 + 0, 4, "+----------------------------------------------------------+");
-        mvprintw(r0 + 1, 4, "| Keys: s=scan  m=monitor  c=channel  o=ops-mode           |");
-        mvprintw(r0 + 2, 4, "|       v/1-4=pet-view  p/Tab=APs/Stations  [/]/t/T=theme  |");
-        mvprintw(r0 + 3, 4, "|       j/k/Arrows/PgUp/PgDn=select  A=confirm TX auth     |");
-        mvprintw(r0 + 4, 4, "|       l/L=allow-list BSSID  x=deauth  w=save  r=load     |");
-        mvprintw(r0 + 5, 4, "|       ?=toggle help  q=quit                              |");
-        mvprintw(r0 + 6, 4, "+----------------------------------------------------------+");
+        const char* helpLines[] = {
+            "+--------------------------------------------------------------+",
+            "| Keys: s=scan  m=monitor  h=toggle-hop  c=channel  o=ops-mode |",
+            "|       v/1-4=pet-panel  V=hide-pet  p/Tab=APs/STA/RF  t/[/]=theme |",
+            "|       B=BLE scan  K=clear threat  u=trust BSSID  e=export    |",
+            "|       j/k/Arrows=select  A=confirm TX auth  l=allow  x=deauth|",
+            "|       w=save  r=load  ?=toggle help  q=quit                  |",
+            "+--------------------------------------------------------------+"
+        };
+        for (int i = 0; i < 7 && (r0 + i) < maxy - 1; ++i) {
+            drawClippedLine(r0 + i, 2, maxx, helpLines[i]);
+        }
     }
     refresh();
 }
 
-std::string resolveSelectedBssid(const TuiCache& cache, bool showStations, int selected) {
+std::string resolveSelectedBssid(const AppController& app, const TuiCache& cache,
+                                 TuiViewMode viewMode, int selected) {
+    (void)app;
     if (selected < 0) {
         return {};
     }
-    if (!showStations) {
+    if (viewMode == TuiViewMode::Networks) {
         if (selected < static_cast<int>(cache.targets.size())) {
             return cache.targets[static_cast<std::size_t>(selected)].bssid;
         }
         return {};
     }
-    if (selected < static_cast<int>(cache.stations.size())) {
+    if (viewMode == TuiViewMode::Stations && selected < static_cast<int>(cache.stations.size())) {
         const std::string& assoc = cache.stations[static_cast<std::size_t>(selected)].lastBssid;
         if (!assoc.empty() && zd::sec::isValidMac(assoc)) {
             return assoc;
@@ -634,7 +736,8 @@ int runTui(AppController& app) {
     }
     int selected = 0;
     int scrollOffset = 0;
-    bool showStations = false;
+    TuiViewMode viewMode = TuiViewMode::Networks;
+    bool showPetPanel = false;
     bool showHelp = false;
     uint32_t lastStep = 0;
     std::string lastActionMsg;
@@ -655,8 +758,13 @@ int runTui(AppController& app) {
             }
         }
         cache.sync(app.secState());
-        const int rowCount = showStations ? static_cast<int>(cache.stations.size())
-                                          : static_cast<int>(cache.targets.size());
+        const int rowCount =
+            (viewMode == TuiViewMode::Networks)
+                ? static_cast<int>(cache.targets.size())
+                : ((viewMode == TuiViewMode::Stations)
+                       ? static_cast<int>(cache.stations.size())
+                       : static_cast<int>(app.secState().bleTargets.size() +
+                                          app.secState().subGhzCaptures.size()));
         if (rowCount == 0) {
             selected = 0;
             scrollOffset = 0;
@@ -670,7 +778,8 @@ int runTui(AppController& app) {
             int maxy = 0, maxx = 0;
             getmaxyx(stdscr, maxy, maxx);
             (void)maxx;
-            const int tableRows = (maxy - 4 - 8 > 0) ? (maxy - 4 - 8) : 4;
+            const int headerRows = 4 + (showPetPanel && maxy >= 22 ? 8 : 0);
+            const int tableRows = (maxy - headerRows - 8 > 0) ? (maxy - headerRows - 8) : 4;
             if (selected < scrollOffset) {
                 scrollOffset = selected;
             } else if (selected >= scrollOffset + tableRows) {
@@ -682,8 +791,8 @@ int runTui(AppController& app) {
         const uint32_t uptimeSec = app.petState().uptimeMs / 1000u;
         if (dirty || cache.revision != lastDrawnRevision || uptimeSec != lastDrawnUptimeSec ||
             busy != lastBusy) {
-            drawDashboard(app, cache, selected, scrollOffset, showStations, showHelp, lastActionMsg,
-                          busy);
+            drawDashboard(app, cache, selected, scrollOffset, viewMode, showPetPanel, showHelp,
+                          lastActionMsg, busy);
             lastDrawnRevision = cache.revision;
             lastDrawnUptimeSec = uptimeSec;
             lastBusy = busy;
@@ -704,8 +813,31 @@ int runTui(AppController& app) {
             break;
         } else if (ch == 's') {
             app.requestScan();
+        } else if (ch == 'h') {
+            app.setChannelHopEnabled(!app.channelHopEnabled());
+            lastActionMsg = std::string("channel hopping: ") +
+                            (app.channelHopEnabled() ? "ON" : "OFF");
+        } else if (ch == 'B') {
+            lastActionMsg = app.requestBleScan().message;
+        } else if (ch == 'K') {
+            app.clearThreat();
+            lastActionMsg = "threat banner acknowledged";
+        } else if (ch == 'u') {
+            const std::string bssid = resolveSelectedBssid(app, cache, viewMode, selected);
+            if (bssid.empty()) {
+                lastActionMsg = "select an AP (or station with BSSID) to toggle trust";
+            } else {
+                const bool trusted = app.toggleTrustBssid(bssid);
+                lastActionMsg = trusted ? ("trusted BSSID " + bssid)
+                                        : ("untrusted BSSID " + bssid);
+            }
+        } else if (ch == 'e') {
+            const std::string p = promptLine("export report (.md/.csv/.html): ");
+            if (!p.empty()) {
+                lastActionMsg = app.exportReport(p).message;
+            }
         } else if (ch == 'p' || ch == '\t') {
-            showStations = !showStations;
+            viewMode = static_cast<TuiViewMode>((static_cast<int>(viewMode) + 1) % 3);
             selected = 0;
             scrollOffset = 0;
         } else if (ch == 't' || ch == ']') {
@@ -715,15 +847,22 @@ int runTui(AppController& app) {
         } else if (ch == 'o') {
             app.cycleOpsMode();
             lastActionMsg = std::string("ops mode: ") + zd::opsModeLabel(app.petState().opsMode);
+        } else if (ch == 'V') {
+            showPetPanel = !showPetPanel;
         } else if (ch == 'v') {
+            showPetPanel = true;
             app.dispatchPet(zd::CyclePageEvent{nowMs(), +1});
         } else if (ch == '1') {
+            showPetPanel = true;
             app.dispatchPet(zd::SetPageEvent{nowMs(), zd::ScreenPage::PetFace});
         } else if (ch == '2') {
+            showPetPanel = true;
             app.dispatchPet(zd::SetPageEvent{nowMs(), zd::ScreenPage::NearbyRadar});
         } else if (ch == '3') {
+            showPetPanel = true;
             app.dispatchPet(zd::SetPageEvent{nowMs(), zd::ScreenPage::ChannelSpectrum});
         } else if (ch == '4') {
+            showPetPanel = true;
             app.dispatchPet(zd::SetPageEvent{nowMs(), zd::ScreenPage::RfGuard});
         } else if (ch == KEY_DOWN || ch == 'j') {
             if (rowCount > 0) {
@@ -778,22 +917,18 @@ int runTui(AppController& app) {
                 }
             }
         } else if (ch == 'l' || ch == 'L') {
-            const std::string bssid = resolveSelectedBssid(cache, showStations, selected);
+            const std::string bssid = resolveSelectedBssid(app, cache, viewMode, selected);
             if (bssid.empty()) {
-                lastActionMsg = showStations
-                                    ? "select an associated station or switch to APs [p]"
-                                    : "no target selected";
+                lastActionMsg = "select an AP (or station with BSSID) to allow-list";
             } else {
                 const bool added = app.toggleAllowBssid(bssid);
                 lastActionMsg = added ? ("allow-listed " + bssid)
                                       : ("removed " + bssid + " from allow-list");
             }
         } else if (ch == 'x') {
-            const std::string bssid = resolveSelectedBssid(cache, showStations, selected);
+            const std::string bssid = resolveSelectedBssid(app, cache, viewMode, selected);
             if (bssid.empty()) {
-                lastActionMsg = showStations
-                                    ? "deauth skipped: select an associated station or switch to APs [p]"
-                                    : "deauth skipped: no target selected";
+                lastActionMsg = "deauth skipped: select an AP (or station with BSSID)";
             } else {
                 const auto decision = zd::sec::authorize(app.authorization(), bssid);
                 if (decision != zd::sec::AuthDecision::Allowed) {
@@ -871,6 +1006,13 @@ int main(int argc, char** argv) {
     if (!a.pcapFile.empty()) {
         app.setPcapDumpPath(a.pcapFile);
     }
+    if (a.hop) {
+        app.setChannelHopEnabled(true);
+        app.setHop5Ghz(a.hop5Ghz);
+    }
+    if (a.ble) {
+        (void)app.requestBleScan();
+    }
     app.boot();
 
     if (!a.replayFile.empty() && a.command != "replay") {
@@ -891,7 +1033,12 @@ int main(int argc, char** argv) {
     std::string cmd = a.command;
     if (cmd.empty()) {
         if (!a.replayFile.empty() && !isatty(STDOUT_FILENO)) {
-            printSecSummary(app.secState(), nowMs());
+            printSecSummary(app.secState(), app.secState().lastEventMs);
+            if (!a.exportFile.empty()) {
+                const auto exp = app.exportReport(a.exportFile);
+                std::fprintf(stderr, "[export] %s\n", exp.message.c_str());
+                if (!exp.ok) return 1;
+            }
             return 0;
         }
         cmd = isatty(STDOUT_FILENO) ? "tui" : "scan";
@@ -901,13 +1048,13 @@ int main(int argc, char** argv) {
         return runTui(app);
     }
     if (cmd == "scan") {
-        return runScan(app);
+        return runScan(app, a);
     }
     if (cmd == "watch") {
         return runWatch(app, a);
     }
     if (cmd == "replay") {
-        return runReplay(app, a.replayFile);
+        return runReplay(app, a);
     }
     if (cmd == "deauth") {
         return runDeauth(app, a);
