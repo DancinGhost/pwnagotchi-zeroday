@@ -329,40 +329,40 @@ inline const char* authDecisionLabel(AuthDecision d) {
 // --- Events fed from the imperative shell --------------------------------------------
 
 struct ApObserved {      // from beacon/probe-response or active scan
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
     std::string ssid;
-    int32_t channel;
-    int32_t rssi;
-    Encryption enc;
+    int32_t channel = 0;
+    int32_t rssi = -100;
+    Encryption enc = Encryption::Unknown;
     bool wps = false;
 };
 
 struct ClientObserved {  // a station associated with / probing a BSSID
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
     std::string client;
 };
 
 struct DataFrameObserved {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
 };
 
 struct DeauthObserved {  // management deauth or disassociation frame
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
     std::string source;
     std::string dest;
 };
 
 struct HandshakeObserved {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
 };
 
 struct PmkidObserved {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
 };
 
@@ -370,7 +370,7 @@ struct PmkidObserved {
 // leak a station's preferred-network list even over broadcast/unassociated probes, which
 // is why this is tracked independently of ClientObserved (which requires a known BSSID).
 struct ProbeRequestObserved {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string client;
     std::string ssid;   // SSID being probed for; may be "" for a wildcard/broadcast probe
 };
@@ -378,27 +378,27 @@ struct ProbeRequestObserved {
 // Recorded whenever the shell asks the gate about a transmit; keeps the decision in the
 // state/alert stream so the UI and audit log stay consistent. `allowed` mirrors the gate.
 struct InjectionAttempt {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string bssid;
     std::string client;   // target station, or "" for broadcast
-    uint32_t count;       // frames requested
-    AuthDecision decision;
+    uint32_t count = 0u;  // frames requested
+    AuthDecision decision = AuthDecision::BlockedUnconfirmed;
 };
 
 struct BleObserved {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::string mac;
     std::string name;
-    int32_t rssi;
+    int32_t rssi = -100;
     uint16_t companyId = 0;
     uint16_t serviceUuid = 0;
     bool trackerPayload = false;
 };
 
 struct SubGhzObserved {
-    uint32_t nowMs;
-    uint32_t freqKhz;
-    int32_t rssi;
+    uint32_t nowMs = 0u;
+    uint32_t freqKhz = 0u;
+    int32_t rssi = -100;
     std::string protocol;
     uint32_t burstCount = 1;
     bool continuousCarrier = false;

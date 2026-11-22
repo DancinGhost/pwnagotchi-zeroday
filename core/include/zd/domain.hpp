@@ -12,9 +12,9 @@ namespace zd {
 // Immutable snapshot of a single WiFi access point discovered during a scan.
 struct AccessPoint {
     std::string ssid;
-    int32_t rssi;
-    int32_t channel;
-    bool secure;
+    int32_t rssi = -100;
+    int32_t channel = 0;
+    bool secure = false;
 };
 
 // 2.4 GHz channel counts (index 0 = other/5GHz, indices 1..13 = channels 1..13).
@@ -173,30 +173,30 @@ struct AppState {
 // --- Algebraic Sum Type of Events fed from the Imperative Shell into the Pure Reducer ---
 
 struct TickEvent {
-    uint32_t nowMs;
-    int32_t batteryPercent;
-    bool isCharging;
+    uint32_t nowMs = 0u;
+    int32_t batteryPercent = 100;
+    bool isCharging = false;
 };
 
 struct ButtonAPressedEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct ButtonBPressedEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct ButtonBLongPressedEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct ScanStartedEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct ScanCompletedEvent {
-    uint32_t nowMs;
-    std::vector<AccessPoint> rawNetworks;
+    uint32_t nowMs = 0u;
+    std::vector<AccessPoint> rawNetworks{};
 };
 
 // --- Device-agnostic semantic input events ---
@@ -205,75 +205,75 @@ struct ScanCompletedEvent {
 
 // Step through screen pages. step = +1 (next) or -1 (previous); wraps around.
 struct CyclePageEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     int8_t step = 1;
 };
 
 // Jump directly to a specific screen page (e.g. touch tab bar or hotkey).
 struct SetPageEvent {
-    uint32_t nowMs;
-    ScreenPage page;
+    uint32_t nowMs = 0u;
+    ScreenPage page = ScreenPage::PetFace;
 };
 
 // Step through the theme catalog. step = +1 (next) or -1 (previous); wraps around.
 struct CycleThemeEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     int8_t step = 1;
 };
 
 // Jump directly to a theme (e.g. restored from persistent storage or picked in a menu).
 // `announce` = false suppresses the on-screen theme toast (useful at boot).
 struct SetThemeEvent {
-    uint32_t nowMs;
-    ThemeId theme;
+    uint32_t nowMs = 0u;
+    ThemeId theme = ThemeId::PaperInk;
     bool announce = true;
 };
 
 // Update the runtime offensive arming indicator shown on hardware displays.
 struct SetOffensiveArmedEvent {
-    uint32_t nowMs;
-    bool armed;
+    uint32_t nowMs = 0u;
+    bool armed = false;
 };
 
 struct CycleOpsModeEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct SetOpsModeEvent {
-    uint32_t nowMs;
-    OpsMode mode;
+    uint32_t nowMs = 0u;
+    OpsMode mode = OpsMode::Recon;
 };
 
 struct BleScanCompletedEvent {
-    uint32_t nowMs;
-    std::vector<BleDevice> devices;
+    uint32_t nowMs = 0u;
+    std::vector<BleDevice> devices{};
 };
 
 struct SubGhzObservedEvent {
-    uint32_t nowMs;
-    SubGhzSignal signal;
+    uint32_t nowMs = 0u;
+    SubGhzSignal signal{};
 };
 
 struct SetSubGhzFreqEvent {
-    uint32_t nowMs;
-    uint32_t freqKhz;
+    uint32_t nowMs = 0u;
+    uint32_t freqKhz = 433920u;
 };
 
 struct SetHighScoreEvent {
-    uint32_t nowMs;
-    uint32_t highScore;
-    uint32_t xp = 0;
+    uint32_t nowMs = 0u;
+    uint32_t highScore = 0u;
+    uint32_t xp = 0u;
 };
 
 struct ClearThreatEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
 };
 
 struct SyncMonitorSnapshotEvent {
-    uint32_t nowMs;
+    uint32_t nowMs = 0u;
     std::vector<AccessPoint> aps{};
     std::vector<BleDevice> bleDevices{};
-    uint32_t threatCount = 0;
+    uint32_t threatCount = 0u;
     std::string topThreatLabel{};
 };
 

@@ -581,9 +581,10 @@ void MainWindow::refreshStations(bool force) {
         (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
                                  : std::string{};
     const auto allStations = sec::stationsByActivity(sec);
-    std::vector<const sec::Station*> visible;
-    visible.reserve(allStations.size());
-    for (const auto& st : allStations) {
+    std::vector<std::size_t> visibleIdx;
+    visibleIdx.reserve(allStations.size());
+    for (std::size_t idx = 0u; idx < allStations.size(); ++idx) {
+        const auto& st = allStations[idx];
         bool match = containsLower(st.mac, needle) || containsLower(st.lastBssid, needle);
         if (!match) {
             for (const auto& s : st.probedSsids) {
@@ -594,13 +595,13 @@ void MainWindow::refreshStations(bool force) {
             }
         }
         if (match) {
-            visible.push_back(&st);
+            visibleIdx.push_back(idx);
         }
     }
-    tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(visible.size()));
-    stationsTable_->setRowCount(static_cast<int>(visible.size()));
-    for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
-        const auto& st = *visible[static_cast<std::size_t>(i)];
+    tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(visibleIdx.size()));
+    stationsTable_->setRowCount(static_cast<int>(visibleIdx.size()));
+    for (int i = 0; i < static_cast<int>(visibleIdx.size()); ++i) {
+        const auto& st = allStations[visibleIdx[static_cast<std::size_t>(i)]];
         const bool weak = sec::hasWeakOrDefaultProbe(st);
         QString probedList;
         for (std::size_t k = 0; k < st.probedSsids.size(); ++k) {
@@ -640,10 +641,10 @@ void MainWindow::refreshRfGuard(bool force) {
         QString band;
         QString addr;
         QString name;
-        int32_t rssi;
+        int32_t rssi = -100;
         QString status;
-        uint32_t count;
-        bool alert;
+        uint32_t count = 0u;
+        bool alert = false;
     };
     std::vector<RfRow> rows;
     rows.reserve(sec.bleTargets.size() + sec.subGhzCaptures.size());

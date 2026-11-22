@@ -80,7 +80,8 @@ jobs:
 
       - name: Run C++ static analysis (cppcheck)
         run: |
-          cppcheck --enable=warning,portability --error-exitcode=1 --template=gcc \
+          cppcheck --library=std --library=posix --library=qt \
+            --enable=warning,portability --error-exitcode=1 --template=gcc \
             --suppress=missingIncludeSystem --suppress=unmatchedSuppression --quiet \
             -I core/include -I render/include -I platforms/linux/backend -I platforms/linux/app -I platforms/common \
             core render platforms/common platforms/linux platforms/native
@@ -106,7 +107,10 @@ jobs:
           print("Secret pattern scan clean.")
           PY
           echo "esptool==4.8.1" > /tmp/flasher-req.txt
-          pip-audit -r /tmp/flasher-req.txt
+          # Ignore upstream python-ecdsa Minerva timing advisories (CVE-2024-23342: upstream
+          # treats timing side-channels as out-of-scope with no planned fix; esptool is only
+          # invoked for unsigned merge_bin/write_flash firmware operations).
+          pip-audit --ignore-vuln GHSA-wj6h-64fc-37mp --ignore-vuln PYSEC-2026-1325 -r /tmp/flasher-req.txt
 
   firmware-compile-check:
     name: ESP32 Firmware Compile Check (${{ matrix.env }})

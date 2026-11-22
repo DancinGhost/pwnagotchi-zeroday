@@ -107,10 +107,12 @@ inline std::string homeDir() {
             return std::string(h);
         }
     }
-    if (struct passwd* pw = ::getpwuid(::geteuid())) {
-        if (pw->pw_dir != nullptr && *pw->pw_dir != '\0') {
-            return std::string(pw->pw_dir);
-        }
+    struct passwd pwd {};
+    struct passwd* res = nullptr;
+    char buf[1024];
+    if (::getpwuid_r(::geteuid(), &pwd, buf, sizeof(buf), &res) == 0 && res != nullptr &&
+        res->pw_dir != nullptr && *res->pw_dir != '\0') {
+        return std::string(res->pw_dir);
     }
     return "/root";
 }

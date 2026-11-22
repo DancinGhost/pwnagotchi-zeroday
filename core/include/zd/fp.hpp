@@ -128,8 +128,8 @@ constexpr uint32_t nextSeed(uint32_t seed) {
 
 template <typename T>
 struct RngPick {
-    T value;
-    uint32_t nextSeed;
+    T value{};
+    uint32_t nextSeed = 0u;
 };
 
 // Pure selection from a non-empty std::array using functional PRNG threading.

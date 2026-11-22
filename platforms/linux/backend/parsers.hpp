@@ -263,10 +263,10 @@ inline std::vector<ScannedAp> parseNmcliScanDetailed(const std::string& text) {
 struct AirodumpAp {
     std::string bssid;
     std::string ssid;
-    int32_t channel;
-    int32_t rssi;
-    sec::Encryption enc;
-    uint32_t beacons;
+    int32_t channel = 0;
+    int32_t rssi = -100;
+    sec::Encryption enc = sec::Encryption::Unknown;
+    uint32_t beacons = 0u;
 };
 
 struct AirodumpStation {

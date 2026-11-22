@@ -23,10 +23,10 @@ struct ScreenDimensions {
 };
 
 struct ScreenProfile {
-    const char* key;
-    const char* label;
-    ScreenDimensions dims;
-    bool monochrome;
+    const char* key = "";
+    const char* label = "";
+    ScreenDimensions dims{};
+    bool monochrome = false;
 };
 
 // Common hardware display profiles across target form factors.
@@ -182,14 +182,14 @@ struct FaceGeometry {
 struct RadarRowView {
     std::string ssid;
     std::string details;
-    int bars;
-    bool secure;
+    int bars = 0;
+    bool secure = false;
 };
 
 struct ChannelBarView {
-    int32_t channel;
-    uint16_t count;
-    int16_t heightPx;
+    int32_t channel = 0;
+    uint16_t count = 0u;
+    int16_t heightPx = 0;
 };
 
 enum class ActivityScene : uint8_t {
@@ -244,25 +244,25 @@ inline ToastView buildThemeToast(const AppState& state,
 
 // Complete immutable UI View-Model ready for a dumb graphics driver to paint.
 struct UiFrame {
-    ScreenDimensions dims;
-    bool compact;
-    ColorPalette palette;
-    ScreenPage page;
+    ScreenDimensions dims{};
+    bool compact = false;
+    ColorPalette palette{};
+    ScreenPage page = ScreenPage::PetFace;
 
-    int16_t headerDividerY;
-    int16_t footerDividerY;
-    int16_t headerTextY;
-    int16_t footerTextY;
+    int16_t headerDividerY = 0;
+    int16_t footerDividerY = 0;
+    int16_t headerTextY = 0;
+    int16_t footerTextY = 0;
 
     std::string headerLine;
     std::string footerLine;
 
     // PetFace page fields
-    FaceDescriptor face;
-    FaceGeometry faceGeom;
-    int16_t speechX;
-    int16_t speechTopY;
-    int16_t lineStepY;
+    FaceDescriptor face{};
+    FaceGeometry faceGeom{};
+    int16_t speechX = 0;
+    int16_t speechTopY = 0;
+    int16_t lineStepY = 0;
     std::string promptLabel;
     std::vector<std::string> phraseLines;
     std::string spotlightLabel;
@@ -272,9 +272,9 @@ struct UiFrame {
     std::string radarEmptyHint;
 
     // ChannelSpectrum page fields
-    std::array<ChannelBarView, 13> channelBars;
-    int16_t chartBaseY;
-    int16_t chartMaxBarH;
+    std::array<ChannelBarView, 13> channelBars{};
+    int16_t chartBaseY = 0;
+    int16_t chartMaxBarH = 0;
     std::string spectrumSummary;
 
     // RfGuard (BLE + Sub-GHz) page fields
@@ -283,11 +283,11 @@ struct UiFrame {
     std::string rfGuardEmptyHint;
 
     // Theming & Ops HUD
-    ThemeId theme;
-    ThemeEffect themeEffect;
-    FaceStyle faceStyle;
-    uint32_t animTick;
-    ToastView toast;
+    ThemeId theme = ThemeId::PaperInk;
+    ThemeEffect themeEffect = ThemeEffect::None;
+    FaceStyle faceStyle = FaceStyle::ClassicFace;
+    uint32_t animTick = 0u;
+    ToastView toast{};
     bool offensiveArmed = false;
     OpsMode opsMode = OpsMode::Recon;
     std::string modeBadge;
