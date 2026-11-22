@@ -80,7 +80,7 @@ jobs:
 
       - name: Run C++ static analysis (cppcheck)
         run: |
-          cppcheck --library=std --library=posix --library=qt \
+          cppcheck --library=std --library=posix --library=qt --inline-suppr \
             --enable=warning,portability --error-exitcode=1 --template=gcc \
             --suppress=missingIncludeSystem --suppress=unmatchedSuppression --quiet \
             -I core/include -I render/include -I platforms/linux/backend -I platforms/linux/app -I platforms/common \

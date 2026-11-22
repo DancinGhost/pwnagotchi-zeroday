@@ -192,6 +192,8 @@ private:
         (void)::fchmod(fd, 0600);
         FILE* fp = ::fdopen(fd, "wb");
         if (fp == nullptr) {
+            // POSIX fdopen() leaves fd open on failure; cppcheck 2.13 posix.cfg mismodels it as consumed.
+            // cppcheck-suppress doubleFree
             ::close(fd);
             return;
         }

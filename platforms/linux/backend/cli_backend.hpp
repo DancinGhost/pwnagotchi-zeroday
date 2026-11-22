@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <set>
@@ -28,7 +29,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <sys/stat.h>
@@ -657,16 +657,18 @@ public:
         hasCache_ = true;
 
         zd::hal::PowerStatus st{100, false};
-        DIR* dir = ::opendir("/sys/class/power_supply");
-        if (dir == nullptr) {
+        std::error_code ec;
+        std::filesystem::directory_iterator it("/sys/class/power_supply", ec);
+        if (ec) {
             cached_ = st;
             return st;
         }
-        while (struct dirent* ent = ::readdir(dir)) {
-            if (ent->d_name[0] == '.') {
+        for (const auto& entry : it) {
+            const std::string name = entry.path().filename().string();
+            if (name.empty() || name[0] == '.') {
                 continue;
             }
-            const std::string base = std::string("/sys/class/power_supply/") + ent->d_name;
+            const std::string base = "/sys/class/power_supply/" + name;
             const std::string ptype = trim(readFileToString(base + "/type", 64u));
             if (ptype != "Battery") {
                 continue;
@@ -678,12 +680,10 @@ public:
                 const std::string status = readFileToString(base + "/status", 64u);
                 st.isCharging = (status.find("Charging") != std::string::npos) ||
                                 (status.find("Full") != std::string::npos);
-                ::closedir(dir);
                 cached_ = st;
                 return st;
             }
         }
-        ::closedir(dir);
         cached_ = st;
         return st;  // desktop with no battery => 100%, not charging
     }
