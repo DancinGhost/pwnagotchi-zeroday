@@ -2,7 +2,7 @@
 Pwnagotchi, our way zero day
 
 <p align="center">
-  <img src="assets/web_toy_preview.png" alt="pwnagotchi-zeroday Web Port & Pocket Cyberdeck" width="620" />
+  <img src="assets/preview.png" alt="pwnagotchi-zeroday Cyberdeck UI (Defense Mode)" width="620" />
 </p>
 
 A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner written in portable **C++17**, built around a **Functional Core, Imperative Shell** architecture that runs across **ESP32 / M5Stack handhelds**, **native desktop / Linux SBC terminals**, a full **Linux desktop app (CLI/TUI + Qt6 GUI) with real offensive & defensive WiFi tooling**, and the **browser**.
@@ -20,7 +20,8 @@ A cross-platform Pwnagotchi-inspired virtual pet UI and 2.4 GHz WiFi scanner wri
   3. **Channel Spectrum**: 2.4 GHz channels 1–13 bar histogram with open vs. secured AP counts.
   4. **RF Guard**: Bluetooth/BLE device monitor (sorted by threat + RSSI with vendor/service classification) and Sub-GHz CC1101 frequency/anomaly feed (plus dedicated **Bluetooth** tables in `zd-linux bt`, TUI/Qt6 `Bluetooth` tab, Web `Airspace Devices` panel, and ESP32 `ble`/`bt [scan]`).
 - **Multi-Device Responsive Layout**: Automatically scales from `128×64` micro OLEDs and `160×80` M5StickC up through `240×135` StickC Plus2 / Cardputer, `250×122` 2.13" e-Paper HATs, and `320×240`+ QVGA cyberdecks (`M5Stack Core2`, `CYD`, `T-Deck`), including built-in RGB565, RGB888, and 1-bit monochrome framebuffer export. See [docs/PORTING.md](docs/PORTING.md).
-- **Linux Desktop App — Real Offensive & Defensive WiFi Tooling**: A CLI/ncurses TUI (`zd-linux`) and a Qt6 GUI (`zd-gui`) over a shared controller. Unprivileged recon (nmcli/iw), live **defensive monitors** (deauth-flood, evil-twin, open-downgrade, karma-beacon detection), and **authorization-gated offensive** capture (WPA handshakes / PMKIDs) and deauth injection via a hybrid **libpcap + aircrack-ng** backend. Every transmit is gated by an explicit authorization + per-BSSID allow-list and written to an audit log. See [docs/LINUX.md](docs/LINUX.md).
+- **Linux Desktop App — Real Offensive & Defensive WiFi Tooling**: A CLI/ncurses TUI (`zd-linux`) and a Qt6 GUI (`zd-gui`) over a shared controller. Unprivileged recon (nmcli/iw), live **defensive monitors** (deauth-flood, evil-twin, open-downgrade, karma-beacon detection), **authorization-gated offensive** capture (WPA handshakes / PMKIDs) and deauth injection via a hybrid **libpcap + aircrack-ng** backend, direct **Hashcat `.hc22000`** export, session record/replay (`.zds`), and Markdown/CSV/HTML reporting. Every transmit is gated by an explicit authorization + per-BSSID allow-list and written to an audit log. See [docs/LINUX.md](docs/LINUX.md).
+- **ESP32 Active Defense, Peering & Gated Offense**: Promiscuous 802.11 defensive monitoring (`defmon`), multi-transport peer discovery (ZeroDay WiFi/BLE/opt-in SX1262 LoRa + classic Pwnagotchi/Palnagotchi detection), offline IEEE OUI vendor lookup, SD `.zds` / `.hc22000` capture export, and a runtime-gated serial `sec` injector. See [docs/OFFENSIVE.md](docs/OFFENSIVE.md).
 
 ---
 
@@ -35,19 +36,25 @@ core/include/zd/              # Zero-dependency C++17 Functional Core & HAL
   ├── pet_logic.hpp           # Pure Elm/Redux reducer: reduce(AppState, AppEvent)
   ├── ui_model.hpp            # Responsive multi-device layout & ASCII frame renderer
   ├── hal.hpp                 # Portable HAL interfaces, CLI parser & PlatformSession
+  ├── dot11.hpp               # Pure 802.11 deauth/disassoc frame builder & MAC/IE helpers
+  ├── dot11_decode.hpp        # Pure radiotap + 802.11 management/EAPOL frame decoder
+  ├── hashcat.hpp             # Pure Hashcat 22000 (PMKID + EAPOL) formatter
+  ├── oui.hpp                 # Offline 24-bit IEEE OUI MAC vendor lookup
+  ├── peering.hpp             # Multi-transport peer discovery (WiFi, BLE, LoRa)
   ├── secops.hpp              # Pure security engine: SecState reducer, ChannelHopper,
   │                           #   trusted BSSID memory, defensive monitors & TX gate
   ├── report.hpp              # Pure assessment report exporter (Markdown, CSV, HTML)
   └── secops_hal.hpp          # Capture/inject/monitor adapter contracts & SecSession
 render/include/zd/render/     # Hardware-agnostic immediate-mode renderer
   ├── painter.hpp             # Templated paintUiFrame<Gfx> (M5GFX, LovyanGFX, etc.)
-  └── surface_rgb565.hpp      # Zero-dep RGB565 framebuffer + 5x7 font + 1-bit export
+  ├── surface_rgb565.hpp      # Zero-dep RGB565 framebuffer + 5x7 font + 1-bit export
+  └── gif_export.hpp          # Zero-dep animated GIF89a & LZW exporter
 platforms/                    # Device & OS shells
-  ├── common/                 # Shared ESP32 WiFi/BLE/CC1101 HAL, buzzer melodies & WiGLE CSV
+  ├── common/                 # Shared ESP32 WiFi/BLE/CC1101/LoRa HAL, defmon, sec CLI, SD & WiGLE
   ├── m5stick/main.cpp        # ESP32 + M5Unified + Speaker melodies + WiFi/BLE + NVS
   ├── tdeck/main.cpp          # ESP32-S3 + LovyanGFX + Trackball + Keyboard + GPS + WiGLE SD
   ├── cyd/main.cpp            # ESP32-2432S028 (CYD) + Dual-Band DMA + XPT2046 + LDR/LED
-  ├── native/main.cpp         # Desktop / Linux / RPi CLI simulator & PPM exporter (zd_sim)
+  ├── native/main.cpp         # Desktop / Linux / RPi CLI simulator, PPM & GIF exporter (zd_sim)
   ├── linux/                  # Linux desktop app: real offensive/defensive WiFi tooling
   │   ├── backend/            #   hybrid libpcap + nmcli/iw/airodump/rtl_433/bluetoothctl
   │   ├── app/                #   shared AppController + monotonic clock
@@ -55,7 +62,7 @@ platforms/                    # Device & OS shells
   │   └── gui/                #   Qt6 Widgets dashboard (zd-gui)
   └── web/                    # Offline-installable PWA HTML5 Canvas pocket cyberdeck port
 tests/                        # Automated host & cross-language parity test suites
-docs/                         # Theme design rules (THEMES.md) & porting guide (PORTING.md)
+docs/                         # THEMES.md, PORTING.md, LINUX.md, OFFENSIVE.md, FLASHING.md
 ```
 
 ---
@@ -130,6 +137,11 @@ pio run -e m5stick-c-plus2 --target upload
 # M5Stack Core2 (320x240 QVGA)
 pio run -e m5stack-core2 --target upload
 
+# LILYGO T-Deck Plus with opt-in SX1262 LoRa peering (compile-gated, see esp32_lora_peer.hpp)
+pio run -e t-deck-lora --target upload
+
+# Parallel ESP-IDF 5.x / PIOArduino targets also available: *-idf5 (e.g. t-deck-plus-idf5, m5stick-c-plus2-idf5)
+
 # Serial monitor + interactive CLI (try typing: themes, theme neon, gps, status)
 pio device monitor -b 115200
 ```
@@ -142,12 +154,13 @@ Build and run all C++ core tests, software framebuffer/HAL tests, and Web/C++ pa
 make test
 ```
 
-Preview every theme in truecolor ANSI right in your terminal, or export a pixel-accurate `.ppm` screenshot for any device profile (`micro`, `compact`, `plus`, `epaper`, `wide`):
+Preview every theme in truecolor ANSI right in your terminal, or export a pixel-accurate `.ppm` screenshot or animated `.gif` for any device profile (`micro`, `compact`, `plus`, `epaper`, `wide`):
 
 ```bash
 make demo
 ./build/zd_sim --theme neon --size plus
 ./build/zd_sim --theme operator --size wide --ppm build/operator_wide.ppm
+./build/zd_sim --theme zeroday --size wide --gif build/zeroday_wide.gif --frames 24
 ```
 
 With CMake + CTest:
