@@ -11,6 +11,7 @@
 #include <SPI.h>
 #include <WiFi.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -32,7 +33,9 @@
 #include <vector>
 
 #include "zd/hal.hpp"
+#include "zd/peering.hpp"
 #include "zd/wifi_analysis.hpp"
+#include "esp32_defensive.hpp"
 
 namespace zd {
 namespace esp32_common {
@@ -239,9 +242,18 @@ public:
         const int32_t rssiDbm = (signedRssi / 2) - 74;
         if (rssiDbm < -75) {
             streak_ = 0u;
+            inBurst_ = false;
             return std::nullopt;
         }
         ++streak_;
+        const bool risingEdge = !inBurst_;
+        const bool escalated = (streak_ == 5u || streak_ == 12u);
+        const bool periodicRefresh = (nowMs - lastReportMs_) >= 2000u;
+        if (!risingEdge && !escalated && !periodicRefresh) {
+            return std::nullopt;
+        }
+        inBurst_ = true;
+        lastReportMs_ = nowMs;
         zd::SubGhzSignal sig{};
         sig.freqKhz = freqKhz_;
         sig.rssi = rssiDbm;
@@ -302,7 +314,9 @@ private:
     bool detected_ = false;
     uint32_t freqKhz_ = 433920u;
     uint32_t lastPollMs_ = 0u;
+    uint32_t lastReportMs_ = 0u;
     uint32_t streak_ = 0u;
+    bool inBurst_ = false;
 };
 
 // Optional non-blocking ESP32 BLE advertisement scanner (FindMy/AirTag/SmartTag/Tile & multi-tool).
@@ -319,17 +333,26 @@ public:
         if (mutex_ == nullptr) {
             mutex_ = xSemaphoreCreateMutex();
         }
+        if (triggerSem_ == nullptr) {
+            triggerSem_ = xSemaphoreCreateBinary();
+        }
         if (esp_get_free_heap_size() <= kMinFreeHeapBytes) {
             ready_ = false;
             return false;
         }
         BLEDevice::init("");
         scan_ = BLEDevice::getScan();
-        if (scan_ != nullptr && mutex_ != nullptr) {
+        if (scan_ != nullptr && mutex_ != nullptr && triggerSem_ != nullptr) {
             scan_->setActiveScan(false);  // passive listen-only BLE scan
             scan_->setInterval(120);
             scan_->setWindow(60);
-            ready_ = true;
+            if (workerTask_ == nullptr) {
+                if (xTaskCreate(&Esp32BleScanner::scanTaskLoop, "zd_ble", 4096u, this, 1,
+                                &workerTask_) != pdPASS) {
+                    workerTask_ = nullptr;
+                }
+            }
+            ready_ = (workerTask_ != nullptr);
         }
 #endif
         return ready_;
@@ -339,11 +362,34 @@ public:
     bool isEnabled() const { return enabled_.load(std::memory_order_acquire); }
     bool available() const override { return ready_ && enabled_.load(std::memory_order_acquire); }
 
+    void requestScanNow() {
+        forceScan_.store(true, std::memory_order_release);
+#ifdef ZD_HAS_ESP32_BLE
+        if (!ready_ || !enabled_.load(std::memory_order_acquire) || scan_ == nullptr ||
+            mutex_ == nullptr || triggerSem_ == nullptr ||
+            esp_get_free_heap_size() <= kMinFreeHeapBytes) {
+            return;
+        }
+        bool triggered = false;
+        if (xSemaphoreTake(mutex_, 0) == pdTRUE) {
+            if (!workerRunning_) {
+                workerRunning_ = true;
+                forceScan_.store(false, std::memory_order_release);
+                triggered = true;
+            }
+            xSemaphoreGive(mutex_);
+        }
+        if (triggered) {
+            xSemaphoreGive(triggerSem_);
+        }
+#endif
+    }
+
     std::vector<zd::BleDevice> pollBleDevices(uint32_t nowMs) override {
         std::vector<zd::BleDevice> out;
 #ifdef ZD_HAS_ESP32_BLE
         if (!ready_ || !enabled_.load(std::memory_order_acquire) || scan_ == nullptr ||
-            mutex_ == nullptr) {
+            mutex_ == nullptr || triggerSem_ == nullptr) {
             return out;
         }
         bool busy = false;
@@ -357,19 +403,21 @@ public:
         } else {
             return out;
         }
-        if (!busy && (nowMs - lastScanMs_) >= 8000u &&
-            esp_get_free_heap_size() > kMinFreeHeapBytes) {
-            lastScanMs_ = nowMs;
+        const bool due = forceScan_.load(std::memory_order_acquire) ||
+                         ((nowMs - lastScanMs_) >= 8000u);
+        if (!busy && due && esp_get_free_heap_size() > kMinFreeHeapBytes) {
+            bool triggered = false;
             if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
-                workerRunning_ = true;
-                xSemaphoreGive(mutex_);
-                if (xTaskCreate(&Esp32BleScanner::scanTaskEntry, "zd_ble", 4096u, this, 1,
-                                nullptr) != pdPASS) {
-                    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
-                        workerRunning_ = false;
-                        xSemaphoreGive(mutex_);
-                    }
+                if (!workerRunning_) {
+                    workerRunning_ = true;
+                    forceScan_.store(false, std::memory_order_release);
+                    lastScanMs_ = nowMs;
+                    triggered = true;
                 }
+                xSemaphoreGive(mutex_);
+            }
+            if (triggered) {
+                xSemaphoreGive(triggerSem_);
             }
         }
 #else
@@ -380,30 +428,56 @@ public:
 
 private:
 #ifdef ZD_HAS_ESP32_BLE
-    static void scanTaskEntry(void* arg) {
+    static void scanTaskLoop(void* arg) {
         auto* self = static_cast<Esp32BleScanner*>(arg);
-        if (self != nullptr) {
-            self->runWorkerScan();
+        if (self == nullptr) {
+            vTaskDelete(nullptr);
+            return;
         }
-        vTaskDelete(nullptr);
+        for (;;) {
+            if (xSemaphoreTake(self->triggerSem_, portMAX_DELAY) == pdTRUE) {
+                self->runWorkerScan();
+            }
+        }
     }
 
     void runWorkerScan() {
         std::vector<zd::BleDevice> batch;
         if (scan_ != nullptr && enabled_.load(std::memory_order_acquire) &&
             esp_get_free_heap_size() > kMinFreeHeapBytes) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+            BLEScanResults* resultsPtr = scan_->start(1, false);
+            const int n = (resultsPtr != nullptr) ? resultsPtr->getCount() : 0;
+#else
             BLEScanResults results = scan_->start(1, false);
-            const int n = results.getCount();
+            BLEScanResults* resultsPtr = &results;
+            const int n = resultsPtr->getCount();
+#endif
             batch.reserve(static_cast<std::size_t>(n > 0 ? n : 0));
             for (int i = 0; i < n; ++i) {
-                BLEAdvertisedDevice dev = results.getDevice(i);
+                BLEAdvertisedDevice dev = resultsPtr->getDevice(i);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+                const auto addrVal = dev.getAddress().toString();
+                const std::string mac(addrVal.c_str(), addrVal.length());
+                std::string name;
+                if (dev.haveName()) {
+                    const auto nameVal = dev.getName();
+                    name.assign(nameVal.c_str(), nameVal.length());
+                }
+#else
                 const std::string mac = dev.getAddress().toString();
                 const std::string name = dev.haveName() ? dev.getName() : std::string{};
+#endif
                 const int32_t rssi = dev.getRSSI();
                 uint16_t companyId = 0u;
                 bool trackerPayload = false;
                 if (dev.haveManufacturerData()) {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+                    const auto mfgVal = dev.getManufacturerData();
+                    const std::string mfg(mfgVal.c_str(), mfgVal.length());
+#else
                     const std::string mfg = dev.getManufacturerData();
+#endif
                     if (mfg.size() >= 2u) {
                         companyId = static_cast<uint16_t>(
                             static_cast<uint8_t>(mfg[0]) |
@@ -438,13 +512,207 @@ private:
 
     BLEScan* scan_ = nullptr;
     SemaphoreHandle_t mutex_ = nullptr;
+    SemaphoreHandle_t triggerSem_ = nullptr;
+    TaskHandle_t workerTask_ = nullptr;
     std::vector<zd::BleDevice> pending_{};
     bool hasPending_ = false;
     bool workerRunning_ = false;
     uint32_t lastScanMs_ = 0u;
 #endif
+    std::atomic<bool> forceScan_{false};
     std::atomic<bool> enabled_{true};
     bool ready_ = false;
+};
+
+// Opt-in BLE peer greeting: advertises THIS unit's presence as BLE manufacturer-specific data
+// (zd::peer::buildZeroDayBleManufacturerData) so nearby ZeroDay units greet it over BLE.
+// DISABLED by default. CRITICAL: it NEVER transmits while the pet is in Offensive ops mode —
+// when offensive, advertising is force-stopped and refused (you do not beacon your presence
+// while actively attacking). Coexists with the passive BLE scanner (both use BLEDevice).
+class Esp32PeerBleAdvertiser {
+public:
+    void setEnabled(bool on) { enabled_ = on; }
+    bool enabled() const { return enabled_; }
+    // True only when the radio is currently advertising (enabled, not offensive, started OK).
+    bool advertising() const { return advertising_; }
+
+    // Reconcile advertising state against the desired advert and the current ops mode.
+    // `offensiveMode` true => stop and refuse to transmit, regardless of `enabled()`.
+    void sync(const zd::peer::PeerAdvert& advert, bool offensiveMode) {
+#ifdef ZD_HAS_ESP32_BLE
+        if (offensiveMode || !enabled_) {
+            stop();
+            return;
+        }
+        const std::vector<uint8_t> mfg = zd::peer::buildZeroDayBleManufacturerData(advert);
+        const uint32_t h = fnv1a(mfg);
+        if (advertising_ && h == lastHash_) {
+            return;  // already advertising the current advert; nothing to do
+        }
+        if (!ensureInit()) {
+            return;
+        }
+        BLEAdvertising* adv = BLEDevice::getAdvertising();
+        if (adv == nullptr) {
+            return;
+        }
+        if (advertising_) {
+            adv->stop();
+        }
+        BLEAdvertisementData data;
+        data.setFlags(0x06);  // LE General Discoverable + BR/EDR not supported
+        data.setManufacturerData(std::string(reinterpret_cast<const char*>(mfg.data()), mfg.size()));
+        adv->setAdvertisementData(data);
+        adv->start();
+        advertising_ = true;
+        lastHash_ = h;
+#else
+        (void)advert;
+        (void)offensiveMode;
+#endif
+    }
+
+    void stop() {
+#ifdef ZD_HAS_ESP32_BLE
+        if (advertising_) {
+            BLEAdvertising* adv = BLEDevice::getAdvertising();
+            if (adv != nullptr) {
+                adv->stop();
+            }
+            advertising_ = false;
+        }
+#endif
+    }
+
+private:
+#ifdef ZD_HAS_ESP32_BLE
+    bool ensureInit() {
+        if (!inited_) {
+            BLEDevice::init("");  // idempotent; the scanner may already have initialized BLE
+            inited_ = true;
+        }
+        return true;
+    }
+    static uint32_t fnv1a(const std::vector<uint8_t>& b) {
+        uint32_t h = 0x811C9DC5u;
+        for (uint8_t x : b) {
+            h ^= x;
+            h *= 0x01000193u;
+        }
+        return h;
+    }
+    bool inited_ = false;
+#endif
+    bool enabled_ = false;
+    bool advertising_ = false;
+    uint32_t lastHash_ = 0u;
+};
+
+// Promiscuous 802.11 defensive monitor adapter for ESP32 / ESP32-S3.
+// Captures management (beacons, deauth/disassoc, action CSA) and unencrypted data (EAPOL M1..M4)
+// frames in real time via `esp_wifi_set_promiscuous_rx_cb` and drains them on the main loop.
+class Esp32PromiscuousMonitor {
+public:
+    void init(uint8_t startChannel = 1u) {
+        instance_ = this;
+        channel_ = (startChannel >= 1u && startChannel <= 13u) ? startChannel : 1u;
+        setEnabled(true);
+    }
+
+    bool setEnabled(bool on) {
+        core_.setEnabled(on);
+        if (on) {
+            instance_ = this;
+            wifi_promiscuous_filter_t filter{};
+            filter.filter_mask =
+                WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+            esp_wifi_set_promiscuous_filter(&filter);
+            esp_wifi_set_promiscuous_rx_cb(&Esp32PromiscuousMonitor::onPromiscuousRx);
+            return esp_wifi_set_promiscuous(true) == ESP_OK;
+        }
+        esp_wifi_set_promiscuous(false);
+        esp_wifi_set_promiscuous_rx_cb(nullptr);
+        return true;
+    }
+
+    bool isEnabled() const { return core_.enabled(); }
+
+    void setAutoHop(bool on) { autoHop_ = on; }
+    bool autoHop() const { return autoHop_; }
+    uint8_t currentChannel() const { return channel_; }
+
+    uint32_t step(uint32_t nowMs,
+                  zd::sec::SecSession& sec,
+                  zd::hal::PlatformSession* pet = nullptr,
+                  zd::hal::IThemeStore* themeStore = nullptr) {
+        const uint32_t decoded = core_.step(sec, nowMs, pet, themeStore);
+        // Optionally sweep 2.4 GHz channels slowly while idle (never mid-scan).
+        if (autoHop_ && core_.enabled() && WiFi.scanComplete() != WIFI_SCAN_RUNNING &&
+            (nowMs - lastHopMs_) >= 350u) {
+            // Full 2.4 GHz coverage (1-13): primaries 1/6/11 first so they're
+            // over-sampled, then every remaining channel so APs parked on 4/5/9/10
+            // (previously skipped entirely) are still swept.
+            static constexpr uint8_t kHopChans[] = {1u, 6u,  11u, 2u, 7u, 12u, 3u,
+                                                    8u, 13u, 4u,  9u, 5u, 10u};
+            hopIdx_ = (hopIdx_ + 1u) % (sizeof(kHopChans) / sizeof(kHopChans[0]));
+            channel_ = kHopChans[hopIdx_];
+            esp_wifi_set_channel(channel_, WIFI_SECOND_CHAN_NONE);
+            lastHopMs_ = nowMs;
+        }
+        return decoded;
+    }
+
+    // Handle `defmon [on|off]` serial command; returns empty string if unrelated.
+    std::string handleCommand(const std::string& line, const zd::sec::SecState& st) {
+        if (line == "defmon on") {
+            setEnabled(true);
+            return "Defensive monitor: ON (promiscuous MGMT+DATA active)\n";
+        }
+        if (line == "defmon off") {
+            setEnabled(false);
+            return "Defensive monitor: OFF\n";
+        }
+        if (line == "defmon hop on") {
+            autoHop_ = true;
+            return "Defensive monitor channel-hop: ON\n";
+        }
+        if (line == "defmon hop off") {
+            autoHop_ = false;
+            return "Defensive monitor channel-hop: OFF\n";
+        }
+        if (line == "defmon") {
+            return core_.formatStatus(st);
+        }
+        return {};
+    }
+
+    Esp32DefensiveMonitorCore& core() { return core_; }
+    const Esp32DefensiveMonitorCore& core() const { return core_; }
+
+private:
+    static void onPromiscuousRx(void* buf, wifi_promiscuous_pkt_type_t type) {
+        Esp32PromiscuousMonitor* self = instance_;
+        if (self == nullptr || buf == nullptr) {
+            return;
+        }
+        if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) {
+            return;
+        }
+        const auto* pkt = static_cast<const wifi_promiscuous_pkt_t*>(buf);
+        const std::size_t rawLen = static_cast<std::size_t>(pkt->rx_ctrl.sig_len);
+        const std::size_t frameLen = (rawLen >= 28u) ? (rawLen - 4u) : rawLen;
+        self->core_.enqueueFromIsr(pkt->payload, frameLen, pkt->rx_ctrl.rssi,
+                                   static_cast<uint32_t>(millis()));
+    }
+
+    inline static Esp32PromiscuousMonitor* instance_ = nullptr;
+    Esp32DefensiveMonitorCore core_{};
+    // Default ON: a defensive monitor parked on channel 1 misses APs/attacks on all
+    // other channels. step() still never hops mid-scan. Toggle via `defmon hop off`.
+    bool autoHop_ = true;
+    uint8_t channel_ = 1u;
+    std::size_t hopIdx_ = 0u;
+    uint32_t lastHopMs_ = 0u;
 };
 
 }  // namespace esp32_common

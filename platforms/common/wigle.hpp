@@ -7,6 +7,7 @@
 #include <nmea.hpp>
 
 #include <cstdio>
+#include <deque>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -33,9 +34,15 @@ inline std::string sanitizeWigleCsvCell(const std::string& raw) {
         }
     }
     if (!clean.empty()) {
-        const char f = clean[0];
-        if (f == '=' || f == '+' || f == '-' || f == '@' || f == '\t' || f == '\r') {
-            clean.insert(clean.begin(), '\'');
+        std::size_t firstNonWs = 0u;
+        while (firstNonWs < clean.size() && (clean[firstNonWs] == ' ' || clean[firstNonWs] == '\t')) {
+            ++firstNonWs;
+        }
+        if (firstNonWs < clean.size()) {
+            const char f = clean[firstNonWs];
+            if (f == '=' || f == '+' || f == '-' || f == '@') {
+                clean.insert(clean.begin(), '\'');
+            }
         }
     }
     std::string quoted = "\"";
@@ -78,6 +85,7 @@ public:
 
     void reset() {
         seenRssi_.clear();
+        seenOrder_.clear();
         loggedCount_ = 0u;
     }
 
@@ -91,8 +99,11 @@ public:
         if (!gps.hasFix) {
             return lines;
         }
+        const std::string fallbackDate = gps.hasDate ? std::string(gps.utcDate) : std::string("1970-01-01");
+        const std::string fallbackTime =
+            (gps.utcTime[0] != '\0') ? std::string(gps.utcTime) : std::string("00:00:00");
         const std::string stamp =
-            seenUtc.empty() ? ("1970-01-01 " + std::string(gps.utcTime)) : seenUtc;
+            seenUtc.empty() ? (fallbackDate + " " + fallbackTime) : seenUtc;
         for (std::size_t i = 0u; i < aps.size(); ++i) {
             const AccessPoint& ap = aps[i];
             const std::string mac = (i < bssids.size()) ? bssids[i] : std::string{};
@@ -103,8 +114,12 @@ public:
             if (it != seenRssi_.end() && (ap.rssi - it->second) < 8) {
                 continue;
             }
-            if (seenRssi_.size() >= kMaxTrackedBssids && it == seenRssi_.end()) {
-                seenRssi_.clear();
+            if (it == seenRssi_.end()) {
+                while (seenRssi_.size() >= kMaxTrackedBssids && !seenOrder_.empty()) {
+                    seenRssi_.erase(seenOrder_.front());
+                    seenOrder_.pop_front();
+                }
+                seenOrder_.push_back(mac);
             }
             seenRssi_[mac] = ap.rssi;
             lines.push_back(formatWigleCsvRow(mac, ap, gps, stamp));
@@ -115,6 +130,7 @@ public:
 
 private:
     std::unordered_map<std::string, int32_t> seenRssi_{};
+    std::deque<std::string> seenOrder_{};
     uint32_t loggedCount_ = 0u;
 };
 

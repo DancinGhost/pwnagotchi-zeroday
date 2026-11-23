@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'zeroday-web-v2';
+const CACHE_NAME = 'zeroday-web-v3';
 const PRECACHE_URLS = [
   './',
   './index.html',
@@ -44,9 +44,38 @@ self.addEventListener('activate', function (event) {
 
 self.addEventListener('fetch', function (event) {
   if (event.request.method !== 'GET') return;
+  const reqUrl = new URL(event.request.url);
+  if (reqUrl.origin !== self.location.origin) return;
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).then(function (netResp) {
+        if (netResp && netResp.ok) {
+          const clone = netResp.clone();
+          caches.open(CACHE_NAME).then(function (cache) { cache.put(event.request, clone); });
+        }
+        return netResp;
+      }).catch(function () {
+        return caches.match('./index.html');
+      })
+    );
+    return;
+  }
+
+  // Stale-while-revalidate for same-origin static assets
   event.respondWith(
-    caches.match(event.request).then(function (cached) {
-      return cached || fetch(event.request);
+    caches.open(CACHE_NAME).then(function (cache) {
+      return cache.match(event.request).then(function (cached) {
+        const netPromise = fetch(event.request).then(function (netResp) {
+          if (netResp && netResp.ok && netResp.type === 'basic') {
+            cache.put(event.request, netResp.clone());
+          }
+          return netResp;
+        }).catch(function () {
+          return cached;
+        });
+        return cached || netPromise;
+      });
     })
   );
 });

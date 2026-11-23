@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <set>
 #include <string>
@@ -8,6 +10,9 @@
 
 #include "zd/domain.hpp"
 #include "zd/fp.hpp"
+#include "zd/hal.hpp"
+#include "zd/oui.hpp"
+#include "zd/peering.hpp"
 #include "zd/pet_logic.hpp"
 #include "zd/theme.hpp"
 #include "zd/ui_model.hpp"
@@ -253,10 +258,10 @@ void testThemeCatalog() {
     assert(zd::themeSpec(zd::ThemeId::BlueTeam).effect == zd::ThemeEffect::TacticalHud);
     assert(zd::themeFaceStyle(zd::ThemeId::PaperInk) == zd::FaceStyle::ClassicFace);
     assert(zd::themeFaceStyle(zd::ThemeId::CodeRain) == zd::FaceStyle::ClassicFace);
-    assert(zd::themeFaceStyle(zd::ThemeId::ZeroDayCyan) == zd::FaceStyle::PixelArtMascot);
-    assert(zd::themeFaceStyle(zd::ThemeId::AmberCrt) == zd::FaceStyle::PixelArtMascot);
-    assert(zd::themeFaceStyle(zd::ThemeId::RedTeam) == zd::FaceStyle::PixelArtMascot);
-    assert(zd::themeFaceStyle(zd::ThemeId::BlueTeam) == zd::FaceStyle::PixelArtMascot);
+    assert(zd::themeFaceStyle(zd::ThemeId::ZeroDayCyan) == zd::FaceStyle::ClassicFace);
+    assert(zd::themeFaceStyle(zd::ThemeId::AmberCrt) == zd::FaceStyle::ClassicFace);
+    assert(zd::themeFaceStyle(zd::ThemeId::RedTeam) == zd::FaceStyle::ClassicFace);
+    assert(zd::themeFaceStyle(zd::ThemeId::BlueTeam) == zd::FaceStyle::ClassicFace);
     assert(zd::themeLabel(zd::ThemeId::CodeRain) == "STORM RAIN");
     assert(zd::themeLabel(zd::ThemeId::AmberCrt) == "AMBER PULSE");
     assert(zd::toRgb888Packed({0x12, 0x34, 0x56}) == 0x123456u);
@@ -340,11 +345,13 @@ void testThemeEventsAndToast() {
         }
     }
 
-    // Semantic page cycling (forward & backward across 4 pages including RfGuard)
+    // Semantic page cycling (forward & backward across 5 pages including RfGuard & Captures)
     const zd::AppState sPrevPage = zd::reduce(s0, zd::CyclePageEvent{200u, -1});
-    assert(sPrevPage.page == zd::ScreenPage::RfGuard);
+    assert(sPrevPage.page == zd::ScreenPage::Captures);
+    const zd::AppState sPrevRf = zd::reduce(sPrevPage, zd::CyclePageEvent{210u, -1});
+    assert(sPrevRf.page == zd::ScreenPage::RfGuard);
     const zd::AppState sDirectPage =
-        zd::reduce(sPrevPage, zd::SetPageEvent{250u, zd::ScreenPage::NearbyRadar});
+        zd::reduce(sPrevRf, zd::SetPageEvent{250u, zd::ScreenPage::NearbyRadar});
     assert(sDirectPage.page == zd::ScreenPage::NearbyRadar);
 
     // Theme change while scanning keeps scan commentary
@@ -471,6 +478,461 @@ void testExpandedLevelsHighscoreAndMultiRadio() {
     assert(zd::extractBle16ServiceUuid(adSvc, sizeof(adSvc)) == 0xFEEDu);
 }
 
+void testCapturesNotificationsAndHighscore() {
+    // 1. Enriched LevelInfo badges & thresholds
+    const zd::LevelInfo l1 = zd::deriveLevelInfo(0u);
+    assert(l1.level == 1u && std::string(l1.badge) == "SPRT" && l1.minXp == 0u);
+    const zd::LevelInfo l10 = zd::deriveLevelInfo(2500u);
+    assert(l10.level == 10u && std::string(l10.badge) == "LGND" && l10.minXp == 2500u);
+
+    // 2. Highscore baseline & record notification
+    zd::AppState s = zd::initialState(21u);
+    s = zd::reduce(s, zd::SetHighScoreEvent{100u, 30u, 0u});
+    assert(s.highScore == 30u && s.highScoreBaseline == 30u && !s.highScoreBeaten);
+
+    // Capture path initialization (addedCount == 0) does not increment count or XP
+    s = zd::reduce(s, zd::CaptureSavedEvent{150u, 0u, "/home/user/captures/field_session.pcap", "Ready", false});
+    assert(s.capturesSaved == 0u && s.xp == 0u);
+    assert(s.capturePath == "/home/user/captures/field_session.pcap");
+
+    // First real capture awards 15 XP (below baseline 30) and emits CaptureSaved notification
+    s = zd::reduce(s, zd::CaptureSavedEvent{200u, 1u, "", "Handshake #1", true});
+    assert(s.capturesSaved == 1u && s.xp == 15u && !s.highScoreBeaten);
+    assert(s.notifyKind == zd::NotifyKind::CaptureSaved);
+    assert(s.notifyText.find("SAVED #1") != std::string::npos);
+
+    // Second capture adds +30 XP -> 45 XP: beats highScoreBaseline (30) AND levels up to Lv.2 (40)!
+    // LevelUp (priority 5) beats NewHighScore (3) and CaptureSaved (2) and flips mood immediately.
+    s = zd::reduce(s, zd::CaptureSavedEvent{300u, 2u, "", "Handshake #2", true});
+    assert(s.capturesSaved == 3u && s.xp == 45u && s.highScore == 45u && s.highScoreBeaten);
+    assert(s.level == 2u && s.mood == zd::Mood::LevelUp);
+    assert(s.notifyKind == zd::NotifyKind::LevelUp);
+    assert(s.notifyText.find("Lv.2") != std::string::npos);
+
+    // Lower-priority Peak AP milestone must not clobber active LevelUp notification
+    s = zd::reduce(s, zd::ScanCompletedEvent{400u, {{"AP1", -45, 6, true}}});
+    s = zd::reduce(s, zd::ScanCompletedEvent{500u, {{"AP1", -45, 6, true}, {"AP2", -50, 1, false}}});
+    assert(s.notifyKind == zd::NotifyKind::LevelUp);
+
+    // Notifications expire on TickEvent once notifyUntilMs elapses
+    const zd::AppState expiredNote = zd::reduce(s, zd::TickEvent{5000u, 95, false});
+    assert(expiredNote.notifyKind == zd::NotifyKind::None && expiredNote.notifyText.empty());
+    assert(expiredNote.mood != zd::Mood::LevelUp);
+
+    // Peak AP milestone triggers once notification window is idle
+    const zd::AppState peakNote = zd::reduce(
+        expiredNote,
+        zd::ScanCompletedEvent{6000u, {{"A", -45, 1, true}, {"B", -55, 6, true}, {"C", -65, 11, true}}});
+    assert(peakNote.notifyKind == zd::NotifyKind::Milestone);
+    assert(peakNote.notifyText.find("PEAK APs!") != std::string::npos);
+
+    // ClearThreat clears ThreatAlert notification
+    zd::AppState thr = zd::reduce(
+        expiredNote,
+        zd::SubGhzObservedEvent{6100u, zd::SubGhzSignal{433920u, -45, "OOK", 6u, zd::SubGhzAnomaly::ReplayBurst}});
+    assert(thr.notifyKind == zd::NotifyKind::ThreatAlert);
+    const zd::AppState ackThr = zd::reduce(thr, zd::ClearThreatEvent{6200u});
+    assert(ackThr.notifyKind == zd::NotifyKind::None && ackThr.notifyText.empty());
+
+    // Captures page path formatting & ASCII preview
+    const auto shortRows = zd::formatCapturePathRows("/sd/cap.pcap", 26u);
+    assert(shortRows.size() == 1u && shortRows[0] == "PATH: /sd/cap.pcap");
+    const auto splitRows = zd::formatCapturePathRows("/home/user/.local/share/pwnagotchi-zeroday/captures.zds", 26u);
+    assert(splitRows.size() == 2u);
+    assert(splitRows[0].rfind("DIR:  ", 0) == 0 && splitRows[1].rfind("FILE: ", 0) == 0);
+
+    const zd::AppState capView = zd::reduce(s, zd::SetPageEvent{350u, zd::ScreenPage::Captures});
+    const zd::UiFrame capFrame = zd::buildUiFrame(capView, {240, 135});
+    assert(capFrame.capturesSaved == 3u);
+    assert(capFrame.notifyActive);
+    assert(capFrame.captureSummary.find("CAPTURES SAVED: 3") != std::string::npos);
+    const std::string capAscii = zd::renderAsciiPreview(capFrame);
+    assert(capAscii.find("CAPTURES SAVED: 3") != std::string::npos);
+    assert(capAscii.find("field_session.pcap") != std::string::npos);
+
+    const auto cliCap = zd::hal::interpretCliLine("captures", capView, {240, 135}, 360u);
+    assert(cliCap.output.find("Captures Saved: 3") != std::string::npos);
+    assert(cliCap.output.find("field_session.pcap") != std::string::npos);
+}
+
+void testBleFormattingAndThemeContrast() {
+    assert(zd::bleVendorLabel(0x004Cu) == "Apple");
+    assert(zd::bleVendorLabel(0x0087u) == "Garmin");
+    assert(zd::bleVendorLabel(0x0000u) == "-");
+    assert(zd::bleVendorLabel(0x1234u) == "0x1234");
+    assert(zd::bleServiceLabel(0x3082u) == "RF-Tool");
+    assert(zd::bleServiceLabel(0x180Du) == "HeartRate");
+    assert(zd::bleServiceLabel(0xFEEDu) == "Tile");
+    assert(zd::bleServiceLabel(0x1234u) == "0x1234");
+
+    zd::AppState st = zd::initialState(11u);
+    st = zd::reduce(
+        st,
+        zd::BleScanCompletedEvent{
+            300u,
+            {{"44:12:aa:bb:10:01", "SmartWatch_BT", -62, 0x0087u, 0x180Du, false, zd::BleThreatKind::None},
+             {"7a:3c:91:04:88:12", "Tracker_Tag", -55, 0x004Cu, 0xFD6Fu, true, zd::BleThreatKind::AirTagTracker}}});
+    const auto cliBle = zd::hal::interpretCliLine("ble", st, {240, 135}, 310u);
+    const auto cliBt = zd::hal::interpretCliLine("bt", st, {240, 135}, 310u);
+    assert(cliBle.output == cliBt.output);
+    assert(cliBle.output.find("44:12:aa:bb:10:01") != std::string::npos);
+    assert(cliBle.output.find("Garmin") != std::string::npos);
+    assert(cliBle.output.find("SmartWatch_BT") != std::string::npos);
+    assert(cliBle.output.find("7a:3c:91:04:88:12") != std::string::npos);
+    assert(cliBle.output.find("LOC-TAG!") != std::string::npos);
+    assert(cliBle.output.find("Tracker_Tag") != std::string::npos);
+
+    const auto relLum = [](const zd::Rgb888& c) {
+        const auto ch = [](uint8_t v) {
+            const double s = static_cast<double>(v) / 255.0;
+            return (s <= 0.03928) ? (s / 12.92) : std::pow((s + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+    };
+    const auto cr = [&](const zd::Rgb888& a, const zd::Rgb888& b) {
+        const double la = relLum(a);
+        const double lb = relLum(b);
+        return ((std::max)(la, lb) + 0.05) / ((std::min)(la, lb) + 0.05);
+    };
+    for (const zd::ThemeSpec& spec : zd::kThemeCatalog) {
+        assert(cr(spec.palette.fg, spec.palette.bg) >= 4.5);
+        assert(cr(spec.palette.accent, spec.palette.bg) >= 4.5);
+        assert(cr(spec.palette.highlight, spec.palette.bg) >= 4.5);
+        assert(cr(spec.palette.muted, spec.palette.bg) >= 3.0);
+    }
+}
+
+void testOui5GhzSpectrumAndSecMood() {
+    // 1. Offline OUI catalog & bleVendorOrOuiLabel fallback (preserving bleVendorLabel(0) == "-")
+    assert(zd::bleVendorLabel(0x0000u) == "-");
+    assert(zd::parseOui24("B8:27:EB:aa:bb:cc").value_or(0u) == 0xB827EBu);
+    assert(std::string(zd::lookupOuiVendor("b8:27:eb:aa:bb:cc")) == "RaspberryPi");
+    assert(std::string(zd::lookupOuiVendor("00:00:00:00:00:00")).empty());
+    assert(zd::ouiVendorLabel("24:0a:c4:11:22:33") == "Espressif");
+    assert(zd::bleVendorOrOuiLabel(0x0000u, "b8:27:eb:11:22:33") == "RaspberryPi");
+    assert(zd::bleVendorOrOuiLabel(0x004Cu, "b8:27:eb:11:22:33") == "Apple");
+
+    // 2. 5 GHz / 6 GHz histogram & auto-switching ChannelSpectrum page
+    const std::vector<zd::AccessPoint> bandAps = {
+        {"FiveG_36", -50, 36, true},
+        {"FiveG_149", -58, 149, true},
+        {"SixG_37", -61, zd::k6GhzChannelBase + 37, false},
+    };
+    const zd::ChannelHistogram hist = zd::buildChannelHistogram(bandAps);
+    assert(hist.band24GhzAps == 0u);
+    assert(hist.band5GhzAps == 2u);
+    assert(hist.band6GhzAps == 1u);
+    assert(hist.counts5Ghz[0] == 1u);  // ch 36
+
+    zd::AppState st = zd::initialState(21u);
+    st = zd::reduce(std::move(st), zd::ScanCompletedEvent{1000u, bandAps});
+    st = zd::reduce(std::move(st), zd::SetPageEvent{1100u, zd::ScreenPage::ChannelSpectrum});
+    const zd::UiFrame sf = zd::buildUiFrame(st, {240, 135});
+    assert(sf.channelBars[0].channel == 36 && sf.channelBars[0].count == 1u);
+    assert(sf.spectrumSummary.find("5GHz") != std::string::npos);
+    assert(sf.spectrumSummary.find("6G:1") != std::string::npos);
+
+    // 3. Unified SecMood -> Pet Mood linkage (SetSecMoodEvent + SyncMonitorSnapshotEvent + ClearThreatEvent)
+    st = zd::reduce(std::move(st),
+                    zd::SetSecMoodEvent{1200u, zd::SecMood::Alarmed, "DEAUTH-FLOOD HomeNet"});
+    assert(st.secMood == zd::SecMood::Alarmed);
+    assert(st.mood == zd::Mood::ThreatAlert);
+    assert(st.lastThreatLabel == "DEAUTH-FLOOD HomeNet");
+
+    st = zd::reduce(std::move(st), zd::ClearThreatEvent{1300u});
+    assert(st.secMood == zd::SecMood::Calm);
+    assert(st.lastThreatLabel.empty());
+    assert(st.mood != zd::Mood::ThreatAlert);
+
+    st = zd::reduce(
+        std::move(st),
+        zd::SyncMonitorSnapshotEvent{1400u, bandAps, {}, 2u, "", 1u, "x.zds", "HS",
+                                     zd::SecMood::Watchful});
+    assert(st.secMood == zd::SecMood::Watchful);
+    assert(st.mood == zd::Mood::ShieldGuard);
+
+    st = zd::reduce(
+        std::move(st),
+        zd::SyncMonitorSnapshotEvent{1500u, bandAps, {}, 3u, "EVIL-TWIN Fake", 1u, "x.zds", "HS",
+                                     zd::SecMood::Watchful});
+    assert(st.secMood == zd::SecMood::Watchful);
+    assert(st.mood == zd::Mood::ThreatAlert);
+    assert(st.lastThreatLabel == "EVIL-TWIN Fake");
+}
+
+void testPetLogicEventStreamFuzzer() {
+    uint64_t rng = 0x5A17D099E1234567ull;
+    auto nextRand = [&]() -> uint32_t {
+        rng ^= rng >> 12;
+        rng ^= rng << 25;
+        rng ^= rng >> 27;
+        return static_cast<uint32_t>((rng * 0x2545F4914F6CDD1Dull) >> 32);
+    };
+
+    zd::AppState st = zd::initialState(0xBEEFu);
+    uint32_t now = 100u;
+    uint32_t prevXp = st.xp;
+    uint32_t prevHigh = st.highScore;
+
+    for (uint32_t step = 0u; step < 5000u; ++step) {
+        now += 10u + (nextRand() % 900u);
+        switch (nextRand() % 17u) {
+            case 0:
+                st = zd::reduce(std::move(st),
+                                zd::TickEvent{now, static_cast<int32_t>(nextRand() % 101u),
+                                              (nextRand() % 3u) == 0u});
+                break;
+            case 1: st = zd::reduce(std::move(st), zd::ButtonAPressedEvent{now}); break;
+            case 2: st = zd::reduce(std::move(st), zd::ButtonBPressedEvent{now}); break;
+            case 3: st = zd::reduce(std::move(st), zd::ButtonBLongPressedEvent{now}); break;
+            case 4: st = zd::reduce(std::move(st), zd::ScanStartedEvent{now}); break;
+            case 5: {
+                static constexpr int32_t kChs[] = {1, 6, 11, 36, 149, zd::k6GhzChannelBase + 37};
+                std::vector<zd::AccessPoint> aps;
+                const std::size_t n = nextRand() % 6u;
+                for (std::size_t j = 0; j < n; ++j) {
+                    aps.push_back({"AP_" + std::to_string(nextRand() % 20u),
+                                   -35 - static_cast<int32_t>(nextRand() % 55u),
+                                   kChs[nextRand() % 6u], (nextRand() % 2u) == 0u});
+                }
+                st = zd::reduce(std::move(st), zd::ScanCompletedEvent{now, std::move(aps)});
+                break;
+            }
+            case 6:
+                st = zd::reduce(std::move(st),
+                                zd::CyclePageEvent{now, (nextRand() % 2u) ? int8_t{1} : int8_t{-1}});
+                break;
+            case 7:
+                st = zd::reduce(std::move(st),
+                                zd::SetPageEvent{now, static_cast<zd::ScreenPage>(nextRand() % 5u)});
+                break;
+            case 8:
+                st = zd::reduce(std::move(st),
+                                zd::CycleThemeEvent{now, (nextRand() % 2u) ? int8_t{1} : int8_t{-1}});
+                break;
+            case 9:
+                st = zd::reduce(std::move(st),
+                                zd::SetThemeEvent{now,
+                                                  zd::kThemeCatalog[nextRand() % zd::kThemeCount].id,
+                                                  (nextRand() % 2u) == 0u});
+                break;
+            case 10:
+                st = zd::reduce(std::move(st),
+                                zd::SetOffensiveArmedEvent{now, (nextRand() % 2u) == 0u});
+                break;
+            case 11:
+                st = zd::reduce(std::move(st), zd::CycleOpsModeEvent{now});
+                break;
+            case 12:
+                st = zd::reduce(std::move(st),
+                                zd::BleScanCompletedEvent{
+                                    now, {{"b8:27:eb:11:22:33", "BT_Node", -60, 0u, 0xFD6Fu,
+                                           (nextRand() % 4u) == 0u, zd::BleThreatKind::None}}});
+                break;
+            case 13:
+                st = zd::reduce(std::move(st),
+                                zd::SubGhzObservedEvent{
+                                    now, {433920u, -50, "OOK", 1u + (nextRand() % 7u),
+                                          (nextRand() % 8u) == 0u ? zd::SubGhzAnomaly::JammingCarrier
+                                                                  : zd::SubGhzAnomaly::None}});
+                break;
+            case 14:
+                st = zd::reduce(std::move(st),
+                                zd::CaptureSavedEvent{now, 1u, "sd:/w.csv", "WiGLE +1", true});
+                break;
+            case 15:
+                st = zd::reduce(std::move(st),
+                                zd::SetSecMoodEvent{now, static_cast<zd::SecMood>(nextRand() % 3u),
+                                                    "ALERT"});
+                break;
+            default:
+                st = zd::reduce(std::move(st), zd::ClearThreatEvent{now});
+                break;
+        }
+        assert(st.batteryPercent >= 0 && st.batteryPercent <= 100);
+        assert(st.level >= 1u);
+        assert(st.xp >= prevXp);
+        assert(st.highScore >= prevHigh);
+        prevXp = st.xp;
+        prevHigh = st.highScore;
+
+        if ((step % 100u) == 0u) {
+            const zd::ScreenDimensions dims = zd::kScreenProfiles[step % zd::kScreenProfiles.size()].dims;
+            const zd::UiFrame frame = zd::buildUiFrame(st, dims);
+            assert(!frame.headerLine.empty());
+            assert(!zd::renderAsciiPreview(frame).empty());
+        }
+    }
+}
+
+// Multi-transport peer discovery + original Pwnagotchi/Palnagotchi interop.
+void testPeering() {
+    using namespace zd::peer;
+
+    // 1. Advert codec round-trips and clamps an over-long name to 16 bytes.
+    PeerAdvert a;
+    a.name = "verylongpeername_exceeds16";
+    a.pwned = 1000u;
+    a.flags = kFlagWidsAlert;
+    const std::vector<uint8_t> enc = encodePeerAdvert(a);
+    const auto dec = decodePeerAdvert(enc.data(), enc.size());
+    assert(dec.has_value());
+    assert(dec->name.size() == 16u && dec->pwned == 1000u);
+    assert((dec->flags & kFlagWidsAlert) != 0u);
+    assert(!decodePeerAdvert(enc.data(), 3u).has_value());  // truncated
+
+    auto pushMac = [](std::vector<uint8_t>& v, const std::array<uint8_t, 6>& m) {
+        for (uint8_t b : m) v.push_back(b);
+    };
+
+    // 2. Classic Pwnagotchi/Palnagotchi beacon: detected by the signature source address.
+    std::vector<uint8_t> pwn = {0x80, 0x00, 0x00, 0x00};  // FC beacon + duration
+    pushMac(pwn, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});    // addr1 broadcast
+    pushMac(pwn, kPwnagotchiSignature);                    // addr2 = signature
+    pushMac(pwn, kPwnagotchiSignature);                    // addr3 = signature
+    pwn.push_back(0x00);
+    pwn.push_back(0x00);  // seq
+    const auto pwnHit = classifyWifiPeer(pwn.data(), pwn.size());
+    assert(pwnHit.has_value() && pwnHit->kind == PeerKind::Pwnagotchi);
+
+    // 3. ZeroDay beacon carrying our vendor IE: detected with the embedded advert.
+    std::vector<uint8_t> zd = {0x80, 0x00, 0x00, 0x00};
+    pushMac(zd, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+    const std::array<uint8_t, 6> src = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    pushMac(zd, src);
+    pushMac(zd, src);
+    zd.push_back(0x00);
+    zd.push_back(0x00);                       // seq
+    for (int i = 0; i < 12; ++i) zd.push_back(0x00);  // fixed beacon params
+    PeerAdvert adv;
+    adv.name = "zd-fren";
+    adv.pwned = 42u;
+    adv.flags = kFlagWidsAlert;
+    const std::vector<uint8_t> ie = buildZeroDayAdvertIe(adv);
+    zd.insert(zd.end(), ie.begin(), ie.end());
+    const auto zdHit = classifyWifiPeer(zd.data(), zd.size());
+    assert(zdHit.has_value() && zdHit->kind == PeerKind::ZeroDay && zdHit->hasAdvert);
+    assert(zdHit->advert.name == "zd-fren" && zdHit->advert.pwned == 42u);
+    assert(zdHit->id == "02:11:22:33:44:55");
+
+    // 4. An ordinary beacon (no signature, no ZeroDay IE) is not a peer.
+    std::vector<uint8_t> plain = {0x80, 0x00, 0x00, 0x00};
+    pushMac(plain, {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+    pushMac(plain, {0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01});
+    pushMac(plain, {0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01});
+    plain.push_back(0x00);
+    plain.push_back(0x00);
+    for (int i = 0; i < 12; ++i) plain.push_back(0x00);
+    assert(!classifyWifiPeer(plain.data(), plain.size()).has_value());
+
+    // 5. Registry: first sighting is a new greeting, repeats aggregate, WIDS flag surfaces.
+    PeerRegistry reg;
+    assert(reg.observeWifi(*zdHit, -50, 100u) == true);
+    assert(reg.peersMet() == 1u);
+    assert(reg.observeWifi(*zdHit, -52, 200u) == false);  // same peer again
+    assert(reg.peersMet() == 1u && reg.size() == 1u);
+    assert(reg.observeWifi(*pwnHit, -70, 300u) == true);  // a different peer
+    assert(reg.peersMet() == 2u);
+    assert(reg.anyWidsAlert());  // the ZeroDay peer was raising a WIDS alert
+    assert(reg.find("02:11:22:33:44:55") != nullptr);
+
+    // 6. Greeting-beacon round-trip: a beacon WE build must classify back as a ZeroDay peer
+    //    carrying the same advert (builder <-> classifier are consistent).
+    PeerAdvert mine;
+    mine.name = "myunit";
+    mine.pwned = 1234u;
+    mine.flags = kFlagWidsAlert;
+    const uint8_t myMac[6] = {0x02, 0xAB, 0xCD, 0xEF, 0x00, 0x09};
+    std::vector<uint8_t> beacon(kMaxGreetingBeaconLen);
+    const std::size_t bn = buildZeroDayGreetingBeacon(beacon.data(), myMac, mine);
+    assert(bn <= kMaxGreetingBeaconLen);
+    const auto mineHit = classifyWifiPeer(beacon.data(), bn);
+    assert(mineHit.has_value());
+    assert(mineHit->kind == PeerKind::ZeroDay);
+    assert(mineHit->hasAdvert);
+    assert(mineHit->advert.name == "myunit");
+    assert(mineHit->advert.pwned == 1234u);
+    assert((mineHit->advert.flags & kFlagWidsAlert) != 0u);
+    assert(mineHit->id == "02:ab:cd:ef:00:09");
+
+    // 7. BLE manufacturer-data round-trip (same advert, different transport framing).
+    const std::vector<uint8_t> ble = buildZeroDayBleManufacturerData(mine);
+    const auto bleAdv = parseZeroDayBleManufacturerData(ble.data(), ble.size());
+    assert(bleAdv.has_value());
+    assert(bleAdv->name == "myunit" && bleAdv->pwned == 1234u);
+    assert((bleAdv->flags & kFlagWidsAlert) != 0u);
+    // A different company id / non-ZeroDay mfg blob is rejected.
+    std::vector<uint8_t> notUs = ble;
+    notUs[0] = 0x4Cu;  // Apple company id low byte
+    notUs[1] = 0x00u;
+    assert(!parseZeroDayBleManufacturerData(notUs.data(), notUs.size()).has_value());
+
+    // 8. LoRa packet round-trip + rejection of foreign traffic.
+    const std::vector<uint8_t> lora = buildZeroDayLoraPacket(mine);
+    const auto loraAdv = parseZeroDayLoraPacket(lora.data(), lora.size());
+    assert(loraAdv.has_value());
+    assert(loraAdv->name == "myunit" && loraAdv->pwned == 1234u);
+    const uint8_t foreign[6] = {'X', 'X', 'X', 0x01, 0x02, 0x03};
+    assert(!parseZeroDayLoraPacket(foreign, sizeof(foreign)).has_value());
+
+    // 9. Optional keyed PeerAdvert authentication tag + WIDS filtering.
+    PeerAdvert signedAdv = mine;
+    constexpr uint32_t kTeamKey = 0xCAFEBABEu;
+    signPeerAdvert(signedAdv, kTeamKey);
+    const std::vector<uint8_t> signedLora = buildZeroDayLoraPacket(signedAdv);
+    const auto decSigned = parseZeroDayLoraPacket(signedLora.data(), signedLora.size());
+    assert(decSigned.has_value());
+    assert(verifyPeerAdvert(*decSigned, kTeamKey));
+    assert(!verifyPeerAdvert(*decSigned, kTeamKey ^ 1u));
+    // Truncated authenticated packet is rejected cleanly.
+    assert(!parseZeroDayLoraPacket(signedLora.data(), signedLora.size() - 1u).has_value());
+
+    PeerRegistry authReg;
+    authReg.observe("spoofed", PeerKind::ZeroDay, PeerTransport::Lora, -60, "evil", 9u, true, 10u,
+                    false);
+    assert(authReg.anyWidsAlert(false));
+    assert(!authReg.anyWidsAlert(true));
+    authReg.observe("trusted", PeerKind::ZeroDay, PeerTransport::Lora, -55, "ally", 12u, true, 20u,
+                    true);
+    assert(authReg.anyWidsAlert(true));
+}
+
+void testPeerSpottedPetEvent() {
+    // A greeted peer drives the pet's social mood + grid stats (C++ parity with the web port).
+    zd::AppState s0 = zd::initialState(42u);
+    assert(s0.peersMet == 0u && s0.lastPeerName.empty());
+    const uint32_t xp0 = s0.xp;
+
+    const zd::AppState s1 = zd::reduce(s0, zd::PeerSpottedEvent{5000u, "frenzzz", -40});
+    assert(s1.peersMet == 1u);
+    assert(s1.lastPeerName == "frenzzz");
+    assert(s1.mood == zd::Mood::Excited);
+    assert(s1.page == zd::ScreenPage::PetFace);
+    assert(s1.xp == xp0 + 20u);
+    assert(s1.phrase.find("frenzzz") != std::string::npos);
+
+    // A second, distinct greeting increments again.
+    const zd::AppState s2 = zd::reduce(s1, zd::PeerSpottedEvent{6000u, "pwnA", -60});
+    assert(s2.peersMet == 2u && s2.lastPeerName == "pwnA");
+
+    // Untrusted name bytes are sanitized: control chars stripped, clamped to 16, empty => fallback.
+    const zd::AppState sCtl =
+        zd::reduce(s2, zd::PeerSpottedEvent{7000u, std::string("bad\x01\x02name\x7f!"), -44});
+    assert(sCtl.lastPeerName == "badname!");
+    const zd::AppState sEmpty = zd::reduce(sCtl, zd::PeerSpottedEvent{8000u, "\x01\x02", -44});
+    assert(sEmpty.lastPeerName == "unit-404");
+    const zd::AppState sLong =
+        zd::reduce(sEmpty, zd::PeerSpottedEvent{9000u, "0123456789ABCDEFGHIJ", -44});
+    assert(sLong.lastPeerName.size() == 16u);
+
+    // A greeting during an active scan must not hijack the scan animation mood.
+    zd::AppState scanning = zd::reduce(zd::initialState(1u), zd::ScanStartedEvent{100u});
+    assert(scanning.isScanning);
+    const zd::AppState sDuringScan = zd::reduce(scanning, zd::PeerSpottedEvent{200u, "x", -50});
+    assert(sDuringScan.peersMet == 1u);          // stat still counts
+    assert(sDuringScan.mood != zd::Mood::Excited); // but mood untouched mid-scan
+}
+
 }  // namespace
 
 int main() {
@@ -481,6 +943,12 @@ int main() {
     testThemeCatalog();
     testThemeEventsAndToast();
     testExpandedLevelsHighscoreAndMultiRadio();
+    testCapturesNotificationsAndHighscore();
+    testBleFormattingAndThemeContrast();
+    testOui5GhzSpectrumAndSecMood();
+    testPeering();
+    testPeerSpottedPetEvent();
+    testPetLogicEventStreamFuzzer();
     std::cout << "All pure functional core & UI layout tests PASSED!\n";
     return 0;
 }

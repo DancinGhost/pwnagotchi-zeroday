@@ -126,8 +126,8 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     auto* themeBtn = new QPushButton("Theme ▶", central);
     themeBtn->setAccessibleName("Next Theme");
     themeBtn->setToolTip("Next Theme (])");
-    auto* viewBtn = new QPushButton("&View", central);
-    modeBtn_ = new QPushButton("&Mode: RECON", central);
+    auto* viewBtn = new QPushButton("V&iew", central);
+    modeBtn_ = new QPushButton("M&ode: RECON", central);
     modeBtn_->setToolTip("Cycle OpsMode (RECON / DEFENSE / OFFENSE) (M)");
     btnRow->addWidget(scanBtn);
     btnRow->addWidget(monitorBtn_);
@@ -142,38 +142,68 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     auto* saveBtn = new QPushButton("Sa&ve…", central);
     recordBtn_ = new QPushButton("&Record…", central);
     auto* pcapBtn = new QPushButton("&PCAP…", central);
-    auto* exportBtn = new QPushButton("&Export…", central);
-    bleBtn_ = new QPushButton("&BLE Scan", central);
+    auto* exportBtn = new QPushButton("E&xport…", central);
+    hc22000Btn_ = new QPushButton("&HC22000…", central);
+    hc22000Btn_->setToolTip("Export validated crackable handshakes/PMKIDs for hashcat -m 22000");
+    wardriveBtn_ = new QPushButton("&Wardrive…", central);
+    bleBtn_ = new QPushButton("&BT Scan", central);
     bleBtn_->setEnabled(app_.bleAvailable());
-    clearThreatBtn_ = new QPushButton("Clear &Threat", central);
+    subGhzBtn_ = new QPushButton("&Sub-GHz", central);
+    subGhzBtn_->setToolTip("Start / stop rtl_433 Sub-GHz ISM-band listener");
+    subGhzBtn_->setEnabled(app_.subGhzAvailable());
+    bleAutoCheck_ = new QCheckBox("BT Au&to", central);
+    bleAutoCheck_->setToolTip("Periodically scan nearby Bluetooth / BLE devices every 15s");
+    bleAutoCheck_->setEnabled(app_.bleAvailable());
+    bleAutoCheck_->setChecked(app_.bleAutoEnabled());
+    notifyCheck_ = new QCheckBox("&Notify", central);
+    notifyCheck_->setToolTip("Send desktop notifications on critical security alerts");
+    notifyCheck_->setChecked(app_.notificationsEnabled());
+    clearThreatBtn_ = new QPushButton("&Clear Threat", central);
     toolsRow->addWidget(loadBtn);
     toolsRow->addWidget(saveBtn);
     toolsRow->addWidget(recordBtn_);
     toolsRow->addWidget(pcapBtn);
     toolsRow->addWidget(exportBtn);
+    toolsRow->addWidget(hc22000Btn_);
+    toolsRow->addWidget(wardriveBtn_);
     toolsRow->addWidget(bleBtn_);
+    toolsRow->addWidget(subGhzBtn_);
+    toolsRow->addWidget(bleAutoCheck_);
+    toolsRow->addWidget(notifyCheck_);
     toolsRow->addWidget(clearThreatBtn_);
     statusBox->addLayout(toolsRow);
 
-    // Channel control strip, hopper & table freeze toggle.
+    // Channel control strip, hopper, hotkey lock & table freeze toggle.
     auto* chRow = new QHBoxLayout();
-    auto* chLabel = new QLabel("Monitor &channel:", central);
+    auto* chLabel = new QLabel("Cha&nnel:", central);
     channelSpin_ = new QSpinBox(central);
     channelSpin_->setRange(1, 177);
     channelSpin_->setValue(6);
     channelSpin_->setAccessibleName("Monitor Channel");
     chLabel->setBuddy(channelSpin_);
-    channelBtn_ = new QPushButton("Set C&hannel", central);
+    channelBtn_ = new QPushButton("S&et Ch", central);
     channelBtn_->setEnabled(false);
     hopCheck_ = new QCheckBox("&Hop ch", central);
-    hopCheck_->setToolTip("Automatically hop 2.4 GHz channels with 3s EAPOL handshake hold");
+    hopCheck_->setToolTip("Automatically hop channels with 3s EAPOL handshake hold");
     hopCheck_->setChecked(app_.channelHopEnabled());
+    hop5GhzCheck_ = new QCheckBox("&5 GHz", central);
+    hop5GhzCheck_->setToolTip("Include 5 GHz UNII channels in automatic channel hopping");
+    hop5GhzCheck_->setChecked(app_.hop5Ghz());
+    adaptiveHopCheck_ = new QCheckBox("A&daptive", central);
+    adaptiveHopCheck_->setToolTip("Use UCB1 multi-armed bandit adaptive dwell on productive channels");
+    adaptiveHopCheck_->setChecked(app_.adaptiveHop());
+    hotkeysCheck_ = new QCheckBox("Hot&keys", central);
+    hotkeysCheck_->setToolTip("Toggle single-key shortcuts (T, V, M, [, ], 1-5) so typing never misfires");
+    hotkeysCheck_->setChecked(true);
     freezeSortCheck_ = new QCheckBox("&Freeze sort", central);
     freezeSortCheck_->setToolTip("Preserve table row order during live scans");
     chRow->addWidget(chLabel);
     chRow->addWidget(channelSpin_);
     chRow->addWidget(channelBtn_);
     chRow->addWidget(hopCheck_);
+    chRow->addWidget(hop5GhzCheck_);
+    chRow->addWidget(adaptiveHopCheck_);
+    chRow->addWidget(hotkeysCheck_);
     chRow->addStretch(1);
     chRow->addWidget(freezeSortCheck_);
     statusBox->addLayout(chRow);
@@ -191,12 +221,17 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     deauthBtn_ = new QPushButton("&Deauth selected…", central);
     deauthBtn_->setStyleSheet("font-weight:bold;");
     deauthBtn_->setEnabled(false);
+    pmkidBtn_ = new QPushButton("&PMKID probe…", central);
+    pmkidBtn_->setEnabled(false);
+    pmkidBtn_->setToolTip("Clientless PMKID probe (WPA2 only). Complements deauth; WPA3-SAE/PMF "
+                          "targets have no PMKID — use deauth there.");
     authLayout->addWidget(authBanner_);
     authLayout->addWidget(authCheck_);
     auto* authBtnRow = new QHBoxLayout();
     authBtnRow->addWidget(allowBtn);
     authBtnRow->addWidget(trustBtn);
     authBtnRow->addWidget(deauthBtn_);
+    authBtnRow->addWidget(pmkidBtn_);
     authLayout->addLayout(authBtnRow);
     statusBox->addWidget(authGroup);
 
@@ -226,12 +261,22 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     table_ = new QTableWidget(0, 10, tabs_);
     table_->setAccessibleName("Discovered WiFi networks");
     table_->setHorizontalHeaderLabels(
-        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS", "Clients", "Capture", "Trusted", "Allowed"});
+        {"BSSID", "SSID", "CH", "dBm", "ENC", "WPS/PMF", "Clients", "Capture", "Trusted", "Allowed"});
     table_->horizontalHeader()->setStretchLastSection(true);
     table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     table_->setSelectionMode(QAbstractItemView::SingleSelection);
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     tabs_->addTab(table_, "Networks (0)");
+
+    bleTable_ = new QTableWidget(0, 7, tabs_);
+    bleTable_->setAccessibleName("Discovered Bluetooth devices");
+    bleTable_->setHorizontalHeaderLabels(
+        {"MAC", "Name", "dBm", "Signal", "Vendor", "Service", "Status / Seen"});
+    bleTable_->horizontalHeader()->setStretchLastSection(true);
+    bleTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    bleTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    bleTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tabs_->addTab(bleTable_, "Bluetooth (0)");
 
     stationsTable_ = new QTableWidget(0, 5, tabs_);
     stationsTable_->setAccessibleName("Observed WiFi stations and probe requests");
@@ -279,6 +324,25 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     connect(hopCheck_, &QCheckBox::toggled, this, [this](bool on) {
         app_.setChannelHopEnabled(on);
     });
+    connect(hop5GhzCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        app_.setHop5Ghz(on);
+    });
+    connect(adaptiveHopCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        app_.setAdaptiveHop(on);
+    });
+    connect(bleAutoCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        app_.setBleAutoEnabled(on);
+    });
+    connect(notifyCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        app_.setNotificationsEnabled(on);
+    });
+    connect(hotkeysCheck_, &QCheckBox::toggled, this, [this](bool on) {
+        for (QShortcut* sc : singleKeyShortcuts_) {
+            if (sc != nullptr) {
+                sc->setEnabled(on);
+            }
+        }
+    });
     connect(prevThemeBtn, &QPushButton::clicked, this, &MainWindow::onPrevTheme);
     connect(themeBtn, &QPushButton::clicked, this, &MainWindow::onCycleTheme);
     connect(viewBtn, &QPushButton::clicked, this, &MainWindow::onCycleView);
@@ -288,13 +352,17 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
     connect(recordBtn_, &QPushButton::clicked, this, &MainWindow::onToggleRecord);
     connect(pcapBtn, &QPushButton::clicked, this, &MainWindow::onSelectPcap);
     connect(exportBtn, &QPushButton::clicked, this, &MainWindow::onExportReport);
+    connect(hc22000Btn_, &QPushButton::clicked, this, &MainWindow::onExportHandshakes);
+    connect(wardriveBtn_, &QPushButton::clicked, this, &MainWindow::onToggleWardrive);
     connect(bleBtn_, &QPushButton::clicked, this, &MainWindow::onBleScan);
+    connect(subGhzBtn_, &QPushButton::clicked, this, &MainWindow::onToggleSubGhz);
     connect(clearThreatBtn_, &QPushButton::clicked, this, &MainWindow::onClearThreat);
     connect(filterEdit_, &QLineEdit::textChanged, this, &MainWindow::onFilterChanged);
     connect(authCheck_, &QCheckBox::toggled, this, &MainWindow::onAuthToggled);
     connect(allowBtn, &QPushButton::clicked, this, &MainWindow::onAllowSelected);
     connect(trustBtn, &QPushButton::clicked, this, &MainWindow::onTrustSelected);
     connect(deauthBtn_, &QPushButton::clicked, this, &MainWindow::onDeauthSelected);
+    connect(pmkidBtn_, &QPushButton::clicked, this, &MainWindow::onPmkidSelected);
 
     connect(new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_O), this), &QShortcut::activated,
             this, &MainWindow::onLoadSession);
@@ -306,32 +374,42 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
             filterEdit_, QOverload<>::of(&QLineEdit::setFocus));
     connect(new QShortcut(QKeySequence(Qt::Key_F5), this), &QShortcut::activated,
             this, &MainWindow::onScan);
-    connect(new QShortcut(QKeySequence(Qt::Key_BracketLeft), this), &QShortcut::activated,
+
+    auto addSingleShortcut = [this](const QKeySequence& seq) -> QShortcut* {
+        auto* sc = new QShortcut(seq, this);
+        singleKeyShortcuts_.push_back(sc);
+        return sc;
+    };
+    connect(addSingleShortcut(QKeySequence(Qt::Key_BracketLeft)), &QShortcut::activated,
             this, &MainWindow::onPrevTheme);
-    connect(new QShortcut(QKeySequence(Qt::Key_BracketRight), this), &QShortcut::activated,
+    connect(addSingleShortcut(QKeySequence(Qt::Key_BracketRight)), &QShortcut::activated,
             this, &MainWindow::onCycleTheme);
-    connect(new QShortcut(QKeySequence(Qt::Key_T), this), &QShortcut::activated,
+    connect(addSingleShortcut(QKeySequence(Qt::Key_T)), &QShortcut::activated,
             this, &MainWindow::onCycleTheme);
-    connect(new QShortcut(QKeySequence(Qt::SHIFT | Qt::Key_T), this), &QShortcut::activated,
+    connect(addSingleShortcut(QKeySequence(Qt::SHIFT | Qt::Key_T)), &QShortcut::activated,
             this, &MainWindow::onPrevTheme);
-    connect(new QShortcut(QKeySequence(Qt::Key_V), this), &QShortcut::activated,
+    connect(addSingleShortcut(QKeySequence(Qt::Key_V)), &QShortcut::activated,
             this, &MainWindow::onCycleView);
-    connect(new QShortcut(QKeySequence(Qt::Key_M), this), &QShortcut::activated,
+    connect(addSingleShortcut(QKeySequence(Qt::Key_M)), &QShortcut::activated,
             this, &MainWindow::onCycleMode);
-    connect(new QShortcut(QKeySequence(Qt::Key_1), this), &QShortcut::activated, this, [this]() {
+    connect(addSingleShortcut(QKeySequence(Qt::Key_1)), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::PetFace});
         pet_->setFrame(app_.petFrame(kPetDims));
     });
-    connect(new QShortcut(QKeySequence(Qt::Key_2), this), &QShortcut::activated, this, [this]() {
+    connect(addSingleShortcut(QKeySequence(Qt::Key_2)), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::NearbyRadar});
         pet_->setFrame(app_.petFrame(kPetDims));
     });
-    connect(new QShortcut(QKeySequence(Qt::Key_3), this), &QShortcut::activated, this, [this]() {
+    connect(addSingleShortcut(QKeySequence(Qt::Key_3)), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::ChannelSpectrum});
         pet_->setFrame(app_.petFrame(kPetDims));
     });
-    connect(new QShortcut(QKeySequence(Qt::Key_4), this), &QShortcut::activated, this, [this]() {
+    connect(addSingleShortcut(QKeySequence(Qt::Key_4)), &QShortcut::activated, this, [this]() {
         app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::RfGuard});
+        pet_->setFrame(app_.petFrame(kPetDims));
+    });
+    connect(addSingleShortcut(QKeySequence(Qt::Key_5)), &QShortcut::activated, this, [this]() {
+        app_.dispatchPet(SetPageEvent{linux_app::nowMs(), ScreenPage::Captures});
         pet_->setFrame(app_.petFrame(kPetDims));
     });
 
@@ -343,6 +421,7 @@ MainWindow::MainWindow(linux_app::AppController& app, QWidget* parent)
         app_.requestScan();
     } else {
         refreshNetworks(true);
+        refreshBluetooth(true);
         refreshStations(true);
         refreshRfGuard(true);
         refreshChannels(true);
@@ -373,6 +452,7 @@ void MainWindow::onTick() {
     if ((now - lastTableRefreshMs_) >= 500u) {
         lastTableRefreshMs_ = now;
         refreshNetworks(false);
+        refreshBluetooth(false);
         refreshStations(false);
         refreshRfGuard(false);
         refreshChannels(false);
@@ -385,21 +465,28 @@ void MainWindow::pollAsyncResult() {
     if (auto r = app_.takeLastAsyncResult()) {
         statusBar()->showMessage(QString::fromStdString(r->message), 6000);
     }
+    std::size_t btCount = 0u;
+    if (app_.consumeBleScanFinished(&btCount)) {
+        statusBar()->showMessage(
+            QString("Bluetooth scan finished: %1 device(s) discovered").arg(btCount), 5000);
+    }
 }
 
 void MainWindow::refreshStatus() {
     const AppState& ps = app_.petState();
-    const QString statusText = QString("%1  ·  [%2]  ·  Lv.%3 (HI:%4)  ·  mood %5  ·  battery %6%")
+    const QString statusText = QString("%1  ·  [%2]  ·  Lv.%3 (HI:%4%5)  ·  Cap:%6  ·  mood %7  ·  battery %8%")
                                    .arg(themeSpec(ps.theme).name)
                                    .arg(opsModeLabel(ps.opsMode))
                                    .arg(ps.level)
                                    .arg(ps.highScore)
+                                   .arg(ps.highScoreBeaten ? "!" : "")
+                                   .arg(ps.capturesSaved)
                                    .arg(faceForMood(ps.mood).moodLabel)
                                    .arg(ps.batteryPercent);
     if (status_->text() != statusText) {
         status_->setText(statusText);
     }
-    const QString modeText = QString("&Mode: %1").arg(opsModeLabel(ps.opsMode));
+    const QString modeText = QString("M&ode: %1").arg(opsModeLabel(ps.opsMode));
     if (modeBtn_ != nullptr && modeBtn_->text() != modeText) {
         modeBtn_->setText(modeText);
     }
@@ -423,11 +510,18 @@ void MainWindow::refreshStatus() {
     if (phrase_->text() != phraseText) {
         phrase_->setText(phraseText);
     }
-    const QString engText = QString("Interface %1 · %2")
-                                .arg(QString::fromStdString(app_.interfaceName()))
-                                .arg(app_.monitoring()
-                                         ? QString::fromStdString(app_.engineLabel())
-                                         : QString("recon (active scan only)"));
+    QString engText = QString("Interface %1 · %2")
+                          .arg(QString::fromStdString(app_.interfaceName()))
+                          .arg(app_.monitoring()
+                                   ? QString::fromStdString(app_.engineLabel())
+                                   : QString("recon (active scan only)"));
+    if (app_.wardriving()) {
+        engText += QString(" · Wardrive:%1 (%2)")
+                       .arg(app_.wardriveLoggedCount())
+                       .arg(app_.gpsState().hasFix
+                                ? QString("GPS %1 sats").arg(app_.gpsState().satellites)
+                                : QString("waiting GPS"));
+    }
     if (engineLabel_->text() != engText) {
         engineLabel_->setText(engText);
     }
@@ -448,6 +542,37 @@ void MainWindow::refreshStatus() {
     if (recordBtn_->text() != recText) {
         recordBtn_->setText(recText);
     }
+    if (wardriveBtn_ != nullptr) {
+        const QString wdText = app_.wardriving() ? "Stop &Wardrive" : "&Wardrive…";
+        if (wardriveBtn_->text() != wdText) {
+            wardriveBtn_->setText(wdText);
+        }
+    }
+    if (notifyCheck_ != nullptr && notifyCheck_->isChecked() != app_.notificationsEnabled()) {
+        QSignalBlocker blocker(notifyCheck_);
+        notifyCheck_->setChecked(app_.notificationsEnabled());
+    }
+    if (bleBtn_ != nullptr) {
+        const bool btBusy = app_.bleScanning();
+        const QString btText = btBusy ? QString("BT Scanning…") : QString("&BT Scan");
+        if (bleBtn_->text() != btText) {
+            bleBtn_->setText(btText);
+        }
+        bleBtn_->setEnabled(app_.bleAvailable() && !btBusy);
+    }
+    if (subGhzBtn_ != nullptr) {
+        const QString sgText = app_.subGhzRunning() ? QString("Stop &Sub-GHz") : QString("&Sub-GHz");
+        if (subGhzBtn_->text() != sgText) {
+            subGhzBtn_->setText(sgText);
+        }
+        subGhzBtn_->setEnabled(app_.subGhzAvailable());
+    }
+    if (hc22000Btn_ != nullptr) {
+        const std::size_t hsCnt = app_.collectedHandshakeCount();
+        hc22000Btn_->setToolTip(
+            QString("Export validated crackable handshakes/PMKIDs for hashcat -m 22000 (%1 ready)")
+                .arg(hsCnt));
+    }
     if (clearThreatBtn_ != nullptr) {
         clearThreatBtn_->setEnabled(!ps.lastThreatLabel.empty());
     }
@@ -461,6 +586,7 @@ void MainWindow::refreshStatus() {
         !busy && app_.monitoring() && auth.operatorConfirmed &&
         (auth.allowAll || !auth.allowedBssids.empty());
     deauthBtn_->setEnabled(deauthReady);
+    pmkidBtn_->setEnabled(deauthReady);  // same gate (armed + allow-listed + monitoring)
     if (!auth.operatorConfirmed) {
         deauthBtn_->setToolTip("Disabled: confirm authorization first.");
     } else if (!auth.allowAll && auth.allowedBssids.empty()) {
@@ -532,13 +658,16 @@ void MainWindow::refreshNetworks(bool force) {
     visible.reserve(displayedTargets_.size());
     for (const auto& t : displayedTargets_) {
         if (containsLower(t.bssid, needle) || containsLower(t.ssid, needle) ||
-            containsLower(sec::encryptionLabel(t.enc), needle)) {
+            containsLower(sec::encryptionLabel(t.enc), needle) ||
+            containsLower(sec::pmfStatusLabel(t.pmf), needle) ||
+            (t.pmf != sec::PmfStatus::Disabled && containsLower("pmf", needle))) {
             visible.push_back(&t);
         }
     }
     const auto& auth = app_.authorization();
     tabs_->setTabText(0, QString("Networks (%1)").arg(visible.size()));
     const std::string selBssid = selectedBssid();
+    const int prevCol = (std::max)(0, table_->currentColumn());
     table_->setRowCount(static_cast<int>(visible.size()));
     int selRow = -1;
     for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
@@ -546,10 +675,22 @@ void MainWindow::refreshNetworks(bool force) {
         setCellText(table_, i, 0, QString::fromStdString(t.bssid));
         setCellText(table_, i, 1,
                     t.ssid.empty() ? QString("<hidden>") : QString::fromStdString(t.ssid));
-        setCellText(table_, i, 2, QString::number(t.channel));
+        const int32_t dispCh =
+            zd::is6GhzChannel(t.channel) ? (t.channel - zd::k6GhzChannelBase) : t.channel;
+        setCellText(table_, i, 2, QString::number(dispCh));
         setCellText(table_, i, 3, QString::number(t.rssi));
         setCellText(table_, i, 4, QString(sec::encryptionLabel(t.enc)));
-        QTableWidgetItem* wpsItem = setCellText(table_, i, 5, t.wps ? QString("WPS*") : QString("-"));
+        QString secFlags;
+        if (t.wps && t.pmf != sec::PmfStatus::Disabled) {
+            secFlags = QString("WPS+PMF-%1").arg(sec::pmfStatusLabel(t.pmf));
+        } else if (t.wps) {
+            secFlags = QString("WPS*");
+        } else if (t.pmf != sec::PmfStatus::Disabled) {
+            secFlags = QString("PMF-%1").arg(sec::pmfStatusLabel(t.pmf));
+        } else {
+            secFlags = QString("-");
+        }
+        QTableWidgetItem* wpsItem = setCellText(table_, i, 5, secFlags);
         styleWarnBadge(wpsItem, t.wps);
         setCellText(table_, i, 6, QString::number(t.clientCount));
         setCellText(table_, i, 7,
@@ -566,8 +707,91 @@ void MainWindow::refreshNetworks(bool force) {
             selRow = i;
         }
     }
-    if (selRow >= 0 && table_->currentRow() != selRow) {
-        table_->selectRow(selRow);
+    if (selRow >= 0 && (table_->currentRow() != selRow || table_->currentColumn() != prevCol)) {
+        QSignalBlocker blocker(table_);
+        table_->setCurrentCell(selRow, prevCol);
+    }
+}
+
+void MainWindow::refreshBluetooth(bool force) {
+    if (bleTable_ == nullptr) {
+        return;
+    }
+    const auto& sec = app_.secState();
+    if (!force && sec.revision == lastBleRev_) {
+        return;
+    }
+    lastBleRev_ = sec.revision;
+    const std::string needle =
+        (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
+                                 : std::string{};
+    std::vector<const sec::BleTarget*> ranked;
+    ranked.reserve(sec.bleTargets.size());
+    for (const auto& b : sec.bleTargets) {
+        ranked.push_back(&b);
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const sec::BleTarget* a, const sec::BleTarget* b) {
+        const bool ta = (a->threat != zd::BleThreatKind::None);
+        const bool tb = (b->threat != zd::BleThreatKind::None);
+        if (ta != tb) {
+            return ta;
+        }
+        if (a->rssi != b->rssi) {
+            return a->rssi > b->rssi;
+        }
+        return a->mac < b->mac;
+    });
+    std::vector<const sec::BleTarget*> visible;
+    visible.reserve(ranked.size());
+    for (const sec::BleTarget* bp : ranked) {
+        const auto& b = *bp;
+        const std::string dispName = b.name.empty() ? "Unnamed" : b.name;
+        const std::string vendor = zd::bleVendorOrOuiLabel(b.companyId, b.mac);
+        const std::string svc = zd::bleServiceLabel(b.serviceUuid);
+        const std::string status = zd::bleThreatLabel(b.threat);
+        if (containsLower(b.mac, needle) || containsLower(dispName, needle) ||
+            containsLower(vendor, needle) || containsLower(svc, needle) ||
+            containsLower(status, needle) || containsLower("bluetooth", needle) ||
+            containsLower("ble", needle)) {
+            visible.push_back(bp);
+        }
+    }
+    const int curBleRow = bleTable_->currentRow();
+    const QString prevBleMac =
+        (curBleRow >= 0 && bleTable_->item(curBleRow, 0) != nullptr)
+            ? bleTable_->item(curBleRow, 0)->text()
+            : QString{};
+    const int prevBleCol = (std::max)(0, bleTable_->currentColumn());
+    tabs_->setTabText(1, QString("Bluetooth (%1)").arg(visible.size()));
+    bleTable_->setRowCount(static_cast<int>(visible.size()));
+    int selBleRow = -1;
+    for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
+        const auto& b = *visible[static_cast<std::size_t>(i)];
+        const std::string dispName = b.name.empty() ? "Unnamed" : b.name;
+        const int bars = zd::rssiToBars(b.rssi);
+        const QString barStr = QString(bars, QChar('#')) + QString(4 - bars, QChar('.'));
+        const std::string vendor = zd::bleVendorOrOuiLabel(b.companyId, b.mac);
+        const std::string svc = zd::bleServiceLabel(b.serviceUuid);
+        const bool isThreat = (b.threat != zd::BleThreatKind::None);
+        const QString statusStr =
+            QString("%1 (x%2)").arg(zd::bleThreatLabel(b.threat)).arg(b.seenCount);
+        const QString macStr = QString::fromStdString(b.mac);
+        setCellText(bleTable_, i, 0, macStr);
+        setCellText(bleTable_, i, 1, QString::fromStdString(dispName));
+        setCellText(bleTable_, i, 2, QString::number(b.rssi));
+        setCellText(bleTable_, i, 3, barStr);
+        setCellText(bleTable_, i, 4, QString::fromStdString(vendor));
+        setCellText(bleTable_, i, 5, QString::fromStdString(svc));
+        QTableWidgetItem* stItem = setCellText(bleTable_, i, 6, statusStr);
+        styleWarnBadge(stItem, isThreat);
+        if (!prevBleMac.isEmpty() && macStr == prevBleMac) {
+            selBleRow = i;
+        }
+    }
+    if (selBleRow >= 0 &&
+        (bleTable_->currentRow() != selBleRow || bleTable_->currentColumn() != prevBleCol)) {
+        QSignalBlocker blocker(bleTable_);
+        bleTable_->setCurrentCell(selBleRow, prevBleCol);
     }
 }
 
@@ -580,11 +804,21 @@ void MainWindow::refreshStations(bool force) {
     const std::string needle =
         (filterEdit_ != nullptr) ? zd::toLowerAscii(filterEdit_->text().trimmed().toStdString())
                                  : std::string{};
-    const auto allStations = sec::stationsByActivity(sec);
-    std::vector<std::size_t> visibleIdx;
-    visibleIdx.reserve(allStations.size());
-    for (std::size_t idx = 0u; idx < allStations.size(); ++idx) {
-        const auto& st = allStations[idx];
+    std::vector<const sec::Station*> ranked;
+    ranked.reserve(sec.stations.size());
+    for (const auto& st : sec.stations) {
+        ranked.push_back(&st);
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const sec::Station* a, const sec::Station* b) {
+        if (a->probeCount != b->probeCount) {
+            return a->probeCount > b->probeCount;
+        }
+        return a->mac < b->mac;
+    });
+    std::vector<const sec::Station*> visible;
+    visible.reserve(ranked.size());
+    for (const sec::Station* stp : ranked) {
+        const auto& st = *stp;
         bool match = containsLower(st.mac, needle) || containsLower(st.lastBssid, needle);
         if (!match) {
             for (const auto& s : st.probedSsids) {
@@ -595,13 +829,20 @@ void MainWindow::refreshStations(bool force) {
             }
         }
         if (match) {
-            visibleIdx.push_back(idx);
+            visible.push_back(stp);
         }
     }
-    tabs_->setTabText(1, QString("Stations / Probes (%1)").arg(visibleIdx.size()));
-    stationsTable_->setRowCount(static_cast<int>(visibleIdx.size()));
-    for (int i = 0; i < static_cast<int>(visibleIdx.size()); ++i) {
-        const auto& st = allStations[visibleIdx[static_cast<std::size_t>(i)]];
+    const int curStaRow = stationsTable_->currentRow();
+    const QString prevStaMac =
+        (curStaRow >= 0 && stationsTable_->item(curStaRow, 0) != nullptr)
+            ? stationsTable_->item(curStaRow, 0)->text()
+            : QString{};
+    const int prevStaCol = (std::max)(0, stationsTable_->currentColumn());
+    tabs_->setTabText(2, QString("Stations / Probes (%1)").arg(visible.size()));
+    stationsTable_->setRowCount(static_cast<int>(visible.size()));
+    int selStaRow = -1;
+    for (int i = 0; i < static_cast<int>(visible.size()); ++i) {
+        const auto& st = *visible[static_cast<std::size_t>(i)];
         const bool weak = sec::hasWeakOrDefaultProbe(st);
         QString probedList;
         for (std::size_t k = 0; k < st.probedSsids.size(); ++k) {
@@ -613,7 +854,8 @@ void MainWindow::refreshStations(bool force) {
         if (probedList.isEmpty()) {
             probedList = "<wildcard>";
         }
-        setCellText(stationsTable_, i, 0, QString::fromStdString(st.mac));
+        const QString macStr = QString::fromStdString(st.mac);
+        setCellText(stationsTable_, i, 0, macStr);
         setCellText(stationsTable_, i, 1,
                     st.lastBssid.empty() ? QString("-") : QString::fromStdString(st.lastBssid));
         setCellText(stationsTable_, i, 2, QString::number(st.probeCount));
@@ -621,6 +863,15 @@ void MainWindow::refreshStations(bool force) {
             setCellText(stationsTable_, i, 3, weak ? QString("WEAK / DEFAULT") : QString("-"));
         styleWarnBadge(riskItem, weak);
         setCellText(stationsTable_, i, 4, probedList);
+        if (!prevStaMac.isEmpty() && macStr == prevStaMac) {
+            selStaRow = i;
+        }
+    }
+    if (selStaRow >= 0 &&
+        (stationsTable_->currentRow() != selStaRow ||
+         stationsTable_->currentColumn() != prevStaCol)) {
+        QSignalBlocker blocker(stationsTable_);
+        stationsTable_->setCurrentCell(selStaRow, prevStaCol);
     }
 }
 
@@ -673,8 +924,17 @@ void MainWindow::refreshRfGuard(bool force) {
                         sc.continuousCarrier || sc.burstCount >= 5u});
     }
 
-    tabs_->setTabText(2, QString("RF Guard (%1)").arg(rows.size()));
+    const int curRfRow = rfGuardTable_->currentRow();
+    const QString prevRfKey =
+        (curRfRow >= 0 && rfGuardTable_->item(curRfRow, 0) != nullptr &&
+         rfGuardTable_->item(curRfRow, 1) != nullptr)
+            ? (rfGuardTable_->item(curRfRow, 0)->text() + "|" +
+               rfGuardTable_->item(curRfRow, 1)->text())
+            : QString{};
+    const int prevRfCol = (std::max)(0, rfGuardTable_->currentColumn());
+    tabs_->setTabText(3, QString("RF Guard (%1)").arg(rows.size()));
     rfGuardTable_->setRowCount(static_cast<int>(rows.size()));
+    int selRfRow = -1;
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
         const auto& r = rows[static_cast<std::size_t>(i)];
         setCellText(rfGuardTable_, i, 0, r.band);
@@ -684,12 +944,24 @@ void MainWindow::refreshRfGuard(bool force) {
         QTableWidgetItem* stItem = setCellText(rfGuardTable_, i, 4, r.status);
         styleWarnBadge(stItem, r.alert);
         setCellText(rfGuardTable_, i, 5, QString::number(r.count));
+        if (!prevRfKey.isEmpty() && (r.band + "|" + r.addr) == prevRfKey) {
+            selRfRow = i;
+        }
+    }
+    if (selRfRow >= 0 &&
+        (rfGuardTable_->currentRow() != selRfRow || rfGuardTable_->currentColumn() != prevRfCol)) {
+        QSignalBlocker blocker(rfGuardTable_);
+        rfGuardTable_->setCurrentCell(selRfRow, prevRfCol);
     }
 }
 
 void MainWindow::refreshAlerts() {
     const auto& sec = app_.secState();
     const auto& alerts = sec.alerts;
+    if (sec.totalAlertsEmitted < lastTotalAlerts_) {
+        alerts_->clear();
+        lastTotalAlerts_ = 0u;
+    }
     if (sec.totalAlertsEmitted <= lastTotalAlerts_ || alerts.empty()) {
         return;
     }
@@ -730,17 +1002,23 @@ void MainWindow::refreshChannels(bool force) {
     const auto dist = sec::channelDistribution(sec);
     QString band24;
     QString band5;
+    QString band6;
     for (const auto& c : dist) {
-        const QString part = QString("ch%1×%2 ").arg(c.channel).arg(c.count);
+        const int32_t dispCh =
+            zd::is6GhzChannel(c.channel) ? (c.channel - zd::k6GhzChannelBase) : c.channel;
+        const QString part = QString("ch%1×%2 ").arg(dispCh).arg(c.count);
         if (c.band == sec::Band::Band24GHz) {
             band24 += part;
         } else if (c.band == sec::Band::Band5GHz) {
             band5 += part;
+        } else if (c.band == sec::Band::Band6GHz) {
+            band6 += part;
         }
     }
-    channelsLabel_->setText(QString("2.4GHz: %1\n5GHz: %2")
+    channelsLabel_->setText(QString("2.4GHz: %1\n5GHz: %2\n6GHz: %3")
                                 .arg(band24.isEmpty() ? QString("-") : band24)
-                                .arg(band5.isEmpty() ? QString("-") : band5));
+                                .arg(band5.isEmpty() ? QString("-") : band5)
+                                .arg(band6.isEmpty() ? QString("-") : band6));
 }
 
 std::string MainWindow::selectedBssid() const {
@@ -754,7 +1032,7 @@ std::string MainWindow::selectedBssid() const {
 void MainWindow::resolveSelectedTarget(std::string& bssidOut, std::string& stationOut) const {
     bssidOut.clear();
     stationOut.clear();
-    if (tabs_ != nullptr && tabs_->currentIndex() == 1) {
+    if (tabs_ != nullptr && tabs_->currentIndex() == 2) {
         const int row = stationsTable_->currentRow();
         if (row >= 0 && stationsTable_->item(row, 0) != nullptr) {
             stationOut = stationsTable_->item(row, 0)->text().toStdString();
@@ -823,11 +1101,13 @@ void MainWindow::onLoadSession() {
     alerts_->clear();
     lastTotalAlerts_ = 0;
     lastNetworksRev_ = UINT64_MAX;
+    lastBleRev_ = UINT64_MAX;
     lastStationsRev_ = UINT64_MAX;
     lastRfGuardRev_ = UINT64_MAX;
     lastChannelsRev_ = UINT64_MAX;
     displayedTargets_.clear();
     refreshNetworks(true);
+    refreshBluetooth(true);
     refreshStations(true);
     refreshRfGuard(true);
     refreshChannels(true);
@@ -878,11 +1158,21 @@ void MainWindow::onSelectPcap() {
 }
 
 void MainWindow::onExportReport() {
-    const QString path = QFileDialog::getSaveFileName(
+    QString selectedFilter;
+    QString path = QFileDialog::getSaveFileName(
         this, "Export Assessment Report", "zeroday_report.md",
-        "Markdown Report (*.md);;CSV Report (*.csv);;HTML Report (*.html)");
+        "Markdown Report (*.md);;CSV Report (*.csv);;HTML Report (*.html)", &selectedFilter);
     if (path.isEmpty()) {
         return;
+    }
+    if (!sec::reportFormatFromPath(path.toStdString()).has_value()) {
+        if (selectedFilter.contains("*.csv")) {
+            path += ".csv";
+        } else if (selectedFilter.contains("*.html")) {
+            path += ".html";
+        } else {
+            path += ".md";
+        }
     }
     const auto r = app_.exportReport(path.toStdString());
     statusBar()->showMessage(QString::fromStdString(r.message), 6000);
@@ -891,9 +1181,60 @@ void MainWindow::onExportReport() {
     }
 }
 
+void MainWindow::onExportHandshakes() {
+    if (app_.collectedHandshakeCount() == 0u) {
+        statusBar()->showMessage("No crackable handshakes/PMKIDs captured yet.", 5000);
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, "Export Hashcat 22000 Handshakes", "handshakes.hc22000",
+        "Hashcat 22000 (*.hc22000 *.22000);;All Files (*)");
+    if (path.isEmpty()) {
+        return;
+    }
+    const auto r = app_.exportHandshakes(path.toStdString());
+    statusBar()->showMessage(QString::fromStdString(r.message), 6000);
+    if (!r.ok) {
+        QMessageBox::warning(this, "Export .hc22000", QString::fromStdString(r.message));
+    }
+}
+
 void MainWindow::onBleScan() {
     const auto r = app_.requestBleScan();
     statusBar()->showMessage(QString::fromStdString(r.message), 5000);
+    refreshStatus();
+}
+
+void MainWindow::onToggleSubGhz() {
+    const auto r = app_.subGhzRunning()
+                       ? app_.stopSubGhz()
+                       : app_.startSubGhz(app_.petState().subGhzFreqKhz);
+    statusBar()->showMessage(QString::fromStdString(r.message), 5000);
+    if (!r.ok && app_.subGhzAvailable()) {
+        QMessageBox::warning(this, "Sub-GHz Listener", QString::fromStdString(r.message));
+    }
+    refreshStatus();
+}
+
+void MainWindow::onToggleWardrive() {
+    if (app_.wardriving()) {
+        app_.stopWardrive();
+        statusBar()->showMessage(
+            QString("Wardrive stopped (%1 APs logged)").arg(app_.wardriveLoggedCount()), 5000);
+        refreshStatus();
+        return;
+    }
+    const QString path = QFileDialog::getSaveFileName(
+        this, "Start WiGLE Wardriving CSV", "wardrive.wigle.csv", "WiGLE CSV (*.csv);;All Files (*)");
+    if (path.isEmpty()) {
+        return;
+    }
+    const auto r = app_.startWardrive(path.toStdString());
+    statusBar()->showMessage(QString::fromStdString(r.message), 6000);
+    if (!r.ok) {
+        QMessageBox::warning(this, "Wardriving", QString::fromStdString(r.message));
+    }
+    refreshStatus();
 }
 
 void MainWindow::onClearThreat() {
@@ -907,7 +1248,7 @@ void MainWindow::onTrustSelected() {
     std::string station;
     resolveSelectedTarget(bssid, station);
     if (bssid.empty()) {
-        QMessageBox::information(this, "Trusted BSSID", "Select a network row (or associated station) first.");
+        statusBar()->showMessage("Select a network row (or associated station) first.", 5000);
         return;
     }
     const bool trusted = app_.toggleTrustBssid(bssid);
@@ -919,14 +1260,30 @@ void MainWindow::onTrustSelected() {
 
 void MainWindow::onFilterChanged() {
     lastNetworksRev_ = UINT64_MAX;
+    lastBleRev_ = UINT64_MAX;
     lastStationsRev_ = UINT64_MAX;
     lastRfGuardRev_ = UINT64_MAX;
     refreshNetworks(true);
+    refreshBluetooth(true);
     refreshStations(true);
     refreshRfGuard(true);
 }
 
 void MainWindow::onAuthToggled(bool on) {
+    if (on && !app_.authorization().operatorConfirmed) {
+        const auto choice = QMessageBox::warning(
+            this, "Confirm Offensive Authorization",
+            "Arming enables active 802.11 deauthentication against allow-listed BSSIDs.\n\n"
+            "Only proceed on networks you own or have explicit written authorization to assess.\n\n"
+            "Arm offensive transmitter?",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (choice != QMessageBox::Yes) {
+            QSignalBlocker blocker(authCheck_);
+            authCheck_->setChecked(false);
+            refreshStatus();
+            return;
+        }
+    }
     app_.confirmAuthorization(on);
     refreshStatus();
 }
@@ -936,10 +1293,10 @@ void MainWindow::onAllowSelected() {
     std::string station;
     resolveSelectedTarget(bssid, station);
     if (bssid.empty()) {
-        const QString msg = (tabs_ != nullptr && tabs_->currentIndex() == 1)
+        const QString msg = (tabs_ != nullptr && tabs_->currentIndex() == 2)
                                 ? QString("Select an associated station (or switch to the Networks tab).")
                                 : QString("Select a network row first.");
-        QMessageBox::information(this, "Allow-list", msg);
+        statusBar()->showMessage(msg, 5000);
         return;
     }
     const bool added = app_.toggleAllowBssid(bssid);
@@ -956,7 +1313,7 @@ void MainWindow::onDeauthSelected() {
     std::string prefillClient;
     resolveSelectedTarget(bssid, prefillClient);
     if (bssid.empty()) {
-        const QString msg = (tabs_ != nullptr && tabs_->currentIndex() == 1)
+        const QString msg = (tabs_ != nullptr && tabs_->currentIndex() == 2)
                                 ? QString("Select an associated station (or switch to the Networks tab).")
                                 : QString("Select a network row first.");
         QMessageBox::information(this, "Deauth", msg);
@@ -988,20 +1345,15 @@ void MainWindow::onDeauthSelected() {
     bssidEdit->setReadOnly(true);
 
     const sec::WifiTarget* targetAp = sec::findTarget(app_.secState(), bssid);
+    QCheckBox* tuneCheck = nullptr;
+    int targetCh = 0;
     if (targetAp != nullptr && targetAp->channel > 0 && app_.monitoring()) {
-        auto* tuneRow = new QHBoxLayout();
-        auto* chInfo = new QLabel(QString("AP channel: %1").arg(targetAp->channel), &dlg);
-        auto* tuneBtn = new QPushButton(QString("Tune to ch %1").arg(targetAp->channel), &dlg);
-        const int targetCh = targetAp->channel;
-        connect(tuneBtn, &QPushButton::clicked, this, [this, targetCh, tuneBtn]() {
-            channelSpin_->setValue(targetCh);
-            const auto r = app_.setChannel(targetCh);
-            statusBar()->showMessage(QString::fromStdString(r.message), 4000);
-            tuneBtn->setEnabled(false);
-        });
-        tuneRow->addWidget(chInfo);
-        tuneRow->addWidget(tuneBtn);
-        form->addRow("Channel", tuneRow);
+        targetCh = targetAp->channel;
+        tuneCheck = new QCheckBox(
+            QString("Auto-tune monitor interface to AP channel %1 before transmit").arg(targetCh),
+            &dlg);
+        tuneCheck->setChecked(true);
+        form->addRow("Channel", tuneCheck);
     }
 
     auto* clientCombo = new QComboBox(&dlg);
@@ -1046,11 +1398,78 @@ void MainWindow::onDeauthSelected() {
             "Start monitor mode first (it has to come up before a target can be hit).");
         return;
     }
-    const auto r = app_.requestDeauth(bssid, client, static_cast<uint32_t>(countSpin->value()));
+    const int tuneCh = (tuneCheck != nullptr && tuneCheck->isChecked()) ? targetCh : 0;
+    if (tuneCh > 0 && channelSpin_ != nullptr) {
+        channelSpin_->setValue(tuneCh);
+    }
+    const auto r = app_.requestDeauth(
+        bssid, client, static_cast<uint32_t>(countSpin->value()), tuneCh);
     statusBar()->showMessage(QString::fromStdString(r.message), 6000);
     if (!r.ok) {
         QMessageBox::warning(this, "Deauth", QString::fromStdString(r.message));
         return;
+    }
+}
+
+void MainWindow::onPmkidSelected() {
+    std::string bssid;
+    std::string prefillClient;
+    resolveSelectedTarget(bssid, prefillClient);
+    if (bssid.empty()) {
+        QMessageBox::information(this, "PMKID probe", "Select a network row first.");
+        return;
+    }
+    // Same authorization gate as deauth.
+    const sec::AuthDecision decision = sec::authorize(app_.authorization(), bssid);
+    if (decision != sec::AuthDecision::Allowed) {
+        QMessageBox::critical(
+            this, "Transmit blocked",
+            QString("PMKID probe against %1 is blocked:\n\n%2\n\nConfirm authorization and "
+                    "allow-list this BSSID first.")
+                .arg(QString::fromStdString(bssid))
+                .arg(sec::authDecisionLabel(decision)));
+        return;
+    }
+    if (!app_.monitoring()) {
+        QMessageBox::information(this, "PMKID probe", "Start monitor mode first.");
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle("Clientless PMKID probe — authorized target");
+    auto* form = new QFormLayout(&dlg);
+    auto* note = new QLabel(
+        "Sends auth+assoc from a throwaway MAC to solicit the AP's EAPOL M1 (and any RSN "
+        "PMKID) without kicking a client. WPA2 only — a WPA3-SAE/PMF target has no PMKID, so "
+        "use Deauth there. This action is logged.",
+        &dlg);
+    note->setWordWrap(true);
+    note->setStyleSheet("background:#1d4ed8; color:#ffffff; padding:6px; border-radius:4px;");
+    form->addRow(note);
+    auto* bssidEdit = new QLineEdit(QString::fromStdString(bssid), &dlg);
+    bssidEdit->setReadOnly(true);
+    form->addRow("Target BSSID", bssidEdit);
+    auto* countSpin = new QSpinBox(&dlg);
+    countSpin->setRange(1, 1000);
+    countSpin->setValue(8);
+    form->addRow("Auth/assoc attempts", countSpin);
+    auto* buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+    int tuneCh = 0;
+    if (const sec::WifiTarget* t = sec::findTarget(app_.secState(), bssid)) {
+        tuneCh = t->channel;
+    }
+    const auto r =
+        app_.requestPmkidProbe(bssid, static_cast<uint32_t>(countSpin->value()), tuneCh);
+    statusBar()->showMessage(QString::fromStdString(r.message), 6000);
+    if (!r.ok) {
+        QMessageBox::warning(this, "PMKID probe", QString::fromStdString(r.message));
     }
 }
 

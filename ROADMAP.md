@@ -53,20 +53,19 @@ not yet implemented.
 
 - [x] **Assessment report export** (Markdown/HTML/CSV): networks seen, alerts raised,
   handshakes/PMKIDs captured, generated safely from a session (`--export` / GUI Export).
-- [ ] **GPS/wardriving mode** (Linux `gpsd` integration; pure WiGLE CSV wardriving is now
-  implemented for T-Deck + GPS/SD).
+- [x] **GPS/wardriving mode** (Linux `gpsd` integration + WiGLE v1.4 CSV wardriving via `--wardrive` / TUI `W` / GUI `Wardrive…`; T-Deck + GPS/SD also supported).
 - [x] **Multi-channel scheduling**: pure `ChannelHopper` covers 2.4 + 5 GHz channels with
   3s EAPOL handshake dwell hold (`--hop` / `--5ghz` / TUI `h` / GUI `Hop ch`).
 - [x] **PCAP capture path selector** in GUI + deduped beacon/EAPOL `.pcap` capture.
-- [ ] **Desktop notifications** (libnotify) for `Critical` alerts so `watch` is useful
-  running in the background, not just foregrounded in a terminal/window.
+- [x] **Desktop notifications** (libnotify) for `Critical` alerts (`--notify` / TUI `N` /
+  GUI `Notify`) so `watch` and live defense alert in the background too.
 - [ ] Config profiles ("lab" vs "field") presetting interface/channel/allow-list.
 
 ## M5Stick / ESP32
 
-- [ ] **ESP-IDF 5.x / Arduino-ESP32 3.x (PIOArduino) migration**: move off pinned
-  `espressif32 @ 6.9.0` (ESP-IDF 4.4) onto maintained PIOArduino / ESP-IDF 5.x releases for
-  long-term WiFi/SDK security fixes while validating `M5Unified` and `LovyanGFX` compatibility.
+- [x] **ESP-IDF 5.x / Arduino-ESP32 3.x (PIOArduino) migration**: parallel `*-idf5`
+  PIOArduino targets alongside `espressif32 @ 6.9.0` plus `#if ESP_ARDUINO_VERSION_MAJOR >= 3`
+  compatibility adapters and promiscuous 802.11 defensive monitoring (`defmon on|off`).
 - [x] **BLE scanning** alongside WiFi — asynchronous non-blocking `Esp32BleScanner` with
   free-heap guard feeds BLE tracker/multi-tool detections into RF Guard (`ble on|off`).
 - [x] **Known-network memory**: trusted BSSID persistence in NVS (`ESP32`) and config
@@ -76,9 +75,10 @@ not yet implemented.
 
 ## Native desktop simulator (`zd_sim`)
 
-- [ ] Scripted event-stream fuzzing against the pure reducers (secops + pet_logic) as a
-  cheap regression harness — mostly a dev tool, not user-facing.
-- [ ] Animated frame-sequence export (vs. the current single `.ppm`) for docs/README GIFs.
+- [x] Scripted event-stream fuzzing against the pure reducers (secops + pet_logic) as a
+  cheap regression harness (`testPetLogicEventStreamFuzzer`, `testSecOpsEventStreamFuzzer`).
+- [x] Animated frame-sequence export (`--ppm-seq <prefix>`, `--gif <out.gif>`, `--frames N`)
+  for docs/README animations.
 
 ## Web port
 
@@ -87,9 +87,5 @@ not yet implemented.
 
 ## Cross-cutting (not yet scoped to a specific platform)
 
-- [ ] Pet mood (`Mood`/`faceForMood` in `pet_logic.hpp`) visibly reacting to `SecMood` —
-  deliberately *not* done as part of the `SecMood` addition above, since it would mean
-  adding a new `Mood` enumerator that ripples through every platform's face renderer
-  (M5Stick, native, web JS mirror) and their parity tests. Worth doing once a single
-  target is picked to prototype it (Linux GUI is the obvious first stop) rather than
-  touching every platform at once.
+- [x] Pet mood (`Mood`/`faceForMood` + `SetSecMoodEvent` / `SyncMonitorSnapshotEvent`)
+  visibly reacts to `SecMood` across Linux GUI/TUI, ESP32 promiscuous monitor, and Web Port.

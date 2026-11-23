@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "zd/hal.hpp"
+#include "zd/render/gif_export.hpp"
 #include "zd/render/painter.hpp"
 #include "zd/render/surface_rgb565.hpp"
 
@@ -65,11 +66,12 @@ void testPainterAcrossDevicesThemesAndMoods() {
         zd::Mood::CyberAttack, zd::Mood::ShieldGuard, zd::Mood::ThreatAlert,
         zd::Mood::LevelUp
     };
-    constexpr std::array<zd::ScreenPage, 4> kPages = {
+    constexpr std::array<zd::ScreenPage, 5> kPages = {
         zd::ScreenPage::PetFace,
         zd::ScreenPage::NearbyRadar,
         zd::ScreenPage::ChannelSpectrum,
-        zd::ScreenPage::RfGuard
+        zd::ScreenPage::RfGuard,
+        zd::ScreenPage::Captures
     };
 
     base = zd::reduce(base, zd::BleScanCompletedEvent{
@@ -116,8 +118,7 @@ void testPainterAcrossDevicesThemesAndMoods() {
             }
         }
 
-        // Every mood expression on PetFace page must stay strictly in-bounds across both
-        // ClassicFace (PaperInk) and PixelArtMascot (ZeroDayCyan / AmberCrt) styles.
+        // Every mood expression on PetFace page must stay strictly in-bounds across ClassicFace themes.
         for (zd::ThemeId styleTheme : {zd::ThemeId::PaperInk, zd::ThemeId::AmberCrt, zd::ThemeId::ZeroDayCyan}) {
             for (zd::Mood mood : kMoods) {
                 zd::AppState moodState = zd::reduce(base, zd::SetThemeEvent{12600u, styleTheme, false});
@@ -125,11 +126,24 @@ void testPainterAcrossDevicesThemesAndMoods() {
                 moodState.page = zd::ScreenPage::PetFace;
                 const zd::UiFrame frame = zd::buildUiFrame(moodState, prof.dims);
                 assert(frame.faceGeom.centerX == prof.dims.width / 2);
+                assert(frame.faceStyle == zd::FaceStyle::ClassicFace);
                 assert(frame.faceStyle == zd::themeFaceStyle(styleTheme));
                 zd::render::Rgb565Surface surf(prof.dims.width, prof.dims.height);
                 zd::render::paintUiFrame(surf, frame);
                 assert(surf.outOfBoundsDrops() == 0u);
             }
+        }
+
+        // CaptureSaved notifications & Captures page stay strictly in-bounds on every profile
+        zd::AppState capState = zd::reduce(
+            base, zd::CaptureSavedEvent{22000u, 1u, "/home/user/captures/session_01.pcap", "EAPOL", true});
+        for (zd::ScreenPage page : kPages) {
+            capState = zd::reduce(capState, zd::SetPageEvent{22100u, page});
+            const zd::UiFrame cf = zd::buildUiFrame(capState, prof.dims);
+            assert(cf.notifyActive);
+            zd::render::Rgb565Surface capSurf(prof.dims.width, prof.dims.height);
+            zd::render::paintUiFrame(capSurf, cf);
+            assert(capSurf.outOfBoundsDrops() == 0u);
         }
 
         // Animated backdrop effects (RadarDish, LightningStorm, SatelliteBeam, TacticalHud)
@@ -235,11 +249,143 @@ void testHalPlatformSessionAndCli() {
     assert(session.state().opsMode == zd::OpsMode::Defensive);
 }
 
+void test5GhzSpectrumAndGifExport() {
+    // 1. 5 GHz-only ChannelSpectrum must render within bounds across every screen profile.
+    zd::AppState st = zd::initialState(99u);
+    st = zd::reduce(std::move(st), zd::ScanCompletedEvent{
+        1000u,
+        {{"Corp5G", -46, 36, true}, {"Lab5G", -52, 149, true}, {"SixG", -60, zd::k6GhzChannelBase + 37, true}}});
+    st = zd::reduce(std::move(st), zd::SetPageEvent{1100u, zd::ScreenPage::ChannelSpectrum});
+    for (const zd::ScreenProfile& prof : zd::kScreenProfiles) {
+        const zd::UiFrame f = zd::buildUiFrame(st, prof.dims);
+        zd::render::Rgb565Surface surf(prof.dims.width, prof.dims.height);
+        zd::render::paintUiFrame(surf, f);
+        assert(surf.outOfBoundsDrops() == 0u);
+    }
+
+    // 2. Animated GIF89a export
+    std::vector<zd::render::Rgb565Surface> frames;
+    for (int i = 0; i < 4; ++i) {
+        const zd::AppState cur = zd::reduce(
+            st, zd::SetPageEvent{static_cast<uint32_t>(1200 + i * 200),
+                                 (i % 2 == 0) ? zd::ScreenPage::PetFace : zd::ScreenPage::ChannelSpectrum});
+        zd::render::Rgb565Surface surf(160, 80);
+        zd::render::paintUiFrame(surf, zd::buildUiFrame(cur, {160, 80}));
+        frames.push_back(std::move(surf));
+    }
+    const std::vector<uint8_t> gif = zd::render::encodeAnimatedGif(frames, 12u);
+    assert(gif.size() > 900u);
+    assert(std::string(gif.begin(), gif.begin() + 6) == "GIF89a");
+    assert(gif.back() == 0x3Bu);
+    const std::string gifStr(gif.begin(), gif.end());
+    assert(gifStr.find("NETSCAPE2.0") != std::string::npos);
+
+    // Invalid inputs fail cleanly
+    assert(zd::render::encodeAnimatedGif({}, 12u).empty());
+    std::vector<zd::render::Rgb565Surface> mismatch;
+    mismatch.emplace_back(160, 80);
+    mismatch.emplace_back(240, 135);
+    assert(zd::render::encodeAnimatedGif(mismatch, 12u).empty());
+}
+
+void testBandedClippingBitExact() {
+    class BandAdapter {
+    public:
+        BandAdapter(zd::render::Rgb565Surface& surf, int32_t yOffset, int32_t bandHeight)
+            : surf_(surf), yOffset_(yOffset), bandHeight_(bandHeight) {}
+
+        int32_t clipYMin() const { return yOffset_; }
+        int32_t clipYMax() const { return yOffset_ + bandHeight_; }
+
+        void fillScreen(uint16_t color) { surf_.fillScreen(color); }
+        void fillRect(int32_t x, int32_t y, int32_t w, int32_t h, uint16_t color) {
+            if ((y + h) <= yOffset_ || y >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.fillRect(x, y - yOffset_, w, h, color);
+        }
+        void fillRoundRect(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint16_t color) {
+            if ((y + h) <= yOffset_ || y >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.fillRoundRect(x, y - yOffset_, w, h, r, color);
+        }
+        void fillCircle(int32_t x, int32_t y, int32_t r, uint16_t color) {
+            if ((y + r) < yOffset_ || (y - r) >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.fillCircle(x, y - yOffset_, r, color);
+        }
+        void fillArc(int32_t x, int32_t y, int32_t r0, int32_t r1, float a0, float a1,
+                     uint16_t color) {
+            const int32_t maxR = (std::max)(r0, r1);
+            if ((y + maxR) < yOffset_ || (y - maxR) >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.fillArc(x, y - yOffset_, r0, r1, a0, a1, color);
+        }
+        void drawLine(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint16_t color) {
+            const int32_t minY = (std::min)(y0, y1);
+            const int32_t maxY = (std::max)(y0, y1);
+            if (maxY < yOffset_ || minY >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.drawLine(x0, y0 - yOffset_, x1, y1 - yOffset_, color);
+        }
+        void setTextColor(uint16_t fg, uint16_t bg) { surf_.setTextColor(fg, bg); }
+        void drawString(const char* text, int32_t x, int32_t y) {
+            if ((y + 8) <= yOffset_ || y >= (yOffset_ + bandHeight_)) {
+                return;
+            }
+            surf_.drawString(text, x, y - yOffset_);
+        }
+
+    private:
+        zd::render::Rgb565Surface& surf_;
+        int32_t yOffset_;
+        int32_t bandHeight_;
+    };
+
+    zd::AppState st = zd::initialState(99u);
+    st = zd::reduce(std::move(st), zd::ScanCompletedEvent{
+                                       12u * 140u,
+                                       {{"LabNet", -44, 6, true}, {"OpenGuest", -62, 1, false}}});
+    constexpr std::array<zd::ScreenPage, 5> kPages = {
+        zd::ScreenPage::PetFace, zd::ScreenPage::NearbyRadar, zd::ScreenPage::ChannelSpectrum,
+        zd::ScreenPage::RfGuard, zd::ScreenPage::Captures};
+    for (const zd::ThemeSpec& theme : zd::kThemeCatalog) {
+        zd::AppState ts = zd::reduce(st, zd::SetThemeEvent{12u * 140u, theme.id, true});
+        for (zd::ScreenPage page : kPages) {
+            ts = zd::reduce(ts, zd::SetPageEvent{12u * 140u, page});
+            const zd::UiFrame frame = zd::buildUiFrame(ts, {320, 240});
+
+            zd::render::Rgb565Surface fullSurf(320, 240);
+            zd::render::paintUiFrame(fullSurf, frame);
+
+            std::vector<uint16_t> bandedPixels(320u * 240u, 0u);
+            for (int32_t yOff = 0; yOff < 240; yOff += 30) {
+                zd::render::Rgb565Surface band(320, 30);
+                BandAdapter gfx(band, yOff, 30);
+                zd::render::paintUiFrame(gfx, frame);
+                for (int32_t row = 0; row < 30; ++row) {
+                    for (int32_t col = 0; col < 320; ++col) {
+                        bandedPixels[static_cast<std::size_t>((yOff + row) * 320 + col)] =
+                            band.pixelAt(col, row);
+                    }
+                }
+            }
+            assert(bandedPixels == fullSurf.pixels());
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     testPainterAcrossDevicesThemesAndMoods();
     testHalPlatformSessionAndCli();
+    test5GhzSpectrumAndGifExport();
+    testBandedClippingBitExact();
     std::cout << "All cross-device painter, framebuffer, and HAL session tests PASSED!\n";
     return 0;
 }

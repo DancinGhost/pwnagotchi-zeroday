@@ -117,16 +117,18 @@ Binaries: `build_cmake/zd-linux`, `build_cmake/zd-gui`.
 
 ```bash
 ./zd-linux                       # interactive TUI dashboard (default on a terminal)
-./zd-linux --iface wlan0 --hop tui
+./zd-linux --iface wlan0 --hop --adaptive tui
 ./zd-linux scan --ble --export report.md   # active scan + BLE + export Markdown/CSV/HTML
-sudo ./zd-linux watch --hop --pcap cap.pcap --record session.zds
+./zd-linux bt                              # dedicated Bluetooth/BLE device scan table
+sudo ./zd-linux watch --hop --adaptive --subghz --pcap cap.pcap --record session.zds --hc22000 hs.hc22000
 ./zd-linux replay session.zds --export report.html
+sudo ./zd-linux pmkid AA:BB:CC:DD:EE:FF --channel 6 --hc22000 out.hc22000 --i-am-authorized --allow AA:BB:CC:DD:EE:FF
 ```
 
-TUI keys: `s` scan · `m` toggle monitor · `h` toggle channel hopper · `c` set channel · `p`/`Tab` cycle APs / Stations / RF Guard ·
-`v`/`1-4` Pet ASCII panel (`V` hide) · `B` BLE scan · `K` clear threat · `u` trust BSSID · `e` export report ·
-`t`/`T`/`[`/`]` next/prev theme · ↑/↓ or `j`/`k` select row · `A` toggle authorization · `L` toggle allow-list on selected BSSID ·
-`x` deauth selected · `w` save session · `r` load session · `q` quit.
+TUI keys: `s` scan · `m` toggle monitor · `h` toggle channel hopper · `a` toggle adaptive UCB1 hopping · `c` set channel · `p`/`Tab` cycle Networks / Bluetooth / Stations / RF Guard ·
+`v`/`1-5` Pet ASCII panel (`V` hide) · `B` BLE scan · `G` toggle `rtl_433` Sub-GHz listener · `N` toggle desktop notifications · `W` toggle WiGLE wardrive · `K` clear threat · `u` trust BSSID · `e` export report · `H` export `.hc22000` ·
+`t`/`T`/`[`/`]` next/prev theme · ↑/↓ or `j`/`k` select row · `A` toggle authorization · `L` toggle allow-list on selected BSSID (or associated BSSID on Stations tab) ·
+`x` deauth selected · `P` clientless PMKID probe on selected AP · `w` save session · `r` load session · `q` quit.
 
 ### GUI
 
@@ -135,7 +137,7 @@ TUI keys: `s` scan · `m` toggle monitor · `h` toggle channel hopper · `c` set
 ./zd-gui --replay session.zds
 ```
 
-Includes live table search filter (`Ctrl+F`), `Networks` / `Stations / Probes` / `RF Guard` tabs, channel-hopper toggle, `PCAP…`, `Export…` (Markdown/CSV/HTML), `BLE Scan`, `Clear Threat`, `Trust BSSID`, and the authorization-gated offensive panel.
+Includes live table search filter (`Ctrl+F`), `Networks` / `Bluetooth` / `Stations / Probes` / `RF Guard` tabs, channel-hopper + `5 GHz` + `Adaptive` UCB1 toggles, `BT Scan` / `BT Auto` / `Sub-GHz` (`rtl_433`) controls, `Hotkeys` WCAG 2.1.4 toggle, `PCAP…`, `Export…` (Markdown/CSV/HTML), `HC22000…` hashcat export, `Clear Threat`, `Trust BSSID`, and the confirmation-gated offensive panel (Deauth + clientless PMKID probe, with atomic deauth `Auto-tune` channel checkbox).
 
 ---
 

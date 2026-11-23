@@ -117,7 +117,7 @@ struct TouchZoneGesture {
         }
         const int32_t w = (dims.width > 0) ? dims.width : 320;
         const int32_t h = (dims.height > 0) ? dims.height : 240;
-        const uint16_t topBandY = static_cast<uint16_t>((std::max)(20, (h * 42) / 240));
+        const uint16_t topBandY = static_cast<uint16_t>((std::max)(int32_t{20}, (h * 42) / 240));
         const uint16_t leftMaxX = static_cast<uint16_t>((w * 100) / 320);
         const uint16_t rightMinX = static_cast<uint16_t>((w * 220) / 320);
         const uint16_t modeMinX = static_cast<uint16_t>((w * 250) / 320);

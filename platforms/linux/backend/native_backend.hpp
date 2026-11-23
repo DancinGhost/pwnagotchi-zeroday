@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -30,6 +31,7 @@
 
 #include "zd/dot11.hpp"
 #include "zd/secops_hal.hpp"
+#include "cli_backend.hpp"
 #include "dot11.hpp"
 #include "../app/clock.hpp"
 
@@ -52,6 +54,7 @@ inline void setPcapCloexec(pcap_t* h) {
 class NativeCaptureSource final : public sec::ICaptureSource {
 public:
     static constexpr std::size_t kMaxQueuedFrames = 4096u;
+    static constexpr std::size_t kMaxQueuedPeers = 256u;
 
     NativeCaptureSource() = default;
     NativeCaptureSource(const NativeCaptureSource&) = delete;
@@ -117,6 +120,17 @@ public:
         return out;
     }
 
+    std::vector<zd::peer::PeerSighting> pollPeers() override {
+        std::vector<zd::peer::PeerSighting> out;
+        std::lock_guard<std::mutex> lock(peerMutex_);
+        out.reserve(peerQueue_.size());
+        for (auto& p : peerQueue_) {
+            out.push_back(std::move(p));
+        }
+        peerQueue_.clear();
+        return out;
+    }
+
     void stop() override {
         stopRequested_.store(true, std::memory_order_release);
         if (handle_ != nullptr) {
@@ -131,8 +145,12 @@ public:
             pcap_close(handle_);
             handle_ = nullptr;
         }
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        queue_.clear();
+        {
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            queue_.clear();
+        }
+        std::lock_guard<std::mutex> plock(peerMutex_);
+        peerQueue_.clear();
     }
 
     bool running() const override { return running_.load(std::memory_order_acquire); }
@@ -162,6 +180,16 @@ private:
                 }
                 batchQueue_.clear();
             }
+            if (!peerBatch_.empty()) {
+                std::lock_guard<std::mutex> lock(peerMutex_);
+                for (auto& p : peerBatch_) {
+                    if (peerQueue_.size() >= kMaxQueuedPeers) {
+                        peerQueue_.pop_front();
+                    }
+                    peerQueue_.push_back(std::move(p));
+                }
+                peerBatch_.clear();
+            }
             if (n == PCAP_ERROR_BREAK || stopRequested_.load(std::memory_order_acquire)) {
                 break;
             }
@@ -176,29 +204,27 @@ private:
     void openDumper() {
         closeDumper();
         dumpedBeaconBssids_.clear();
+        dumpedBeaconOrder_.clear();
+        lastDumpFlushMs_ = 0u;
         if (dumpPath_.empty() || handle_ == nullptr) {
             return;
         }
-        const int fd = ::open(dumpPath_.c_str(),
-                              O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+        const int fd = openSecureWriteRegular(dumpPath_, /*append=*/false);
         if (fd < 0) {
+            setError("failed to securely open PCAP dump path: " + dumpPath_);
             return;
         }
-        struct stat st {};
-        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || ::ftruncate(fd, 0) != 0) {
-            ::close(fd);
-            return;
-        }
-        (void)::fchmod(fd, 0600);
         FILE* fp = ::fdopen(fd, "wb");
         if (fp == nullptr) {
             // POSIX fdopen() leaves fd open on failure; cppcheck 2.13 posix.cfg mismodels it as consumed.
             // cppcheck-suppress doubleFree
             ::close(fd);
+            setError("fdopen failed for PCAP dump path");
             return;
         }
         dumper_ = pcap_dump_fopen(handle_, fp);
         if (dumper_ == nullptr) {
+            setError(pcap_geterr(handle_));
             ::fclose(fp);
         }
     }
@@ -220,16 +246,49 @@ private:
         } else {
             f = decodeDot11(bytes, h->caplen, now, -100);
         }
+        // Passive peer discovery: greet other ZeroDay units and classic Pwnagotchi /
+        // Palnagotchi beacons on the raw 802.11 frame (after any radiotap header).
+        {
+            const u_char* mac = bytes;
+            uint32_t macLen = h->caplen;
+            if (self->hasRadiotap_ && h->caplen >= 4u) {
+                const uint32_t rtLen =
+                    static_cast<uint32_t>(bytes[2]) | (static_cast<uint32_t>(bytes[3]) << 8u);
+                if (rtLen < h->caplen) {
+                    mac = bytes + rtLen;
+                    macLen = h->caplen - rtLen;
+                } else {
+                    macLen = 0u;
+                }
+            }
+            if (macLen >= 24u) {
+                if (const auto hit = zd::peer::classifyWifiPeer(mac, macLen)) {
+                    self->peerBatch_.push_back(
+                        zd::peer::PeerSighting{*hit, f.has_value() ? f->rssi : -100, now});
+                }
+            }
+        }
         if (f.has_value()) {
             if (self->dumper_ != nullptr) {
                 if (f->kind == sec::FrameKind::Eapol || f->kind == sec::FrameKind::Pmkid) {
                     pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+                    pcap_dump_flush(self->dumper_);
+                    self->lastDumpFlushMs_ = now;
                 } else if (f->kind == sec::FrameKind::Beacon && !f->bssid.empty()) {
-                    if (self->dumpedBeaconBssids_.size() >= 1024u) {
-                        self->dumpedBeaconBssids_.clear();
-                    }
-                    if (self->dumpedBeaconBssids_.insert(f->bssid).second) {
+                    if (self->dumpedBeaconBssids_.find(f->bssid) == self->dumpedBeaconBssids_.end()) {
+                        while (self->dumpedBeaconBssids_.size() >= 1024u &&
+                               !self->dumpedBeaconOrder_.empty()) {
+                            self->dumpedBeaconBssids_.erase(self->dumpedBeaconOrder_.front());
+                            self->dumpedBeaconOrder_.pop_front();
+                        }
+                        self->dumpedBeaconBssids_.insert(f->bssid);
+                        self->dumpedBeaconOrder_.push_back(f->bssid);
                         pcap_dump(reinterpret_cast<u_char*>(self->dumper_), h, bytes);
+                        if (self->lastDumpFlushMs_ == 0u ||
+                            (now - self->lastDumpFlushMs_) >= 5000u) {
+                            pcap_dump_flush(self->dumper_);
+                            self->lastDumpFlushMs_ = now;
+                        }
                     }
                 }
             }
@@ -247,7 +306,12 @@ private:
     mutable std::mutex errorMutex_;
     std::deque<sec::CapturedFrame> queue_;
     std::vector<sec::CapturedFrame> batchQueue_;
+    std::mutex peerMutex_;
+    std::deque<zd::peer::PeerSighting> peerQueue_;
+    std::vector<zd::peer::PeerSighting> peerBatch_;
     std::unordered_set<std::string> dumpedBeaconBssids_;
+    std::deque<std::string> dumpedBeaconOrder_;
+    uint32_t lastDumpFlushMs_ = 0u;
     std::string dumpPath_;
     std::string lastError_;
 };
@@ -313,6 +377,46 @@ public:
         return res;
     }
 
+    // Clientless PMKID probe: send auth->assoc from a throwaway locally-administered STA MAC
+    // to solicit the AP's EAPOL M1 (and any RSN PMKID). The reply is captured by the running
+    // monitor sniffer and correlated by SecSession::collectPmkid(). Complements deauth; a
+    // WPA3-SAE/PMF target yields no PMKID, so the deauth path stays the fallback there.
+    sec::InjectResult pmkidProbe(const std::string& bssid, const std::string& ssid,
+                                 uint32_t count) override {
+        sec::InjectResult res;
+        res.decision = sec::AuthDecision::Allowed;  // gate already cleared by SecSession
+        if (!ensureHandle()) {
+            res.transmitted = false;
+            res.detail = "pcap open failed: " + lastError_;
+            return res;
+        }
+        uint8_t ap[6];
+        if (!zd::dot11::parseMac(bssid.c_str(), ap) || sec::isMulticastMac(bssid)) {
+            res.transmitted = false;
+            res.detail = "bad BSSID";
+            return res;
+        }
+        uint8_t sta[6];
+        zd::dot11::randomStaMac(sta, static_cast<uint32_t>(std::random_device{}()));
+
+        const uint32_t safeCount = (count < 1u) ? 1u : ((count > kMaxBurst) ? kMaxBurst : count);
+        int sent = 0;
+        for (uint32_t i = 0; i < safeCount; ++i) {
+            if (sendAuth(ap, sta)) {
+                ++sent;
+            }
+            if (sendAssoc(ap, sta, ssid)) {
+                ++sent;
+            }
+        }
+        if (sent == 0) {
+            closeHandle();
+        }
+        res.transmitted = sent > 0;
+        res.detail = "pcap_sendpacket auth+assoc x" + std::to_string(sent);
+        return res;
+    }
+
 private:
     static constexpr uint32_t kMaxBurst = 1000u;
 
@@ -356,6 +460,24 @@ private:
         std::memcpy(frame, rt, sizeof(rt));
         const std::size_t bodyLen = zd::dot11::buildDeauthFrame(frame + sizeof(rt), dst, src, bssid);
         return pcap_sendpacket(handle_, frame, static_cast<int>(sizeof(rt) + bodyLen)) == 0;
+    }
+
+    // Radiotap stub prepended to raw 802.11 management frames for pcap injection.
+    static constexpr uint8_t kRadiotap[8] = {0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+    bool sendAuth(const uint8_t* ap, const uint8_t* sta) {
+        uint8_t frame[8u + zd::dot11::kAuthFrameLen];
+        std::memcpy(frame, kRadiotap, sizeof(kRadiotap));
+        const std::size_t n = zd::dot11::buildAuthFrame(frame + sizeof(kRadiotap), ap, sta);
+        return pcap_sendpacket(handle_, frame, static_cast<int>(sizeof(kRadiotap) + n)) == 0;
+    }
+
+    bool sendAssoc(const uint8_t* ap, const uint8_t* sta, const std::string& ssid) {
+        uint8_t frame[8u + zd::dot11::kMaxAssocReqLen];
+        std::memcpy(frame, kRadiotap, sizeof(kRadiotap));
+        const std::size_t n = zd::dot11::buildAssocRequest(frame + sizeof(kRadiotap), ap, sta,
+                                                           ssid.data(), ssid.size());
+        return pcap_sendpacket(handle_, frame, static_cast<int>(sizeof(kRadiotap) + n)) == 0;
     }
 
     sec::IMonitorControl* monitor_;

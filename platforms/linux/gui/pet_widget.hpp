@@ -11,8 +11,10 @@
 #include <memory>
 #include <string>
 
+#include <QAccessible>
 #include <QColor>
 #include <QImage>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
@@ -33,6 +35,7 @@ class PetWidget : public QWidget {
 public:
     explicit PetWidget(QWidget* parent = nullptr) : QWidget(parent) {
         setMinimumSize(360, 200);
+        setFocusPolicy(Qt::StrongFocus);
         setAccessibleName("ZeroDay Pet Display");
         setAccessibleDescription("Virtual pet status display");
     }
@@ -83,6 +86,46 @@ public:
     }
 
 protected:
+    void keyPressEvent(QKeyEvent* ev) override {
+        if (!onEvent_) {
+            QWidget::keyPressEvent(ev);
+            return;
+        }
+        const uint32_t now = linux_app::nowMs();
+        const int8_t step = (ev->modifiers() & Qt::ShiftModifier) ? -1 : 1;
+        switch (ev->key()) {
+            case Qt::Key_Space:
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+                onEvent_(CyclePageEvent{now, step});
+                ev->accept();
+                return;
+            case Qt::Key_Right:
+                onEvent_(CyclePageEvent{now, +1});
+                ev->accept();
+                return;
+            case Qt::Key_Left:
+                onEvent_(CyclePageEvent{now, -1});
+                ev->accept();
+                return;
+            case Qt::Key_T:
+                onEvent_(CycleThemeEvent{now, step});
+                ev->accept();
+                return;
+            case Qt::Key_B:
+                onEvent_(ButtonBPressedEvent{now});
+                ev->accept();
+                return;
+            case Qt::Key_M:
+                onEvent_(CycleOpsModeEvent{now});
+                ev->accept();
+                return;
+            default:
+                QWidget::keyPressEvent(ev);
+                return;
+        }
+    }
+
     void mousePressEvent(QMouseEvent* ev) override {
         if (!onEvent_ || !lastFrameValid_ || image_.isNull()) {
             QWidget::mousePressEvent(ev);
@@ -140,6 +183,10 @@ protected:
             p.setPen(QPen(bezel, 3));
             p.drawRect(rect().adjusted(1, 1, -2, -2));
         }
+        if (hasFocus()) {
+            p.setPen(QPen(QColor(56, 189, 248), 2));
+            p.drawRect(rect().adjusted(2, 2, -3, -3));
+        }
     }
 
 private:
@@ -172,6 +219,8 @@ private:
             }
         }
         setAccessibleDescription(QString::fromStdString(desc));
+        QAccessibleEvent accEv(this, QAccessible::DescriptionChanged);
+        QAccessible::updateAccessibility(&accEv);
     }
 
     static std::string frameSignature(const UiFrame& f) {
@@ -182,12 +231,13 @@ private:
         s += std::to_string(static_cast<int>(f.theme)) + "|";
         s += std::to_string(static_cast<int>(f.opsMode)) + "|" + f.modeBadge + "|";
         s += std::to_string(static_cast<int>(f.scene)) + "|" + f.rankLine + "|";
-        if (f.themeEffect != ThemeEffect::None || f.scene != ActivityScene::None ||
-            f.page == ScreenPage::PetFace) {
+        if (f.themeEffect != ThemeEffect::None || f.scene != ActivityScene::None) {
             s += std::to_string(f.animTick) + "|";
         }
         s += f.headerLine + "|" + f.footerLine + "|";
         s += std::string(f.face.moodLabel) + "|" + f.face.asciiFace + "|";
+        s += std::to_string(f.capturesSaved) + "|" + f.capturePath + "|";
+        s += f.notifyActive ? ("N:" + f.notifyBanner + "|") : "N0|";
         s += f.toast.visible ? ("T:" + f.toast.text + "|") : "T0|";
         if (f.page == ScreenPage::PetFace) {
             s += f.spotlightLabel + "|";
@@ -203,10 +253,15 @@ private:
             for (const auto& b : f.channelBars) {
                 s += std::to_string(b.count) + ",";
             }
-        } else {
+        } else if (f.page == ScreenPage::RfGuard) {
             s += f.rfGuardSummary + "|";
             for (const auto& r : f.rfGuardRows) {
                 s += r.ssid + ":" + r.details + ";";
+            }
+        } else {
+            s += f.captureSummary + "|";
+            for (const auto& r : f.captureRows) {
+                s += r + ";";
             }
         }
         return s;

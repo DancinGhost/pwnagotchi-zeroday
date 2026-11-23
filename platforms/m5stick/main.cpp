@@ -132,6 +132,7 @@ zd::hal::PlatformSession gSession;
 // Active-offense console (deauth injection). Inert until explicitly armed + allow-listed at
 // the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
 zd::esp32_common::OffensiveConsole gOffensive;
+zd::esp32_common::Esp32PromiscuousMonitor gDefMon;
 
 bool gBtnALongHandled = false;
 bool gBtnBLongHandled = false;
@@ -156,7 +157,12 @@ void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
         wakeDisplay(nowMs);
         if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
+            Serial.print(
+                gOffensive.handleLine(line, nowMs, &gSession, &gThemeStore, &gDefMon.core()).c_str());
+            return;
+        }
+        if (line == "defmon" || line.rfind("defmon ", 0) == 0) {
+            Serial.print(gDefMon.handleCommand(line, gOffensive.session().state()).c_str());
             return;
         }
         if (line == "sfx on") {
@@ -174,12 +180,18 @@ void pollSerialCli(uint32_t nowMs) {
             Serial.printf("SFX: %s (use 'sfx on|off')\n", gBuzzer.isMuted() ? "muted" : "on");
             return;
         }
-        if (line == "ble on") {
+        if (line == "ble scan" || line == "bt scan") {
+            gBle.setEnabled(true);
+            gBle.requestScanNow();
+            Serial.println("Bluetooth scan queued...");
+            return;
+        }
+        if (line == "ble on" || line == "bt on") {
             gBle.setEnabled(true);
             Serial.println("BLE scanner: enabled");
             return;
         }
-        if (line == "ble off") {
+        if (line == "ble off" || line == "bt off") {
             gBle.setEnabled(false);
             Serial.println("BLE scanner: disabled");
             return;
@@ -209,6 +221,7 @@ void setup() {
     gBle.init();
     gThemeStore.init();
     gOffensive.begin();
+    gDefMon.init();
 
     const uint32_t bootMs = millis();
     gLastActivityMs = bootMs;
@@ -216,6 +229,8 @@ void setup() {
 
     // Seed pure functional PRNG with hardware entropy & restore saved theme from NVS
     gSession.boot(esp_random(), bootMs, &gThemeStore);
+    gSession.dispatch(zd::CaptureSavedEvent{bootMs, 0u, "nvs://zeroday", "NVS Flash", false},
+                      &gThemeStore);
     gSession.renderTo(gDisplay);
     logSerialStatus("BOOT");
 }
@@ -269,9 +284,10 @@ void loop() {
     // 4. Interactive Serial CLI
     pollSerialCli(nowMs);
 
-    // 5. Step non-blocking multi-radio scanner & periodic telemetry tick
+    // 5. Step promiscuous defensive monitor, multi-radio scanner & telemetry tick
     const uint8_t prevLevel = gSession.state().level;
     const uint32_t prevThreats = gSession.state().threatsDetected;
+    gDefMon.step(nowMs, gOffensive.mutableSession(), &gSession, &gThemeStore);
     if (const char* scanTag = gSession.stepMultiRadio(
             nowMs, gRadio, &gBle, nullptr, &gThemeStore)) {
         if (gSession.state().level > prevLevel) {

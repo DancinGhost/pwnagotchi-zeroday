@@ -282,6 +282,12 @@ struct UiFrame {
     std::string rfGuardSummary;
     std::string rfGuardEmptyHint;
 
+    // Captures page fields
+    uint32_t capturesSaved = 0u;
+    std::string capturePath;
+    std::string captureSummary;
+    std::vector<std::string> captureRows;
+
     // Theming & Ops HUD
     ThemeId theme = ThemeId::PaperInk;
     ThemeEffect themeEffect = ThemeEffect::None;
@@ -298,7 +304,31 @@ struct UiFrame {
     std::string rankLine;
     ActivityScene scene = ActivityScene::None;
     std::string threatBanner;
+    bool highScoreBeaten = false;
+    std::string levelTitle;
+    bool notifyActive = false;
+    NotifyKind notifyKind = NotifyKind::None;
+    std::string notifyBanner;
 };
+
+// Pure helper splitting a capture file path across 1 or 2 readable display rows.
+inline std::vector<std::string> formatCapturePathRows(const std::string& path,
+                                                      std::size_t maxCols) {
+    const std::string safePath = path.empty() ? std::string("(unset)") : path;
+    if (safePath.size() + 6u <= maxCols) {
+        return {"PATH: " + safePath};
+    }
+    const std::size_t slash = safePath.rfind('/');
+    if (slash != std::string::npos && slash + 1u < safePath.size()) {
+        const std::string dirPart = (slash == 0u) ? std::string("/") : safePath.substr(0u, slash);
+        const std::string filePart = safePath.substr(slash + 1u);
+        return {
+            truncateText("DIR:  " + dirPart, maxCols),
+            truncateText("FILE: " + filePart, maxCols)
+        };
+    }
+    return {truncateText("PATH: " + safePath, maxCols)};
+}
 
 // Pure responsive layout & view-model projection: (AppState, ScreenDimensions) -> UiFrame
 // Scales cleanly across micro OLEDs (128x64), compact sticks (160x80), pocket TFTs &
@@ -335,9 +365,13 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     const std::string chText =
         state.isScanning
             ? "CH:*"
-            : (state.latestScan.busiestChannel > 0
-                   ? ("CH:" + twoDigit(static_cast<uint32_t>(state.latestScan.busiestChannel)))
-                   : "CH:--");
+            : (state.latestScan.busiestChannel >= 6001
+                   ? ("6G:" + std::to_string(state.latestScan.busiestChannel - 6000))
+                   : (state.latestScan.busiestChannel >= 100
+                          ? ("CH:" + std::to_string(state.latestScan.busiestChannel))
+                          : (state.latestScan.busiestChannel > 0
+                                 ? ("CH:" + twoDigit(static_cast<uint32_t>(state.latestScan.busiestChannel)))
+                                 : "CH:--")));
 
     const std::string apText = "AP:" + std::to_string(state.latestScan.totalAps);
     const std::string upText = "UP:" + formatUptime(state.uptimeMs, compact);
@@ -398,9 +432,13 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
             ? ActivityScene::RadarDish
             : ((effectiveMode == OpsMode::Offensive)
                    ? ActivityScene::SatelliteBeam
-                   : ((effectiveMode == OpsMode::Defensive || state.mood == Mood::ThreatAlert)
+                   : ((effectiveMode == OpsMode::Defensive || state.mood == Mood::ThreatAlert ||
+                       state.secMood != SecMood::Calm)
                           ? ActivityScene::ThreatShield
                           : ActivityScene::None));
+    const FaceStyle faceStyle = themeFaceStyle(state.theme);
+    const bool reserveMascotScene =
+        (faceStyle == FaceStyle::PixelArtMascot && scene != ActivityScene::None);
 
     FaceGeometry geom{};
     geom.centerX = static_cast<int16_t>(dims.width / 2);
@@ -425,7 +463,7 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         speechX = 4;
         speechTopY = static_cast<int16_t>(bodyTop + 1);
         lineStepY = 8;
-        const int16_t reserve = (scene != ActivityScene::None) ? 18 : 0;
+        const int16_t reserve = reserveMascotScene ? 18 : 0;
         speechCols = static_cast<std::size_t>((std::max)(6, (dims.width - 8 - reserve) / 6));
         speechMaxLines = 1u;
     } else if (compact) {
@@ -443,7 +481,7 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         speechX = 4;
         speechTopY = static_cast<int16_t>(bodyTop + 2);
         lineStepY = 9;
-        const int16_t reserve = (scene != ActivityScene::None) ? 24 : 0;
+        const int16_t reserve = reserveMascotScene ? 24 : 0;
         speechCols = static_cast<std::size_t>((std::max)(8, (dims.width - 8 - reserve) / 6));
         speechMaxLines = 1u;
     } else if (wide) {
@@ -461,7 +499,7 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         speechX = 6;
         speechTopY = static_cast<int16_t>(bodyTop + 4);
         lineStepY = 11;
-        const int16_t reserve = (scene != ActivityScene::None) ? 40 : 0;
+        const int16_t reserve = reserveMascotScene ? 40 : 0;
         speechCols = static_cast<std::size_t>((std::max)(12, (dims.width - 12 - reserve) / 6));
         speechMaxLines = 2u;
     } else {
@@ -479,7 +517,7 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         speechX = 4;
         speechTopY = static_cast<int16_t>(bodyTop + 2);
         lineStepY = 9;
-        const int16_t reserve = (scene != ActivityScene::None) ? 32 : 0;
+        const int16_t reserve = reserveMascotScene ? 32 : 0;
         speechCols = static_cast<std::size_t>((std::max)(12, (dims.width - 8 - reserve) / 6));
         speechMaxLines = 1u;
     }
@@ -488,8 +526,14 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     const bool onRadar = (state.page == ScreenPage::NearbyRadar);
     const bool onSpectrum = (state.page == ScreenPage::ChannelSpectrum);
     const bool onRfGuard = (state.page == ScreenPage::RfGuard);
+    const bool onCaptures = (state.page == ScreenPage::Captures);
 
     const LevelInfo lvlInfo = deriveLevelInfo(state.xp);
+    const bool notifyActive =
+        isThemeToastVisible(state.notifyUntilMs, state.uptimeMs) && !state.notifyText.empty();
+    const NotifyKind notifyKind = notifyActive ? state.notifyKind : NotifyKind::None;
+    const std::string notifyBanner =
+        notifyActive ? truncateText("* " + state.notifyText, maxFrameCols) : std::string{};
     std::string promptLabel;
     std::vector<std::string> wrappedPhrase;
     std::string rankLine;
@@ -514,13 +558,24 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
             const std::size_t maxRankCols =
                 wide ? ((dims.width > 68) ? static_cast<std::size_t>((dims.width - 64) / 6)
                                           : maxFrameCols)
-                     : 16u;
-            rankLine = truncateText(
-                "LV" + std::to_string(lvlInfo.level) + " HI:" + std::to_string(state.highScore),
-                maxRankCols);
+                     : 22u;
+            const std::string hiSuffix = state.highScoreBeaten ? "!" : "";
+            const std::string capPart =
+                (state.capturesSaved > 0u)
+                    ? ((wide ? " CAP:" : " C:") + std::to_string(state.capturesSaved))
+                    : std::string{};
+            const std::string rawRank =
+                wide
+                    ? ("LV" + std::to_string(lvlInfo.level) + " " + lvlInfo.title +
+                       " HI:" + std::to_string(state.highScore) + hiSuffix + capPart)
+                    : ("LV" + std::to_string(lvlInfo.level) +
+                       " HI:" + std::to_string(state.highScore) + hiSuffix + capPart);
+            rankLine = truncateText(rawRank, maxRankCols);
         }
 
-        if (!compact && !threatBanner.empty()) {
+        if (!compact && notifyActive) {
+            spotlightLabel = notifyBanner;
+        } else if (!compact && !threatBanner.empty()) {
             spotlightLabel = threatBanner;
         } else if (!compact && state.latestScan.totalAps > 0u &&
                    !state.latestScan.strongestSsid.empty()) {
@@ -545,8 +600,14 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         const std::vector<AccessPoint> visibleAps =
             fp::take(state.latestScan.topNetworks, maxRadarRows);
         radarRows = fp::map(visibleAps, [&](const AccessPoint& ap) -> RadarRowView {
-            const std::string chStr =
-                (ap.channel > 0) ? ("c" + twoDigit(static_cast<uint32_t>(ap.channel))) : "c--";
+            std::string chStr = "c--";
+            if (ap.channel >= 6001) {
+                chStr = "6g" + std::to_string(ap.channel - 6000);
+            } else if (ap.channel >= 100) {
+                chStr = "c" + std::to_string(ap.channel);
+            } else if (ap.channel > 0) {
+                chStr = "c" + twoDigit(static_cast<uint32_t>(ap.channel));
+            }
             const std::string detail = chStr + " " + std::to_string(ap.rssi);
             return RadarRowView{
                 truncateText(ap.ssid, maxSsidChars),
@@ -569,30 +630,69 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
     std::array<ChannelBarView, 13> channelBars{};
     std::string spectrumSummary;
     if (onSpectrum) {
-        uint16_t maxChCount = 1u;
-        for (std::size_t ch = 1u; ch <= 13u; ++ch) {
-            if (state.latestScan.histogram.counts[ch] > maxChCount) {
-                maxChCount = state.latestScan.histogram.counts[ch];
+        const auto& hist = state.latestScan.histogram;
+        if (hist.band24GhzAps == 0u && hist.band5GhzAps > 0u) {
+            uint16_t maxChCount = 1u;
+            for (std::size_t idx = 0u; idx < 13u; ++idx) {
+                if (hist.counts5Ghz[idx] > maxChCount) {
+                    maxChCount = hist.counts5Ghz[idx];
+                }
             }
+            for (std::size_t idx = 0u; idx < 13u; ++idx) {
+                const uint16_t c = hist.counts5Ghz[idx];
+                const int16_t barH =
+                    (c == 0u) ? static_cast<int16_t>(0)
+                              : static_cast<int16_t>((std::max)(
+                                    2, static_cast<int>((static_cast<int32_t>(c) * chartMaxBarH) /
+                                                        static_cast<int32_t>(maxChCount))));
+                channelBars[idx] = ChannelBarView{
+                    kSpectrum5GhzChannels[idx],
+                    c,
+                    barH
+                };
+            }
+            std::string rawSummary =
+                compact ? ("5G SEC:" + std::to_string(state.latestScan.secureAps) +
+                           " OPN:" + std::to_string(state.latestScan.openAps))
+                        : ("5GHz UNII | SEC:" + std::to_string(state.latestScan.secureAps) +
+                           " OPEN:" + std::to_string(state.latestScan.openAps));
+            if (!compact && hist.band6GhzAps > 0u) {
+                rawSummary += " 6G:" + std::to_string(hist.band6GhzAps);
+            }
+            spectrumSummary = truncateText(rawSummary, maxFrameCols);
+        } else {
+            uint16_t maxChCount = 1u;
+            for (std::size_t ch = 1u; ch <= 13u; ++ch) {
+                if (hist.counts[ch] > maxChCount) {
+                    maxChCount = hist.counts[ch];
+                }
+            }
+            for (std::size_t idx = 0u; idx < 13u; ++idx) {
+                const uint16_t c = hist.counts[idx + 1u];
+                const int16_t barH =
+                    (c == 0u) ? static_cast<int16_t>(0)
+                              : static_cast<int16_t>((std::max)(
+                                    2, static_cast<int>((static_cast<int32_t>(c) * chartMaxBarH) /
+                                                        static_cast<int32_t>(maxChCount))));
+                channelBars[idx] = ChannelBarView{
+                    static_cast<int32_t>(idx + 1u),
+                    c,
+                    barH
+                };
+            }
+            std::string rawSummary =
+                compact ? ("SEC:" + std::to_string(state.latestScan.secureAps) +
+                           " OPN:" + std::to_string(state.latestScan.openAps))
+                        : ("2.4GHz CH 1-13 | SEC:" + std::to_string(state.latestScan.secureAps) +
+                           " OPEN:" + std::to_string(state.latestScan.openAps));
+            if (!compact && hist.band5GhzAps > 0u) {
+                rawSummary += " 5G:" + std::to_string(hist.band5GhzAps);
+            }
+            if (!compact && hist.band6GhzAps > 0u) {
+                rawSummary += " 6G:" + std::to_string(hist.band6GhzAps);
+            }
+            spectrumSummary = truncateText(rawSummary, maxFrameCols);
         }
-        for (std::size_t idx = 0u; idx < 13u; ++idx) {
-            const uint16_t c = state.latestScan.histogram.counts[idx + 1u];
-            const int16_t barH =
-                (c == 0u) ? static_cast<int16_t>(0)
-                          : static_cast<int16_t>((std::max)(
-                                2, static_cast<int>((static_cast<int32_t>(c) * chartMaxBarH) /
-                                                    static_cast<int32_t>(maxChCount))));
-            channelBars[idx] = ChannelBarView{
-                static_cast<int32_t>(idx + 1u),
-                c,
-                barH
-            };
-        }
-        spectrumSummary =
-            compact ? ("SEC:" + std::to_string(state.latestScan.secureAps) +
-                       " OPN:" + std::to_string(state.latestScan.openAps))
-                    : ("2.4GHz CH 1-13 | SEC:" + std::to_string(state.latestScan.secureAps) +
-                       " OPEN:" + std::to_string(state.latestScan.openAps));
     }
 
     // RfGuard (BLE + Sub-GHz CC1101) rows (computed only when RfGuard page is active)
@@ -652,6 +752,45 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
             "RF Guard idle (" + formatFreqMhz(state.subGhzFreqKhz) + ")", maxFrameCols);
     }
 
+    // Captures & Storage Path page rows (computed only when Captures page is active)
+    std::string captureSummary;
+    std::vector<std::string> captureRows;
+    if (onCaptures) {
+        captureSummary = truncateText(
+            compact ? ("SAVED:" + std::to_string(state.capturesSaved) + " [STORAGE]")
+                    : ("CAPTURES SAVED: " + std::to_string(state.capturesSaved)),
+            maxFrameCols);
+        for (std::string& pathRow : formatCapturePathRows(state.capturePath, maxFrameCols)) {
+            captureRows.push_back(std::move(pathRow));
+        }
+        captureRows.push_back(truncateText(
+            "AP:" + std::to_string(state.latestScan.totalAps) +
+                " BLE:" + std::to_string(state.bleDevices.size()) +
+                " SUB:" + std::to_string(state.subGhzSignals.size()),
+            maxFrameCols));
+        if (!micro) {
+            const std::string lastLbl =
+                state.lastCaptureLabel.empty() ? std::string("Ready") : state.lastCaptureLabel;
+            captureRows.push_back(truncateText("LAST: " + lastLbl, maxFrameCols));
+        }
+        if (wide) {
+            const std::string hiStr =
+                std::to_string((std::max)(state.highScore, lvlInfo.xp)) +
+                (state.highScoreBeaten ? "!" : "");
+            captureRows.push_back(truncateText(
+                "RANK: Lv." + std::to_string(lvlInfo.level) + " " + lvlInfo.title +
+                    " (HI:" + hiStr + ")",
+                maxFrameCols));
+        }
+        if (!micro && state.peersMet > 0u) {
+            std::string frens = "FRENS: " + std::to_string(state.peersMet);
+            if (!state.lastPeerName.empty()) {
+                frens += " (" + state.lastPeerName + ")";
+            }
+            captureRows.push_back(truncateText(frens, maxFrameCols));
+        }
+    }
+
     return UiFrame{
         dims,
         compact,
@@ -680,9 +819,13 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         rfGuardRows,
         rfGuardSummary,
         rfGuardEmptyHint,
+        state.capturesSaved,
+        state.capturePath,
+        captureSummary,
+        captureRows,
         state.theme,
         themeSpec(state.theme).effect,
-        themeFaceStyle(state.theme),
+        faceStyle,
         state.uptimeMs / 140u,
         buildThemeToast(state, dims, compact, bodyTop, bodyBottom),
         state.offensiveArmed,
@@ -694,7 +837,12 @@ inline UiFrame buildUiFrame(const AppState& state, ScreenDimensions dims) {
         lvlInfo.progressPct,
         rankLine,
         scene,
-        threatBanner
+        threatBanner,
+        state.highScoreBeaten,
+        std::string(lvlInfo.title),
+        notifyActive,
+        notifyKind,
+        notifyBanner
     };
 }
 
@@ -745,7 +893,7 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
             if (i + 1u < 13u) countsRow += " ";
         }
         out += padLine(countsRow);
-    } else {
+    } else if (frame.page == ScreenPage::RfGuard) {
         out += padLine(frame.rfGuardSummary);
         if (frame.rfGuardRows.empty()) {
             out += padLine(frame.rfGuardEmptyHint);
@@ -755,6 +903,14 @@ inline std::string renderAsciiPreview(const UiFrame& frame) {
                 out += padLine(alertChar + row.ssid + " " + row.details);
             }
         }
+    } else {
+        out += padLine(frame.captureSummary);
+        for (const auto& row : frame.captureRows) {
+            out += padLine(row);
+        }
+    }
+    if (frame.notifyActive && frame.page != ScreenPage::PetFace && !frame.notifyBanner.empty()) {
+        out += padLine(frame.notifyBanner);
     }
 
     out += border;

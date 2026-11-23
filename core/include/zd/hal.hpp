@@ -196,7 +196,7 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
         out.requestQuit = true;
     } else if (cmd == "help" || cmd == "?") {
         out.output =
-            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | ack | score | scan | ascii | status\n";
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-5] | mode [recon|def|off] | subghz [next|315|433|868|915] | bt | ble | captures | ack | score | scan | ascii | status\n";
     } else if (cmd == "themes") {
         out.output = formatThemeTable(state.theme);
     } else if (cmd == "t") {
@@ -221,6 +221,8 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
         out.event = SetPageEvent{nowMs, ScreenPage::ChannelSpectrum};
     } else if (cmd == "4") {
         out.event = SetPageEvent{nowMs, ScreenPage::RfGuard};
+    } else if (cmd == "5") {
+        out.event = SetPageEvent{nowMs, ScreenPage::Captures};
     } else if (cmd == "a" || cmd == "view" || cmd == "page") {
         if (arg == "prev" || arg == "back" || arg == "-") {
             out.event = CyclePageEvent{nowMs, -1};
@@ -232,6 +234,8 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
             out.event = SetPageEvent{nowMs, ScreenPage::ChannelSpectrum};
         } else if (arg == "4" || arg == "guard" || arg == "rf") {
             out.event = SetPageEvent{nowMs, ScreenPage::RfGuard};
+        } else if (arg == "5" || arg == "captures" || arg == "storage" || arg == "cap") {
+            out.event = SetPageEvent{nowMs, ScreenPage::Captures};
         } else {
             out.event = CyclePageEvent{nowMs, +1};
         }
@@ -268,16 +272,55 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
             out.output = "Sub-GHz tuned: " + formatFreqMhz(state.subGhzFreqKhz) +
                          " | Captures: " + std::to_string(state.subGhzSignals.size()) + "\n";
         }
-    } else if (cmd == "ble") {
-        out.output = "BLE Devices: " + std::to_string(state.bleDevices.size()) +
+    } else if (cmd == "ble" || cmd == "bt") {
+        std::vector<BleDevice> sorted = state.bleDevices;
+        std::sort(sorted.begin(), sorted.end(), [](const BleDevice& a, const BleDevice& b) {
+            if (a.rssi != b.rssi) {
+                return a.rssi > b.rssi;
+            }
+            return a.mac < b.mac;
+        });
+        out.output = "Bluetooth Devices: " + std::to_string(sorted.size()) +
                      " | Threats: " + std::to_string(state.threatsDetected) + "\n";
+        if (sorted.empty()) {
+            out.output += "  (none discovered yet)\n";
+        } else {
+            out.output += "  MAC                RSSI  BARS  VENDOR     THREAT    NAME\n";
+            for (const BleDevice& d : sorted) {
+                const int bars = rssiToBars(d.rssi);
+                const std::string barStr =
+                    std::string(static_cast<std::size_t>(bars), '#') +
+                    std::string(static_cast<std::size_t>(4 - bars), '.');
+                const std::string vendor = bleVendorOrOuiLabel(d.companyId, d.mac);
+                const std::string status =
+                    (d.threat == BleThreatKind::None) ? std::string("OK")
+                                                      : std::string(bleThreatLabel(d.threat));
+                const std::string name = d.name.empty() ? std::string("Unnamed") : d.name;
+                out.output += "  " + d.mac +
+                              std::string(d.mac.size() < 18u ? 18u - d.mac.size() : 1u, ' ') +
+                              std::to_string(d.rssi) + "   " + barStr + "  " + vendor +
+                              std::string(vendor.size() < 10u ? 10u - vendor.size() : 1u, ' ') +
+                              status +
+                              std::string(status.size() < 9u ? 9u - status.size() : 1u, ' ') +
+                              name + "\n";
+            }
+        }
+    } else if (cmd == "captures" || cmd == "storage") {
+        out.output = "Captures Saved: " + std::to_string(state.capturesSaved) +
+                     " | Path: " + state.capturePath +
+                     " | Last: " +
+                     (state.lastCaptureLabel.empty() ? std::string("None") : state.lastCaptureLabel) +
+                     "\n";
     } else if (cmd == "ack" || cmd == "clear-threat") {
         out.event = ClearThreatEvent{nowMs};
     } else if (cmd == "score" || cmd == "level") {
         const LevelInfo lvl = deriveLevelInfo(state.xp);
-        out.output = "Lv." + std::to_string(lvl.level) + " " + lvl.title +
-                     " | XP:" + std::to_string(lvl.xp) +
-                     " | HighScore:" + std::to_string(state.highScore) + "\n";
+        out.output = "Lv." + std::to_string(lvl.level) + " [" + lvl.badge + "] " + lvl.title +
+                     " | XP:" + std::to_string(lvl.xp) + "/" + std::to_string(lvl.nextXp) +
+                     " (" + std::to_string(lvl.progressPct) + "%)" +
+                     " | HighScore:" + std::to_string(state.highScore) +
+                     (state.highScoreBeaten ? " (NEW RECORD!)" : "") +
+                     " | Captures:" + std::to_string(state.capturesSaved) + "\n";
     } else if (cmd == "ascii") {
         out.output = renderAsciiPreview(buildUiFrame(state, dims));
     } else if (cmd == "status") {
@@ -285,13 +328,14 @@ inline CliOutcome interpretCliLine(std::string_view rawLine,
         out.output = std::string(f.asciiFace) + " " + state.petName + "> \"" + state.phrase +
                      "\" | Mode:" + opsModeLabel(state.opsMode) +
                      " | Lv." + std::to_string(state.level) + " HI:" + std::to_string(state.highScore) +
+                     " | Cap:" + std::to_string(state.capturesSaved) +
                      " | APs:" + std::to_string(state.latestScan.totalAps) +
                      " | BLE:" + std::to_string(state.bleDevices.size()) +
                      " | SubGHz:" + formatFreqMhz(state.subGhzFreqKhz) +
                      " | Theme:" + themeSpec(state.theme).key + "\n";
     } else {
         out.output =
-            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-4] | mode [recon|def|off] | subghz [next|315|433|868|915] | ble | ack | score | scan | ascii | status\n";
+            "Commands: theme [next|prev|<key>] | themes | view [next|prev|1-5] | mode [recon|def|off] | subghz [next|315|433|868|915] | bt | ble | captures | ack | score | scan | ascii | status\n";
     }
     return out;
 }

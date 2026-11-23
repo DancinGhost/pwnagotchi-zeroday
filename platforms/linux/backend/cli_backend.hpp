@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -29,13 +30,18 @@
 #include <unordered_map>
 #include <vector>
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <pwd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "zd/hal.hpp"
 #include "zd/secops_hal.hpp"
+#include "nmea.hpp"
 #include "parsers.hpp"
 #include "process.hpp"
 #include "../app/async_job.hpp"
@@ -117,69 +123,213 @@ inline std::string homeDir() {
     return "/root";
 }
 
+// Open/create `dir` component-by-component via openat(O_NOFOLLOW | O_DIRECTORY) + mkdirat(),
+// eliminating intermediate symlink races and TOCTOU windows. Returns an open dirfd or -1.
+inline int openDirNoFollowRecursive(const std::string& dir, mode_t mode = 0700,
+                                    bool requireRootOwner = false) {
+    if (dir.empty()) {
+        return -1;
+    }
+    int curFd = ::open((dir[0] == '/') ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (curFd < 0) {
+        return -1;
+    }
+    const uid_t euid = ::geteuid();
+    std::size_t pos = (dir[0] == '/') ? 1u : 0u;
+    while (pos < dir.size()) {
+        while (pos < dir.size() && dir[pos] == '/') {
+            ++pos;
+        }
+        if (pos >= dir.size()) {
+            break;
+        }
+        std::size_t end = dir.find('/', pos);
+        if (end == std::string::npos) {
+            end = dir.size();
+        }
+        const std::string comp = dir.substr(pos, end - pos);
+        pos = end;
+        if (comp == ".") {
+            continue;
+        }
+        if (comp == "..") {
+            ::close(curFd);
+            return -1;
+        }
+        int nextFd = ::openat(curFd, comp.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (nextFd < 0 && errno == ENOENT) {
+            if (::mkdirat(curFd, comp.c_str(), mode) != 0 && errno != EEXIST) {
+                ::close(curFd);
+                return -1;
+            }
+            nextFd = ::openat(curFd, comp.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        }
+        if (nextFd < 0) {
+            ::close(curFd);
+            return -1;
+        }
+        struct stat st {};
+        if (::fstat(nextFd, &st) != 0 || !S_ISDIR(st.st_mode) ||
+            (requireRootOwner && euid == 0 && st.st_uid != 0)) {
+            ::close(nextFd);
+            ::close(curFd);
+            return -1;
+        }
+        ::close(curFd);
+        curFd = nextFd;
+    }
+    return curFd;
+}
+
 // Create `dir` and any missing parents (POSIX `mkdir -p`, without spawning a subprocess),
 // verifying each traversed component is a real directory (not a symlink).
 inline bool makeDirRecursive(const std::string& dir, mode_t mode = 0700) {
-    if (dir.empty()) {
+    const int dirFd = openDirNoFollowRecursive(dir, mode, ::geteuid() == 0);
+    if (dirFd < 0) {
         return false;
     }
-    std::string partial;
-    partial.reserve(dir.size());
-    const uid_t euid = ::geteuid();
-    for (std::size_t i = 0; i < dir.size(); ++i) {
-        if (dir[i] == '/') {
-            if (partial.empty()) {
-                partial.push_back('/');
-                continue;
-            }
-            if (partial.back() == '/') {
-                continue;
-            }
-        } else {
-            partial.push_back(dir[i]);
-            if (i + 1u < dir.size()) {
-                continue;
-            }
-        }
-        struct stat st {};
-        if (::lstat(partial.c_str(), &st) != 0) {
-            if (errno != ENOENT) {
-                return false;
-            }
-            if (::mkdir(partial.c_str(), mode) != 0 && errno != EEXIST) {
-                return false;
-            }
-            if (::lstat(partial.c_str(), &st) != 0) {
-                return false;
-            }
-        }
-        if (!S_ISDIR(st.st_mode)) {
-            return false;
-        }
-        if (euid == 0 && st.st_uid != 0) {
-            return false;
-        }
-        if (dir[i] == '/') {
-            partial.push_back('/');
-        }
-    }
+    ::close(dirFd);
     return true;
 }
 
-// Safely open a regular file for writing/appending without following symlinks or blocking on FIFOs.
+inline std::string resolveLexicalPath(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+    std::string combined = path;
+    if (combined[0] != '/') {
+        char cwdBuf[4096];
+        if (::getcwd(cwdBuf, sizeof(cwdBuf)) != nullptr) {
+            combined = std::string(cwdBuf) + "/" + combined;
+        }
+    }
+    std::vector<std::string> parts;
+    std::size_t pos = 0u;
+    while (pos < combined.size()) {
+        while (pos < combined.size() && combined[pos] == '/') {
+            ++pos;
+        }
+        if (pos >= combined.size()) {
+            break;
+        }
+        std::size_t end = combined.find('/', pos);
+        if (end == std::string::npos) {
+            end = combined.size();
+        }
+        const std::string seg = combined.substr(pos, end - pos);
+        pos = end;
+        if (seg == ".") {
+            continue;
+        }
+        if (seg == "..") {
+            if (!parts.empty()) {
+                parts.pop_back();
+            }
+            continue;
+        }
+        parts.push_back(seg);
+    }
+    std::string norm;
+    for (const std::string& p : parts) {
+        norm.push_back('/');
+        norm += p;
+    }
+    if (norm.empty() && combined[0] == '/') {
+        norm = "/";
+    }
+    return norm;
+}
+
+inline bool isBlockedSystemPrefix(const std::string& path) {
+    const std::string norm = resolveLexicalPath(path);
+    if (norm.empty()) {
+        return false;
+    }
+    if (norm == "/var/tmp" || norm.rfind("/var/tmp/", 0) == 0) {
+        return false;
+    }
+    static constexpr const char* kBlocked[] = {
+        "/etc", "/usr", "/bin", "/sbin", "/boot", "/lib", "/lib64", "/proc", "/sys", "/dev",
+        "/var", "/run"
+    };
+    for (const char* p : kBlocked) {
+        const std::size_t plen = std::char_traits<char>::length(p);
+        if (norm == p || (norm.rfind(p, 0) == 0 && norm.size() > plen && norm[plen] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::string resolveDirFdPath(int dirFd) {
+    if (dirFd < 0) {
+        return {};
+    }
+    const std::string linkPath = "/proc/self/fd/" + std::to_string(dirFd);
+    char buf[4096];
+    const ssize_t n = ::readlink(linkPath.c_str(), buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return {};
+    }
+    buf[n] = '\0';
+    return std::string(buf, static_cast<std::size_t>(n));
+}
+
+// Safely open a regular file for writing/appending without following parent/leaf symlinks,
+// hardlink attacks, blocking on FIFOs, or overwriting privileged system files.
 inline int openSecureWriteRegular(const std::string& path, bool append) {
-    const int flags = O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC |
-                      (append ? O_APPEND : 0);
-    const int fd = ::open(path.c_str(), flags, 0600);
+    if (path.empty() || path.back() == '/') {
+        return -1;
+    }
+    if (::geteuid() == 0 && isBlockedSystemPrefix(path)) {
+        return -1;
+    }
+    const std::size_t slash = path.rfind('/');
+    const std::string parentDir =
+        (slash == std::string::npos) ? std::string(".")
+                                     : ((slash == 0u) ? std::string("/") : path.substr(0u, slash));
+    const std::string leaf =
+        (slash == std::string::npos) ? path : path.substr(slash + 1u);
+    if (leaf.empty() || leaf == "." || leaf == "..") {
+        return -1;
+    }
+
+    const int dirFd = openDirNoFollowRecursive(parentDir, 0700, /*requireRootOwner=*/false);
+    if (dirFd < 0) {
+        return -1;
+    }
+
+    if (::geteuid() == 0) {
+        const std::string canonicalDir = resolveDirFdPath(dirFd);
+        if (!canonicalDir.empty()) {
+            const std::string fullCanonical =
+                (canonicalDir == "/") ? ("/" + leaf) : (canonicalDir + "/" + leaf);
+            if (isBlockedSystemPrefix(fullCanonical)) {
+                ::close(dirFd);
+                return -1;
+            }
+        }
+    }
+
+    const int createFlags =
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (append ? O_APPEND : 0);
+    int fd = ::openat(dirFd, leaf.c_str(), createFlags, 0600);
+    if (fd < 0 && errno == EEXIST) {
+        const int openFlags =
+            O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (append ? O_APPEND : 0);
+        fd = ::openat(dirFd, leaf.c_str(), openFlags);
+    }
+    ::close(dirFd);
     if (fd < 0) {
         return -1;
     }
+
     struct stat st {};
-    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1) {
         ::close(fd);
         return -1;
     }
-    if (::geteuid() == 0 && st.st_uid != 0) {
+    if (::geteuid() == 0 && (st.st_uid != 0 || (st.st_mode & 0022) != 0)) {
         ::close(fd);
         return -1;
     }
@@ -194,12 +344,19 @@ inline int openSecureWriteRegular(const std::string& path, bool append) {
 struct MonitorBringUpResult {
     std::string monitorIface;
     bool killedNetworkManager = false;
+    // True when monitorIface is a *virtual* monitor vif added alongside the still-managed
+    // parent (iw interface add), rather than the parent itself flipped to monitor type.
+    // Teardown deletes the vif instead of reverting the parent to managed.
+    bool virtualVif = false;
 };
 
 // --- Monitor mode / channel control --------------------------------------------------
 
 class CliMonitorControl final : public sec::IMonitorControl {
 public:
+    // Name of the virtual monitor vif we create alongside a still-managed parent.
+    static constexpr const char* kVirtualMonIface = "zdmon0";
+
     // Slow (airmon-ng commonly takes seconds): brings an interface into monitor mode and
     // resolves the resulting interface name via `iw dev`. Touches no object state, so it
     // is safe to run on a worker thread; the caller commits the result via applyUp().
@@ -208,7 +365,25 @@ public:
         if (!sec::isValidIfaceName(iface)) {
             return res;
         }
-        // Try non-destructive `iw` monitor mode switch first before falling back to airmon-ng.
+        // Gold path: add a *virtual* monitor interface alongside the parent so the laptop's
+        // managed connection (NetworkManager, SSH, etc.) stays fully online. Works on most
+        // mac80211 drivers and is the only path that never knocks the host offline.
+        runCapture({"iw", "dev", kVirtualMonIface, "del"});  // clean up any stale vif
+        if (runCapture({"iw", "dev", iface, "interface", "add", kVirtualMonIface, "type",
+                        "monitor"})
+                    .exitCode == 0 &&
+            runCapture({"ip", "link", "set", kVirtualMonIface, "up"}).exitCode == 0) {
+            const std::string mon = findMonitorInterface(kVirtualMonIface);
+            if (!mon.empty()) {
+                res.monitorIface = mon;
+                res.killedNetworkManager = false;
+                res.virtualVif = true;
+                return res;
+            }
+            runCapture({"iw", "dev", kVirtualMonIface, "del"});  // partial failure; don't leak it
+        }
+        // Fallback: flip the parent interface itself to monitor (still skips check kill, but
+        // takes the parent offline for the duration of the session).
         runCapture({"ip", "link", "set", iface, "down"});
         if (runCapture({"iw", "dev", iface, "set", "type", "monitor"}).exitCode == 0 &&
             runCapture({"ip", "link", "set", iface, "up"}).exitCode == 0) {
@@ -219,10 +394,15 @@ public:
                 return res;
             }
         }
+        // Last resort: airmon-ng, which kills NetworkManager and takes the host offline.
         runCapture({"airmon-ng", "check", "kill"});
         res.killedNetworkManager = true;
         runCapture({"airmon-ng", "start", "--", iface});
         res.monitorIface = findMonitorInterface(iface);  // "" if no monitor interface resulted
+        if (res.monitorIface.empty()) {
+            runCapture({"systemctl", "start", "NetworkManager"});
+            res.killedNetworkManager = false;
+        }
         return res;
     }
 
@@ -230,11 +410,19 @@ public:
         return bringUpMonitorDetailed(iface).monitorIface;
     }
 
-    // Slow: tears down monitor mode on `monitorIface`. Only restarts NetworkManager if
+    // Slow: tears down monitor mode on `monitorIface`. A virtual vif is simply deleted,
+    // leaving the parent interface untouched. Only restarts NetworkManager if
     // `restartNetworkManager` is true (i.e. `airmon-ng check kill` actually ran).
     static void takeDownMonitor(const std::string& monitorIface,
-                                bool restartNetworkManager = false) {
+                                bool restartNetworkManager = false,
+                                bool virtualVif = false) {
         if (!sec::isValidIfaceName(monitorIface)) {
+            return;
+        }
+        if (virtualVif) {
+            // The parent stayed managed/online; just remove the monitor vif.
+            runCapture({"ip", "link", "set", monitorIface, "down"});
+            runCapture({"iw", "dev", monitorIface, "del"});
             return;
         }
         runCapture({"airmon-ng", "stop", "--", monitorIface});
@@ -257,29 +445,33 @@ public:
     }
 
     // Fast, UI-thread-only state commit from a bringUpMonitor()/takeDownMonitor() result.
-    void applyUp(const std::string& mon, bool killedNm = false) {
+    void applyUp(const std::string& mon, bool killedNm = false, bool virtualVif = false) {
         if (mon.empty()) {
             isMonitor_ = false;
             monitorIface_.clear();
             killedNetworkManager_ = false;
+            virtualVif_ = false;
         } else {
             monitorIface_ = mon;
             isMonitor_ = true;
             killedNetworkManager_ = killedNm;
+            virtualVif_ = virtualVif;
         }
     }
     void applyDown() {
         isMonitor_ = false;
         monitorIface_.clear();
         killedNetworkManager_ = false;
+        virtualVif_ = false;
     }
 
     bool killedNetworkManager() const { return killedNetworkManager_; }
+    bool virtualVif() const { return virtualVif_; }
 
     // Synchronous convenience wrappers (fine for one-shot CLI use).
     std::string enableMonitor(const std::string& iface) override {
         const MonitorBringUpResult r = bringUpMonitorDetailed(iface);
-        applyUp(r.monitorIface, r.killedNetworkManager);
+        applyUp(r.monitorIface, r.killedNetworkManager, r.virtualVif);
         return r.monitorIface;
     }
 
@@ -287,7 +479,7 @@ public:
         if (!isMonitor_) {
             return;
         }
-        takeDownMonitor(monitorIface_, killedNetworkManager_);
+        takeDownMonitor(monitorIface_, killedNetworkManager_, virtualVif_);
         applyDown();
     }
 
@@ -341,6 +533,7 @@ private:
 
     bool isMonitor_ = false;
     bool killedNetworkManager_ = false;
+    bool virtualVif_ = false;
     std::string monitorIface_;
 };
 
@@ -365,8 +558,11 @@ public:
             return false;
         }
         seenApBeacons_.clear();
+        seenApOrder_.clear();
         seenStations_.clear();
+        seenStationOrder_.clear();
         seenProbes_.clear();
+        seenProbeOrder_.clear();
         lastPollMs_ = 0u;
         // Create an isolated private temporary directory (mode 0700) to prevent symlink/TOCTOU
         // attacks and protect sniffed wireless telemetry on multi-user systems.
@@ -401,21 +597,18 @@ public:
         if (csv.empty()) {
             return frames;
         }
-        // Bound in-memory deduplication tables so long-running captures cannot leak RAM.
-        if (seenApBeacons_.size() > kMaxSeenEntries) {
-            seenApBeacons_.clear();
-        }
-        if (seenStations_.size() > kMaxSeenEntries) {
-            seenStations_.clear();
-        }
-        if (seenProbes_.size() > kMaxSeenEntries) {
-            seenProbes_.clear();
-        }
         const AirodumpDump dump = parseAirodumpCsv(csv);
         for (const AirodumpAp& ap : dump.aps) {
             auto it = seenApBeacons_.find(ap.bssid);
             if (it != seenApBeacons_.end() && it->second == ap.beacons) {
                 continue;
+            }
+            if (it == seenApBeacons_.end()) {
+                while (seenApBeacons_.size() >= kMaxSeenEntries && !seenApOrder_.empty()) {
+                    seenApBeacons_.erase(seenApOrder_.front());
+                    seenApOrder_.pop_front();
+                }
+                seenApOrder_.push_back(ap.bssid);
             }
             seenApBeacons_[ap.bssid] = ap.beacons;
             sec::CapturedFrame f;
@@ -431,7 +624,13 @@ public:
         for (const AirodumpStation& st : dump.stations) {
             if (!st.bssid.empty() && !sec::isMulticastMac(st.bssid)) {
                 const std::string key = st.mac + "@" + st.bssid;
-                if (seenStations_.insert(key).second) {
+                if (seenStations_.find(key) == seenStations_.end()) {
+                    while (seenStations_.size() >= kMaxSeenEntries && !seenStationOrder_.empty()) {
+                        seenStations_.erase(seenStationOrder_.front());
+                        seenStationOrder_.pop_front();
+                    }
+                    seenStations_.insert(key);
+                    seenStationOrder_.push_back(key);
                     sec::CapturedFrame f;
                     f.nowMs = now;
                     f.kind = sec::FrameKind::Data;
@@ -442,7 +641,13 @@ public:
             }
             for (const std::string& probed : st.probedEssids) {
                 const std::string pkey = st.mac + "?" + probed;
-                if (seenProbes_.insert(pkey).second) {
+                if (seenProbes_.find(pkey) == seenProbes_.end()) {
+                    while (seenProbes_.size() >= kMaxSeenEntries && !seenProbeOrder_.empty()) {
+                        seenProbes_.erase(seenProbeOrder_.front());
+                        seenProbeOrder_.pop_front();
+                    }
+                    seenProbes_.insert(pkey);
+                    seenProbeOrder_.push_back(pkey);
                     sec::CapturedFrame pf;
                     pf.nowMs = now;
                     pf.kind = sec::FrameKind::ProbeRequest;
@@ -486,8 +691,11 @@ private:
     std::string prefix_;
     std::string csvPath_;
     std::unordered_map<std::string, uint32_t> seenApBeacons_;
+    std::deque<std::string> seenApOrder_;
     std::set<std::string> seenStations_;
+    std::deque<std::string> seenStationOrder_;
     std::set<std::string> seenProbes_;
+    std::deque<std::string> seenProbeOrder_;
     uint32_t lastPollMs_ = 0u;
     bool running_ = false;
 };
@@ -541,15 +749,29 @@ public:
                     if (list.empty()) {
                         list = std::move(iwList);
                     } else {
-                        std::unordered_map<std::string, bool> wpsByBssid;
+                        struct IwFlags {
+                            bool wps = false;
+                            sec::PmfStatus pmf = sec::PmfStatus::Disabled;
+                        };
+                        std::unordered_map<std::string, IwFlags> flagsByBssid;
                         for (const ScannedAp& iwAp : iwList) {
-                            if (iwAp.wps) {
-                                wpsByBssid[iwAp.bssid] = true;
+                            if (iwAp.wps || iwAp.pmf != sec::PmfStatus::Disabled) {
+                                IwFlags& fl = flagsByBssid[iwAp.bssid];
+                                fl.wps = fl.wps || iwAp.wps;
+                                if (static_cast<uint8_t>(iwAp.pmf) > static_cast<uint8_t>(fl.pmf)) {
+                                    fl.pmf = iwAp.pmf;
+                                }
                             }
                         }
                         for (ScannedAp& ap : list) {
-                            if (wpsByBssid.find(ap.bssid) != wpsByBssid.end()) {
-                                ap.wps = true;
+                            const auto it = flagsByBssid.find(ap.bssid);
+                            if (it != flagsByBssid.end()) {
+                                if (it->second.wps) {
+                                    ap.wps = true;
+                                }
+                                if (it->second.pmf != sec::PmfStatus::Disabled) {
+                                    ap.pmf = it->second.pmf;
+                                }
                             }
                         }
                     }
@@ -846,9 +1068,9 @@ public:
         const std::string cleanLine = sec::sanitizePrintableText(line, 512u);
         const std::time_t t = std::time(nullptr);
         std::tm tmBuf{};
-        ::localtime_r(&t, &tmBuf);
+        ::gmtime_r(&t, &tmBuf);
         char ts[32] = {0};
-        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmBuf);
+        std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmBuf);
         const std::string entry = std::string(ts) + " " + cleanLine + "\n";
         const bool ok = writeAllFd(fd, entry.data(), entry.size()) && (::fsync(fd) == 0);
         ::close(fd);
@@ -980,29 +1202,123 @@ inline std::optional<std::vector<sec::SecEvent>> loadEventsFromFile(
 
 class CliBleScanner final : public zd::hal::IBleScanner {
 public:
-    CliBleScanner() : available_(!detail::resolveTrustedExecutable("bluetoothctl").empty()) {}
+    CliBleScanner()
+        : hasBluetoothctl_(!detail::resolveTrustedExecutable("bluetoothctl").empty()),
+          hasBtmgmt_(!detail::resolveTrustedExecutable("btmgmt").empty()),
+          available_(hasBluetoothctl_ || hasBtmgmt_) {}
 
     bool available() const override { return available_; }
+    bool scanning() const { return job_.running(); }
+    bool hasCompletedScan() const { return scanCompleted_; }
+    std::size_t lastScanCount() const { return lastScanCount_; }
+    bool consumeCompletedScan() {
+        const bool was = scanCompleted_;
+        scanCompleted_ = false;
+        return was;
+    }
 
     bool startAsyncScan() {
         if (!available_) {
             return false;
         }
-        return job_.start([]() -> std::vector<BleDevice> {
-            (void)runCapture({"bluetoothctl", "--timeout", "2", "scan", "on"}, 3000u, 65536u);
-            const CommandResult r = runCapture({"bluetoothctl", "devices"}, 2000u, 256u * 1024u);
-            std::vector<BleDevice> out;
-            if (!r.launched) {
-                return out;
-            }
-            std::istringstream in(r.stdoutText);
-            std::string line;
-            while (std::getline(in, line)) {
-                if (const auto d = parseBluezBleLine(line)) {
-                    out.push_back(BleDevice{
-                        d->mac, d->name, d->rssi, d->companyId, d->serviceUuid,
-                        d->trackerPayload, d->threat});
+        const bool useCtl = hasBluetoothctl_;
+        const bool useBtm = hasBtmgmt_;
+        return job_.start([useCtl, useBtm]() -> std::vector<BleDevice> {
+            std::unordered_map<std::string, BleDevice> byMac;
+            std::vector<std::string> order;
+            auto mergeScanned = [&](const ScannedBleDevice& d) {
+                if (d.mac.empty() || sec::isBroadcastMac(d.mac)) {
+                    return;
                 }
+                auto it = byMac.find(d.mac);
+                if (it == byMac.end()) {
+                    order.push_back(d.mac);
+                    byMac.emplace(
+                        d.mac, BleDevice{d.mac, d.name, d.rssi, d.companyId, d.serviceUuid,
+                                         d.trackerPayload, d.threat});
+                    return;
+                }
+                BleDevice& cur = it->second;
+                if (!d.name.empty() &&
+                    (cur.name.empty() || ble_parse_detail::isPlaceholderMacName(cur.name, cur.mac))) {
+                    cur.name = d.name;
+                }
+                if (d.rssi != -100 && (cur.rssi == -100 || cur.rssi == -65 || d.rssi != -65)) {
+                    cur.rssi = d.rssi;
+                }
+                if (d.companyId != 0u) {
+                    cur.companyId = d.companyId;
+                }
+                ble_parse_detail::assignPriorityServiceUuid(cur.serviceUuid, d.serviceUuid);
+                cur.trackerPayload = cur.trackerPayload || d.trackerPayload;
+                cur.threat = classifyBleDevice(cur.mac, cur.name, cur.companyId, cur.serviceUuid,
+                                               cur.trackerPayload);
+            };
+
+            if (useCtl) {
+                const CommandResult scanRes =
+                    runCapture({"bluetoothctl", "--timeout", "4", "scan", "on"}, 6000u, 256u * 1024u);
+                if (scanRes.launched) {
+                    for (const ScannedBleDevice& d : parseBluezScanOutput(scanRes.stdoutText)) {
+                        mergeScanned(d);
+                    }
+                }
+                const CommandResult devRes =
+                    runCapture({"bluetoothctl", "devices"}, 2000u, 256u * 1024u);
+                if (devRes.launched) {
+                    std::istringstream in(devRes.stdoutText);
+                    std::string line;
+                    while (std::getline(in, line)) {
+                        if (const auto d = parseBluezBleLine(line)) {
+                            mergeScanned(*d);
+                        }
+                    }
+                }
+                // Enrich up to 20 devices missing real RSSI or vendor/service metadata within a 3s budget.
+                const auto enrichDeadline =
+                    std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+                std::size_t infoCalls = 0u;
+                for (const std::string& mac : order) {
+                    if (infoCalls >= 20u || std::chrono::steady_clock::now() >= enrichDeadline) {
+                        break;
+                    }
+                    BleDevice& cur = byMac[mac];
+                    if ((cur.rssi == -65 || cur.rssi == -100) ||
+                        (cur.companyId == 0u && cur.serviceUuid == 0u)) {
+                        const CommandResult infoRes =
+                            runCapture({"bluetoothctl", "info", mac}, 1000u, 32u * 1024u);
+                        ++infoCalls;
+                        if (infoRes.launched && !infoRes.stdoutText.empty()) {
+                            ScannedBleDevice tmp{};
+                            tmp.mac = cur.mac;
+                            tmp.name = cur.name;
+                            tmp.rssi = cur.rssi;
+                            tmp.companyId = cur.companyId;
+                            tmp.serviceUuid = cur.serviceUuid;
+                            tmp.trackerPayload = cur.trackerPayload;
+                            if (parseBluezDeviceInfo(infoRes.stdoutText, tmp)) {
+                                mergeScanned(tmp);
+                            }
+                        }
+                    }
+                }
+            }
+            if (order.empty() && useBtm) {
+                const CommandResult btmRes = runCapture({"btmgmt", "find"}, 5000u, 256u * 1024u);
+                if (btmRes.launched) {
+                    for (const ScannedBleDevice& d : parseBtmgmtFindOutput(btmRes.stdoutText)) {
+                        mergeScanned(d);
+                    }
+                }
+            }
+
+            std::vector<BleDevice> out;
+            out.reserve(order.size());
+            for (const std::string& mac : order) {
+                BleDevice d = byMac[mac];
+                d.threat = classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid,
+                                             d.trackerPayload);
+                out.push_back(std::move(d));
             }
             return out;
         });
@@ -1013,9 +1329,12 @@ public:
             return {};
         }
         if (const auto res = job_.collect()) {
+            scanCompleted_ = true;
+            lastScanCount_ = res->size();
             return *res;
         }
-        if (!job_.running() && autoEnabled_ && (nowMs - lastKickMs_) >= 15000u) {
+        if (!job_.running() && autoEnabled_ &&
+            (lastKickMs_ == 0u || (nowMs - lastKickMs_) >= 15000u)) {
             lastKickMs_ = nowMs;
             (void)startAsyncScan();
         }
@@ -1026,8 +1345,12 @@ public:
     bool autoEnabled() const { return autoEnabled_; }
 
 private:
+    bool hasBluetoothctl_ = false;
+    bool hasBtmgmt_ = false;
     bool available_ = false;
     bool autoEnabled_ = false;
+    bool scanCompleted_ = false;
+    std::size_t lastScanCount_ = 0u;
     uint32_t lastKickMs_ = 0u;
     linux_app::AsyncJob<std::vector<BleDevice>> job_;
 };
@@ -1040,6 +1363,7 @@ public:
     ~Rtl433Source() override { stop(); }
 
     bool available() const override { return binary_; }
+    bool running() const { return running_; }
     uint32_t frequencyKhz() const override { return freqKhz_; }
 
     bool tuneFrequency(uint32_t freqKhz) override {
@@ -1063,15 +1387,21 @@ public:
             return false;
         }
         int pipefd[2];
+#if defined(__linux__)
+        if (::pipe2(pipefd, O_CLOEXEC) != 0) {
+            return false;
+        }
+#else
         if (::pipe(pipefd) != 0) {
             return false;
         }
         ::fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
         ::fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+#endif
         ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
 
         const std::string freqArg = std::to_string(freqKhz_) + "k";
-        std::vector<std::string> args = {resolved, "-f", freqArg, "-M", "level", "-F", "kv"};
+        std::vector<std::string> args = {resolved, "-f", freqArg, "-M", "level", "-F", "json"};
         std::vector<char*> cargv;
         cargv.reserve(args.size() + 1u);
         for (std::string& a : args) cargv.push_back(a.data());
@@ -1140,6 +1470,9 @@ public:
             if (buf_.size() > 8192u) {
                 buf_.erase(0, buf_.size() - 4096u);
             }
+        } else if (n == 0) {
+            stop();
+            return std::nullopt;
         }
         const std::size_t nl = buf_.find('\n');
         if (nl == std::string::npos) {
@@ -1147,7 +1480,7 @@ public:
         }
         const std::string line = buf_.substr(0, nl);
         buf_.erase(0, nl + 1u);
-        if (const auto sig = parseRtl433Line(line)) {
+        if (const auto sig = parseRtl433Line(line, freqKhz_)) {
             const SubGhzAnomaly anom =
                 sig->continuousCarrier
                     ? SubGhzAnomaly::JammingCarrier
@@ -1164,6 +1497,154 @@ private:
     int readFd_ = -1;
     pid_t pid_ = -1;
     std::string buf_;
+};
+
+// Best-effort desktop notifications via libnotify (`notify-send`) on Critical alerts.
+// Uses strict `--` argument separation and printable-ASCII sanitization; dryRun_ mode lets
+// unit tests exercise trigger logic cleanly without DBus/display dependencies.
+class DesktopNotifier {
+public:
+    void setEnabled(bool on) { enabled_ = on; }
+    bool enabled() const { return enabled_; }
+    void setDryRun(bool on) { dryRun_ = on; }
+    bool dryRun() const { return dryRun_; }
+
+    uint32_t sentCount() const { return sentCount_; }
+    const std::string& lastTitle() const { return lastTitle_; }
+    const std::string& lastBody() const { return lastBody_; }
+
+    bool notifyCritical(const sec::Alert& al) {
+        if (!enabled_ || al.severity != sec::Severity::Critical) {
+            return false;
+        }
+        const std::string title =
+            std::string("[ZeroDay] ") + sec::alertKindLabel(al.kind);
+        const std::string target =
+            al.ssid.empty() ? sec::sanitizePrintableText(al.bssid, 32u)
+                            : (sec::sanitizePrintableText(al.ssid, 40u) + " (" +
+                               sec::sanitizePrintableText(al.bssid, 32u) + ")");
+        const std::string msg = sec::sanitizePrintableText(al.message, 140u);
+        const std::string body = target.empty() ? msg : (target + ": " + msg);
+        lastTitle_ = title;
+        lastBody_ = body;
+        sentCount_ += 1u;
+        if (dryRun_) {
+            return true;
+        }
+        const CommandResult res = runCapture(
+            {"notify-send", "-u", "critical", "-a", "pwnagotchi-zeroday", "--", title, body},
+            800u, 4096u);
+        return res.launched && res.exitCode == 0;
+    }
+
+private:
+    bool enabled_ = false;
+    bool dryRun_ = false;
+    uint32_t sentCount_ = 0u;
+    std::string lastTitle_;
+    std::string lastBody_;
+};
+
+// Non-blocking TCP client for local `gpsd` daemon (127.0.0.1:2947).
+class GpsdClient {
+public:
+    GpsdClient() = default;
+    GpsdClient(const GpsdClient&) = delete;
+    GpsdClient& operator=(const GpsdClient&) = delete;
+    ~GpsdClient() { stop(); }
+
+    bool start(const std::string& host = "127.0.0.1", uint16_t port = 2947u) {
+        stop();
+        const int fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if (fd < 0) {
+            return false;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+            ::close(fd);
+            return false;
+        }
+        const int rc = ::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+        if (rc < 0 && errno != EINPROGRESS) {
+            ::close(fd);
+            return false;
+        }
+        fd_ = fd;
+        watchSent_ = false;
+        return true;
+    }
+
+    void stop() {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+        watchSent_ = false;
+        buf_.clear();
+    }
+
+    bool connected() const { return fd_ >= 0; }
+
+    void poll(uint32_t nowMs) {
+        zd::esp32_common::expireStaleGpsFix(gps_, nowMs);
+        if (fd_ < 0) {
+            return;
+        }
+        pollfd pfd{};
+        pfd.fd = fd_;
+        pfd.events = static_cast<short>(POLLIN | (watchSent_ ? 0 : POLLOUT));
+        const int pr = ::poll(&pfd, 1, 0);
+        if (pr <= 0) {
+            return;
+        }
+        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+            stop();
+            return;
+        }
+        if (!watchSent_ && (pfd.revents & POLLOUT) != 0) {
+            static constexpr char kWatchCmd[] =
+                "?WATCH={\"enable\":true,\"json\":true,\"nmea\":true};\n";
+            const ssize_t wn = ::send(fd_, kWatchCmd, sizeof(kWatchCmd) - 1u, MSG_NOSIGNAL);
+            if (wn > 0) {
+                watchSent_ = true;
+            }
+        }
+        if ((pfd.revents & POLLIN) != 0) {
+            char tmp[1024];
+            const ssize_t n = ::recv(fd_, tmp, sizeof(tmp), 0);
+            if (n > 0) {
+                buf_.append(tmp, static_cast<std::size_t>(n));
+                if (buf_.size() > 8192u) {
+                    buf_.erase(0, buf_.size() - 4096u);
+                }
+                for (;;) {
+                    const std::size_t nl = buf_.find('\n');
+                    if (nl == std::string::npos) {
+                        break;
+                    }
+                    const std::string line = buf_.substr(0, nl);
+                    buf_.erase(0, nl + 1u);
+                    (void)parseGpsdLine(line, gps_, nowMs);
+                }
+            } else if (n == 0) {
+                stop();
+            }
+        }
+    }
+
+    bool ingestLine(const std::string& line, uint32_t nowMs) {
+        return parseGpsdLine(line, gps_, nowMs);
+    }
+
+    const zd::esp32_common::GpsState& state() const { return gps_; }
+
+private:
+    int fd_ = -1;
+    bool watchSent_ = false;
+    std::string buf_;
+    zd::esp32_common::GpsState gps_{};
 };
 
 }  // namespace linux_backend

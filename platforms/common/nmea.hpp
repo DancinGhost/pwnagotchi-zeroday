@@ -23,6 +23,8 @@ struct GpsState {
     uint8_t satellites = 0;
     char utcTime[10] = "00:00:00";
     uint32_t lastSentenceMs = 0;
+    char utcDate[12] = "";
+    bool hasDate = false;
 };
 
 // Verify standard NMEA-0183 XOR checksum ($body*XX), rejecting trailing garbage.
@@ -136,6 +138,24 @@ inline bool processNmeaSentence(GpsState& gps, std::string_view line, uint32_t n
             if (f[1].size() >= 6u) {
                 std::snprintf(gps.utcTime, sizeof(gps.utcTime), "%.2s:%.2s:%.2s",
                               f[1].data(), f[1].data() + 2, f[1].data() + 4);
+            }
+            if (n >= 10u && f[9].size() == 6u) {
+                bool digitsOk = true;
+                for (char ch : f[9]) {
+                    if (ch < '0' || ch > '9') {
+                        digitsOk = false;
+                        break;
+                    }
+                }
+                if (digitsOk) {
+                    const int dd = (f[9][0] - '0') * 10 + (f[9][1] - '0');
+                    const int mm = (f[9][2] - '0') * 10 + (f[9][3] - '0');
+                    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) {
+                        std::snprintf(gps.utcDate, sizeof(gps.utcDate), "20%.2s-%.2s-%.2s",
+                                      f[9].data() + 4, f[9].data() + 2, f[9].data());
+                        gps.hasDate = true;
+                    }
+                }
             }
         } else if (n >= 3u && f[2] == "V") {
             gps.hasFix = false;

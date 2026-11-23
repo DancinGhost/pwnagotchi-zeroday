@@ -12,6 +12,7 @@
 
 #include "domain.hpp"
 #include "fp.hpp"
+#include "oui.hpp"
 
 namespace zd {
 
@@ -31,9 +32,41 @@ inline std::string sanitizePrintable(const std::string& raw) {
     return cleaned.empty() ? std::string("<hidden>") : cleaned;
 }
 
+constexpr int32_t k6GhzChannelBase = 6000;
+
+constexpr bool is24GhzChannel(int32_t ch) {
+    return ch >= 1 && ch <= 14;
+}
+
+constexpr bool is5GhzChannel(int32_t ch) {
+    return ch >= 36 && ch <= 177;
+}
+
+constexpr bool is6GhzChannel(int32_t ch) {
+    return ch >= 6001 && ch <= 6233;
+}
+
+constexpr std::size_t nearest5GhzBucket(int32_t ch) {
+    std::size_t bestIdx = 0u;
+    int32_t bestDiff = (kSpectrum5GhzChannels[0] >= ch) ? (kSpectrum5GhzChannels[0] - ch)
+                                                       : (ch - kSpectrum5GhzChannels[0]);
+    for (std::size_t i = 1u; i < kSpectrum5GhzChannels.size(); ++i) {
+        const int32_t c = kSpectrum5GhzChannels[i];
+        const int32_t diff = (c >= ch) ? (c - ch) : (ch - c);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
+}
+
 // Pure normalization of a single raw WiFi scan entry.
 inline AccessPoint sanitizeAccessPoint(const AccessPoint& raw) {
-    const int32_t normalizedChannel = (raw.channel >= 1 && raw.channel <= 13) ? raw.channel : 0;
+    const int32_t normalizedChannel =
+        (is24GhzChannel(raw.channel) || is5GhzChannel(raw.channel) || is6GhzChannel(raw.channel))
+            ? raw.channel
+            : 0;
     const int32_t clampedRssi = fp::clampVal<int32_t>(raw.rssi, -100, 0);
     return AccessPoint{
         sanitizePrintable(raw.ssid),
@@ -92,20 +125,36 @@ inline std::vector<AccessPoint> deduplicateSortedAps(const std::vector<AccessPoi
     return result;
 }
 
-// Pure fold computing per-channel AP counts (channels 1..13, plus bucket 0 for 5GHz/other).
+// Pure fold computing per-channel AP counts across 2.4 GHz (1..13), 5 GHz UNII buckets, and 6 GHz.
 inline ChannelHistogram buildChannelHistogram(const std::vector<AccessPoint>& aps) {
     ChannelHistogram hist{};
+    auto bump = [](uint16_t& dst) {
+        if (dst < 999u) {
+            dst = static_cast<uint16_t>(dst + 1u);
+        }
+    };
     for (const AccessPoint& ap : aps) {
-        const std::size_t bucket =
-            (ap.channel >= 1 && ap.channel <= 13) ? static_cast<std::size_t>(ap.channel) : 0u;
-        if (hist.counts[bucket] < 999u) {
-            hist.counts[bucket] = static_cast<uint16_t>(hist.counts[bucket] + 1u);
+        if (ap.channel >= 1 && ap.channel <= 13) {
+            bump(hist.counts[static_cast<std::size_t>(ap.channel)]);
+            bump(hist.band24GhzAps);
+        } else if (ap.channel == 14) {
+            bump(hist.counts[0]);
+            bump(hist.band24GhzAps);
+        } else if (is5GhzChannel(ap.channel)) {
+            bump(hist.counts[0]);
+            bump(hist.band5GhzAps);
+            bump(hist.counts5Ghz[nearest5GhzBucket(ap.channel)]);
+        } else if (is6GhzChannel(ap.channel)) {
+            bump(hist.counts[0]);
+            bump(hist.band6GhzAps);
+        } else {
+            bump(hist.counts[0]);
         }
     }
     return hist;
 }
 
-// Pure fold finding which 2.4 GHz channel (1..13) has the most APs.
+// Pure fold finding which 2.4 GHz (or 5 GHz if no 2.4 GHz APs) channel has the most APs.
 inline int32_t findBusiestChannel(const ChannelHistogram& hist) {
     constexpr std::array<int32_t, 13> kChannels = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
     struct Best {
@@ -119,7 +168,17 @@ inline int32_t findBusiestChannel(const ChannelHistogram& hist) {
             const uint16_t c = hist.counts[static_cast<std::size_t>(ch)];
             return (c > current.count) ? Best{ch, c} : current;
         });
-    return best.channel;
+    if (best.count > 0u) {
+        return best.channel;
+    }
+    Best best5{0, 0};
+    for (std::size_t i = 0u; i < kSpectrum5GhzChannels.size(); ++i) {
+        const uint16_t c = hist.counts5Ghz[i];
+        if (c > best5.count) {
+            best5 = Best{kSpectrum5GhzChannels[i], c};
+        }
+    }
+    return best5.channel;
 }
 
 // Pure mapping from RSSI dBm to 0..4 visual signal strength bars.
@@ -252,6 +311,18 @@ inline BleThreatKind classifyBleDevice(std::string_view mac,
     return BleThreatKind::None;
 }
 
+// True if a single BLE advert matches a known device-pairing notification signature — the
+// payloads that Flipper Zero / ESP32 BLE-spam tools flood (Apple Continuity nearby-action /
+// SourApple, Google Fast Pair, Microsoft Swift Pair, Samsung EasySetup). A single such advert
+// is normal; the ATTACK signal is many of these from rapidly rotating random MACs in a short
+// window, which the SecState sliding-window detector scores. Kept pure here for testability.
+inline bool looksLikeBlePairingSignature(uint16_t companyId, uint16_t serviceUuid) {
+    return companyId == 0x004Cu ||  // Apple Continuity (nearby-action / proximity-pairing)
+           companyId == 0x0006u ||  // Microsoft Swift Pair
+           companyId == 0x0075u ||  // Samsung EasySetup
+           serviceUuid == 0xFE2Cu;  // Google Fast Pair
+}
+
 constexpr const char* bleThreatLabel(BleThreatKind kind) {
     switch (kind) {
         case BleThreatKind::None:            return "OK";
@@ -262,6 +333,69 @@ constexpr const char* bleThreatLabel(BleThreatKind kind) {
         case BleThreatKind::BleSpam:         return "SPAM!";
     }
     return "OK";
+}
+
+// Pure Bluetooth SIG company ID -> human vendor label (for BLE devices tables).
+inline std::string bleVendorLabel(uint16_t companyId) {
+    switch (companyId) {
+        case 0x0000u: return "-";
+        case 0x004Cu: return "Apple";
+        case 0x0006u: return "Microsoft";
+        case 0x0075u: return "Samsung";
+        case 0x00E0u: return "Google";
+        case 0x000Fu: return "Broadcom";
+        case 0x0059u: return "Nordic";
+        case 0x0087u: return "Garmin";
+        case 0x0047u: return "Sony";
+        case 0x0310u: return "Bose";
+        case 0x000Au: return "Qualcomm";
+        case 0x0157u: return "Huami";
+        case 0x00D2u: return "Dialog";
+        case 0x000Du: return "TI";
+        default: break;
+    }
+    static constexpr const char kHex[] = "0123456789ABCDEF";
+    std::string out = "0x";
+    out.push_back(kHex[(companyId >> 12) & 0xFu]);
+    out.push_back(kHex[(companyId >> 8) & 0xFu]);
+    out.push_back(kHex[(companyId >> 4) & 0xFu]);
+    out.push_back(kHex[companyId & 0xFu]);
+    return out;
+}
+
+inline std::string bleVendorOrOuiLabel(uint16_t companyId, std::string_view mac) {
+    if (companyId != 0u) {
+        return bleVendorLabel(companyId);
+    }
+    return ouiVendorLabel(mac, "-");
+}
+
+// Pure 16-bit BLE GATT service UUID -> compact service label.
+inline std::string bleServiceLabel(uint16_t uuid) {
+    if (uuid == 0x0000u) {
+        return "-";
+    }
+    if (uuid >= 0x3080u && uuid <= 0x3083u) {
+        return "RF-Tool";
+    }
+    switch (uuid) {
+        case 0xFEEDu: return "Tile";
+        case 0x180Du: return "HeartRate";
+        case 0x180Fu: return "Battery";
+        case 0x1812u: return "HID";
+        case 0x110Bu: return "Audio";
+        case 0xFE2Cu:
+        case 0xFE9Fu: return "FastPair";
+        case 0xFD6Fu: return "Exposure";
+        default: break;
+    }
+    static constexpr const char kHex[] = "0123456789ABCDEF";
+    std::string out = "0x";
+    out.push_back(kHex[(uuid >> 12) & 0xFu]);
+    out.push_back(kHex[(uuid >> 8) & 0xFu]);
+    out.push_back(kHex[(uuid >> 4) & 0xFu]);
+    out.push_back(kHex[uuid & 0xFu]);
+    return out;
 }
 
 constexpr const char* subGhzAnomalyLabel(SubGhzAnomaly anomaly) {

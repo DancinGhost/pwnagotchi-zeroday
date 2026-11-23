@@ -18,7 +18,9 @@
 #include "zd/render/painter.hpp"
 #include "esp32_cli.hpp"
 #include "esp32_hal.hpp"
+#include "esp32_lora_peer.hpp"
 #include "esp32_offensive.hpp"
+#include "esp32_sd_capture.hpp"
 #include "nmea.hpp"
 #include "wigle.hpp"
 
@@ -193,8 +195,13 @@ public:
             pct = static_cast<int32_t>((batMv - 3300) * 100 / 900);
         }
 
-        // Elevated voltage when USB charging (>4.25V)
-        const bool charging = (batMv > 4250);
+        // Heuristic USB charging detection: resting full LiPo <4.18V, rising dV/dt (+15mV),
+        // or hysteresis hold above 4.13V when already charging.
+        const bool charging = (batMv >= 4180u) ||
+                              (prevBatMv_ > 0u && batMv >= prevBatMv_ + 15u) ||
+                              (lastCharging_ && batMv >= 4130u);
+        prevBatMv_ = batMv;
+        lastCharging_ = charging;
         cached_ = zd::hal::PowerStatus{pct, charging};
         return cached_;
     }
@@ -202,7 +209,9 @@ public:
 private:
     zd::hal::PowerStatus cached_{100, true};
     uint32_t lastReadMs_ = 0u;
+    uint32_t prevBatMv_ = 0u;
     bool hasCache_ = false;
+    bool lastCharging_ = false;
 };
 
 class TDeckDisplaySink final : public zd::hal::IDisplaySink {
@@ -272,8 +281,9 @@ public:
                 snprintf(gpsTag, sizeof(gpsTag), "GPS..");
             }
             const uint16_t fg = gpsFix_ ? frame.palette.accent : frame.palette.muted;
+            canvas_.fillRect(w - 44, frame.footerTextY - 1, 43, 9, frame.palette.bg);
             canvas_.setTextColor(fg, frame.palette.bg);
-            canvas_.drawString(gpsTag, w - 42, frame.footerDividerY - 10);
+            canvas_.drawString(gpsTag, w - 42, frame.footerTextY);
         }
 
         if (!overlay_.empty()) {
@@ -335,11 +345,19 @@ zd::hal::PlatformSession gSession;
 // Active-offense console (deauth injection). Inert until explicitly armed + allow-listed at
 // the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
 zd::esp32_common::OffensiveConsole gOffensive;
+zd::esp32_common::Esp32PromiscuousMonitor gDefMon;
+zd::esp32_common::Esp32PeerBeacon gPeerBeacon;  // opt-in WiFi greeting beacon (off by default)
+zd::esp32_common::Esp32PeerBleAdvertiser gPeerBle;  // opt-in BLE greeting (off; never in Offensive)
+zd::esp32_common::Esp32LoraPeer gLoraPeer;  // opt-in SX1262 LoRa peering (compiled off unless ZD_WITH_LORA)
 
 zd::esp32_common::DirtyFramePacer gFramePacer;
 zd::WigleLogger gWigle;
+zd::esp32_common::SdCaptureBuffer gCapture;
 bool gSdReady = false;
 bool gWardriveEnabled = false;
+bool gCaptureEnabled = false;
+uint32_t gLastCaptureFlushMs = 0;
+constexpr uint32_t kCaptureFlushMs = 5000u;  // batch SD writes to spare the card/flash
 std::string gSerialLine;
 std::string gKeyboardLine;
 std::string gKbFeedback;
@@ -400,18 +418,61 @@ void flushWigleToSd() {
         f.print(ln.c_str());
     }
     f.close();
+    gSession.dispatch(
+        zd::CaptureSavedEvent{millis(), static_cast<uint32_t>(lines.size()), "sd:/wigle_zd.csv",
+                              "WiGLE +" + std::to_string(lines.size()) + " APs", true},
+        &gThemeStore);
+#endif
+}
+
+// Persist captured artifacts to SD: append the streamed `.zds` defensive event log and
+// rewrite the `.hc22000` crackable-handshake export whenever new material has been captured.
+void flushCaptureToSd() {
+#ifdef ZD_HAS_ESP32_SD
+    if (!gCaptureEnabled || !gSdReady) {
+        return;
+    }
+    if (gCapture.hasPendingEvents()) {
+        File zds = SD.open("/zeroday.zds", FILE_APPEND);
+        if (zds) {
+            zds.print(gCapture.takePendingEvents().c_str());
+            zds.close();
+        }
+    }
+    const std::size_t hsCount = gOffensive.session().collectedHandshakes().size();
+    if (gCapture.handshakesChanged(hsCount) && hsCount > 0u) {
+        File hc = SD.open("/zeroday.hc22000", FILE_WRITE);  // full dedup set: overwrite
+        if (hc) {
+            hc.print(gOffensive.session().exportHc22000().c_str());
+            hc.close();
+            gCapture.markHandshakesFlushed(hsCount);
+            gSession.dispatch(
+                zd::CaptureSavedEvent{millis(), static_cast<uint32_t>(hsCount),
+                                      "sd:/zeroday.hc22000",
+                                      "HS->SD x" + std::to_string(hsCount), true},
+                &gThemeStore);
+        }
+    }
 #endif
 }
 
 std::string executeConsoleLine(const std::string& line, uint32_t nowMs, const char* srcTag) {
     if (line == "sec" || line.rfind("sec ", 0) == 0) {
-        return gOffensive.handleLine(line, nowMs, &gSession);
+        return gOffensive.handleLine(line, nowMs, &gSession, &gThemeStore, &gDefMon.core());
     }
-    if (line == "ble on") {
+    if (line == "defmon" || line.rfind("defmon ", 0) == 0) {
+        return gDefMon.handleCommand(line, gOffensive.session().state());
+    }
+    if (line == "ble scan" || line == "bt scan") {
+        gBle.setEnabled(true);
+        gBle.requestScanNow();
+        return "Bluetooth scan queued...\n";
+    }
+    if (line == "ble on" || line == "bt on") {
         gBle.setEnabled(true);
         return "BLE scanner: enabled\n";
     }
-    if (line == "ble off") {
+    if (line == "ble off" || line == "bt off") {
         gBle.setEnabled(false);
         return "BLE scanner: disabled\n";
     }
@@ -421,6 +482,11 @@ std::string executeConsoleLine(const std::string& line, uint32_t nowMs, const ch
             gSdReady = SD.begin(PIN_SD_CS);
         }
         gWardriveEnabled = gSdReady;
+        if (gWardriveEnabled) {
+            gSession.dispatch(
+                zd::CaptureSavedEvent{nowMs, 0u, "sd:/wigle_zd.csv", "SD Wardrive ON", false},
+                &gThemeStore);
+        }
         return gSdReady ? "WiGLE SD logging enabled (/wigle_zd.csv)\n"
                         : "SD card not detected; wardriving unavailable\n";
 #else
@@ -430,6 +496,81 @@ std::string executeConsoleLine(const std::string& line, uint32_t nowMs, const ch
     if (line == "wardrive off") {
         gWardriveEnabled = false;
         return "WiGLE SD logging disabled\n";
+    }
+    if (line == "capture on") {
+#ifdef ZD_HAS_ESP32_SD
+        if (!gSdReady) {
+            gSdReady = SD.begin(PIN_SD_CS);
+        }
+        if (!gSdReady) {
+            return "SD card not detected; capture-to-SD unavailable\n";
+        }
+        gCaptureEnabled = true;
+        gLastCaptureFlushMs = nowMs;
+        gOffensive.mutableSession().setRecorder(&gCapture);  // stream .zds event log
+        return "SD capture ON: /zeroday.zds + /zeroday.hc22000 (enable defmon to capture)\n";
+#else
+        return "SD support disabled in build\n";
+#endif
+    }
+    if (line == "capture off") {
+        gCaptureEnabled = false;
+        gOffensive.mutableSession().setRecorder(nullptr);
+        flushCaptureToSd();  // best-effort final flush of anything buffered
+        gCapture.clear();
+        return "SD capture OFF\n";
+    }
+    if (line == "capture") {
+        char buf[96];
+        snprintf(buf, sizeof(buf), "Capture: %s | SD:%s | Handshakes:%lu%s\n",
+                 gCaptureEnabled ? "ON" : "OFF", gSdReady ? "OK" : "NO",
+                 static_cast<unsigned long>(gOffensive.session().collectedHandshakes().size()),
+                 gCapture.overflowed() ? " | .zds BUFFER OVERFLOW" : "");
+        return std::string(buf);
+    }
+    if (line == "peers advertise on") {
+        gPeerBeacon.setEnabled(true);
+        return std::string("Peer greeting beacon ON (broadcasting ZeroDay presence ~every 30s).\n");
+    }
+    if (line == "peers advertise off") {
+        gPeerBeacon.setEnabled(false);
+        return std::string("Peer greeting beacon OFF.\n");
+    }
+    if (line == "peers ble on") {
+        gPeerBle.setEnabled(true);
+        return std::string("BLE peer greeting ON (suppressed automatically in Offensive mode).\n");
+    }
+    if (line == "peers ble off") {
+        gPeerBle.setEnabled(false);
+        gPeerBle.stop();
+        return std::string("BLE peer greeting OFF.\n");
+    }
+    if (line == "peers lora on") {
+        if (!gLoraPeer.available() && !gLoraPeer.begin()) {
+            return std::string("LoRa unavailable (build with the t-deck-lora env / ZD_WITH_LORA).\n");
+        }
+        gLoraPeer.setEnabled(true);
+        return std::string("LoRa peer greeting ON (km-range; shares WIDS alerts).\n");
+    }
+    if (line == "peers lora off") {
+        gLoraPeer.setEnabled(false);
+        return std::string("LoRa peer greeting OFF.\n");
+    }
+    if (line == "peers") {
+        const zd::peer::PeerRegistry& reg = gDefMon.core().peers();
+        std::string out = "Peers met: " + std::to_string(reg.peersMet()) + " (tracking " +
+                          std::to_string(reg.size()) + ") | wifi-adv: " +
+                          (gPeerBeacon.enabled() ? "ON" : "off") + " | ble-adv: " +
+                          (!gPeerBle.enabled() ? "off"
+                               : (gPeerBle.advertising() ? "ON" : "ON(suppressed:offensive)")) +
+                          " | lora-adv: " + (gLoraPeer.enabled() ? "ON" : "off") + "\n";
+        for (const zd::peer::Peer& p : reg.peers()) {
+            out += "  " + p.id + " " + zd::peer::peerKindLabel(p.kind) + " " +
+                   zd::peer::peerTransportLabel(p.transport) +
+                   (p.name.empty() ? std::string{} : (" '" + p.name + "'")) + " " +
+                   std::to_string(p.rssi) + "dBm" + (p.widsAlert ? " [WIDS!]" : "") + "\n";
+        }
+        return out;
     }
     if (line == "wardrive") {
         char buf[80];
@@ -568,7 +709,7 @@ void pollKeyboard(uint32_t nowMs) {
         } else if (gKeyboardLine.empty() && (c == ' ' || c == '\t')) {
             gSession.dispatch(zd::CyclePageEvent{nowMs, +1}, &gThemeStore);
             logSerialStatus("KB_VIEW");
-        } else if (gKeyboardLine.empty() && c == 'm') {
+        } else if (gKeyboardLine.empty() && c == 'M') {
             gSession.dispatch(zd::CycleOpsModeEvent{nowMs}, &gThemeStore);
             logSerialStatus("KB_MODE");
         } else if (gKeyboardLine.empty() && c == '1') {
@@ -583,6 +724,9 @@ void pollKeyboard(uint32_t nowMs) {
         } else if (gKeyboardLine.empty() && c == '4') {
             gSession.dispatch(zd::SetPageEvent{nowMs, zd::ScreenPage::RfGuard}, &gThemeStore);
             logSerialStatus("KB_PAGE_RFGUARD");
+        } else if (gKeyboardLine.empty() && c == '5') {
+            gSession.dispatch(zd::SetPageEvent{nowMs, zd::ScreenPage::Captures}, &gThemeStore);
+            logSerialStatus("KB_PAGE_CAPTURES");
         } else if (gKeyboardLine.empty() && c == '[') {
             gSession.dispatch(zd::CycleThemeEvent{nowMs, -1}, &gThemeStore);
             logSerialStatus("KB_THEME_PREV");
@@ -626,9 +770,9 @@ void setup() {
     gPower.init();
     gThemeStore.init();
     gOffensive.begin();
+    gDefMon.init();
 #ifdef ZD_HAS_ESP32_SD
     gSdReady = SD.begin(PIN_SD_CS);
-    gWardriveEnabled = gSdReady;
 #endif
 
     const uint32_t bootMs = millis();
@@ -636,6 +780,10 @@ void setup() {
 
     // Seed pure functional PRNG with hardware entropy & restore theme from NVS
     gSession.boot(esp_random(), bootMs, &gThemeStore);
+    gSession.dispatch(
+        zd::CaptureSavedEvent{bootMs, 0u, gSdReady ? "sd:/wigle_zd.csv" : "nvs://zeroday",
+                              gSdReady ? "SD Ready" : "Internal NVS", false},
+        &gThemeStore);
     gSession.renderTo(gDisplay);
     logSerialStatus("BOOT");
 }
@@ -651,7 +799,21 @@ void loop() {
     pollGps(nowMs);
     gDisplay.setGpsStatus(gGps.hasFix, gGps.satellites);
 
-    // 2. Step non-blocking multi-radio scanner & periodic telemetry tick
+    // 2. Step promiscuous defensive monitor, multi-radio scanner & telemetry tick
+    gDefMon.step(nowMs, gOffensive.mutableSession(), &gSession, &gThemeStore);
+    // Opt-in peer greetings (no-op unless enabled). BLE is additionally force-suppressed while
+    // in Offensive ops mode — we never beacon our presence over BLE while actively attacking.
+    if (gPeerBeacon.enabled() || gPeerBle.enabled() || gLoraPeer.enabled()) {
+        zd::peer::PeerAdvert advert;
+        advert.name = gSession.state().petName;
+        advert.pwned = static_cast<uint16_t>(
+            (std::min<std::size_t>)(gOffensive.session().collectedHandshakes().size(), 0xFFFFu));
+        advert.flags = (gSession.state().secMood == zd::SecMood::Alarmed) ? zd::peer::kFlagWidsAlert
+                                                                          : 0u;
+        gPeerBeacon.maybeEmit(nowMs, advert, gDefMon.currentChannel());
+        gPeerBle.sync(advert, gSession.state().opsMode == zd::OpsMode::Offensive);
+        gLoraPeer.step(nowMs, advert, gDefMon.core().mutablePeers(), &gSession, &gThemeStore);
+    }
     if (const char* scanTag = gSession.stepMultiRadio(
             nowMs, gRadio, &gBle, nullptr, &gThemeStore)) {
         if (std::string(scanTag) == "SCAN_DONE") {
@@ -660,6 +822,12 @@ void loop() {
         logSerialStatus(scanTag);
     }
     gSession.stepTick(nowMs, gPower);
+
+    // Batch-persist captured handshakes/events to SD on a timer (spares the SD card).
+    if (gCaptureEnabled && (nowMs - gLastCaptureFlushMs) >= kCaptureFlushMs) {
+        gLastCaptureFlushMs = nowMs;
+        flushCaptureToSd();
+    }
 
     // Dim backlight after 45s of idle while running on battery
     if (!gSession.state().isCharging && (nowMs - gLastActivityMs) >= 45000u) {

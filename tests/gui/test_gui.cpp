@@ -7,10 +7,13 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
+#include <QTimer>
+#include <QtTest/QTest>
 #include <cassert>
 #include <iostream>
 #include <vector>
@@ -74,7 +77,27 @@ int main(int argc, char** argv) {
     assert(secMoodLabel != nullptr);
     assert(secMoodLabel->text().contains("ALARMED"));  // OpenDowngrade stays Alarmed in replay
 
-    // Arming flips auth banner to crimson (#991b1b).
+    // Arming shows confirmation dialog: clicking No keeps disarmed, clicking Yes arms (#991b1b).
+    QTimer::singleShot(0, []() {
+        auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        assert(mb != nullptr);
+        if (auto* noBtn = mb->button(QMessageBox::No)) {
+            noBtn->click();
+        }
+    });
+    authCheck->setChecked(true);
+    QApplication::processEvents();
+    assert(!authCheck->isChecked());
+    assert(!ctrl.authorization().operatorConfirmed);
+    assert(authBanner->styleSheet().contains("#145a32"));
+
+    QTimer::singleShot(0, []() {
+        auto* mb = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        assert(mb != nullptr);
+        if (auto* yesBtn = mb->button(QMessageBox::Yes)) {
+            yesBtn->click();
+        }
+    });
     authCheck->setChecked(true);
     QApplication::processEvents();
     assert(authBanner->text().contains("ARMED"));
@@ -82,17 +105,19 @@ int main(int argc, char** argv) {
     authCheck->setChecked(false);
     QApplication::processEvents();
 
-    // 2. Network table, station table, RF Guard tab & defensive alert list populated.
+    // 2. Networks, Bluetooth, Stations / Probes & RF Guard tabs populated.
     QTabWidget* tabs = win.findChild<QTabWidget*>();
     assert(tabs != nullptr);
-    assert(tabs->count() == 3);
+    assert(tabs->count() == 4);
     auto* netTable = qobject_cast<QTableWidget*>(tabs->widget(0));
-    auto* staTable = qobject_cast<QTableWidget*>(tabs->widget(1));
-    auto* rfTable = qobject_cast<QTableWidget*>(tabs->widget(2));
-    assert(netTable != nullptr && staTable != nullptr && rfTable != nullptr);
+    auto* bleTable = qobject_cast<QTableWidget*>(tabs->widget(1));
+    auto* staTable = qobject_cast<QTableWidget*>(tabs->widget(2));
+    auto* rfTable = qobject_cast<QTableWidget*>(tabs->widget(3));
+    assert(netTable != nullptr && bleTable != nullptr && staTable != nullptr && rfTable != nullptr);
     assert(netTable->rowCount() == 2);
     assert(staTable->rowCount() == 1);
     assert(!netTable->accessibleName().isEmpty());
+    assert(!bleTable->accessibleName().isEmpty());
     assert(!staTable->accessibleName().isEmpty());
 
     // Live filter narrows visible network rows, then restores on clear.
@@ -111,18 +136,21 @@ int main(int argc, char** argv) {
     QApplication::processEvents();
     assert(netTable->rowCount() == 2);
 
-    // RF Guard tab populates BLE + Sub-GHz observations & threat banner clears on button click.
-    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0u, true,
+    // Bluetooth + RF Guard tabs populate BLE + Sub-GHz observations & threat banner clears cleanly.
+    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0xFD6Fu, true,
                                   zd::BleThreatKind::AirTagTracker}});
     ctrl.ingestSubGhz(zd::SubGhzSignal{433920u, -48, "OOK", 6u, zd::SubGhzAnomaly::ReplayBurst});
     ctrl.loadSession(sessPath);
-    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0u, true,
+    ctrl.ingestBle({zd::BleDevice{"7a:3c:91:04:88:12", "Tracker_Tag", -52, 0x004Cu, 0xFD6Fu, true,
                                   zd::BleThreatKind::AirTagTracker}});
     win.show();
-    // Force a refresh tick via filter toggle so RF Guard tab mirrors current state immediately.
+    // Force a refresh tick via filter toggle so Bluetooth & RF Guard tabs mirror state immediately.
     filterEdit->setText(" ");
     filterEdit->clear();
     QApplication::processEvents();
+    assert(bleTable->rowCount() == 1);
+    assert(bleTable->item(0, 0)->text() == "7a:3c:91:04:88:12");
+    assert(bleTable->item(0, 4)->text() == "Apple");
     assert(rfTable->rowCount() >= 1);
 
     const auto lists = win.findChildren<QListWidget*>();
@@ -130,11 +158,12 @@ int main(int argc, char** argv) {
     assert(lists[0]->count() >= 1);
 
     // 3. Selecting a station row allows its Associated BSSID & Trust BSSID persists cleanly.
-    tabs->setCurrentIndex(1);
+    tabs->setCurrentIndex(2);
     staTable->selectRow(0);
     QPushButton* allowBtn = nullptr;
     QPushButton* trustBtn = nullptr;
     QPushButton* clearThreatBtn = nullptr;
+    QCheckBox* hotkeysCheck = nullptr;
     for (QPushButton* btn : win.findChildren<QPushButton*>()) {
         if (btn->text().contains("Allow / Remove BSSID")) {
             allowBtn = btn;
@@ -144,7 +173,14 @@ int main(int argc, char** argv) {
             clearThreatBtn = btn;
         }
     }
-    assert(allowBtn != nullptr && trustBtn != nullptr && clearThreatBtn != nullptr);
+    for (QCheckBox* cb : win.findChildren<QCheckBox*>()) {
+        if (cb->text().contains("Hot") && cb->text().contains("keys")) {
+            hotkeysCheck = cb;
+            break;
+        }
+    }
+    assert(allowBtn != nullptr && trustBtn != nullptr && clearThreatBtn != nullptr &&
+           hotkeysCheck != nullptr);
     allowBtn->click();
     trustBtn->click();
     QApplication::processEvents();
@@ -156,10 +192,37 @@ int main(int argc, char** argv) {
     QApplication::processEvents();
     assert(ctrl.petState().lastThreatLabel.empty());
 
-    // 4. PetWidget exposes SecMood in accessibleDescription.
+    // 4. PetWidget exposes StrongFocus & SecMood in accessibleDescription, plus feature parity controls.
+    QCheckBox* adaptiveCheck = nullptr;
+    QPushButton* hc22000Btn = nullptr;
+    QPushButton* subGhzBtn = nullptr;
+    for (QCheckBox* cb : win.findChildren<QCheckBox*>()) {
+        if (cb->text().contains("Adaptive") || cb->text().contains("daptive")) {
+            adaptiveCheck = cb;
+            break;
+        }
+    }
+    for (QPushButton* btn : win.findChildren<QPushButton*>()) {
+        if (btn->text().contains("HC22000")) {
+            hc22000Btn = btn;
+        } else if (btn->text().contains("Sub-GHz")) {
+            subGhzBtn = btn;
+        }
+    }
+    assert(adaptiveCheck != nullptr && hc22000Btn != nullptr && subGhzBtn != nullptr);
+    const bool origAdaptive = ctrl.adaptiveHop();
+    adaptiveCheck->setChecked(!origAdaptive);
+    QApplication::processEvents();
+    assert(ctrl.adaptiveHop() == !origAdaptive);
+
     auto* pet = win.findChild<zd::linux_gui::PetWidget*>();
     assert(pet != nullptr);
+    assert(pet->focusPolicy() == Qt::StrongFocus);
     assert(pet->accessibleDescription().contains("ALARMED"));
+    const zd::ThemeId initialTheme = ctrl.petState().theme;
+    QTest::keyClick(pet, Qt::Key_T);
+    QApplication::processEvents();
+    assert(ctrl.petState().theme != initialTheme);
 
     std::cout << "[linux-gui] Qt6 offscreen UI tests passed\n";
     return 0;

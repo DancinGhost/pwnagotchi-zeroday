@@ -17,6 +17,20 @@
     Offensive: 'Offensive'
   });
 
+  const SecMood = Object.freeze({
+    Calm: 'Calm',
+    Watchful: 'Watchful',
+    Alarmed: 'Alarmed'
+  });
+
+  function secMoodLabel(m) {
+    switch (m) {
+      case SecMood.Watchful: return 'WATCHFUL';
+      case SecMood.Alarmed: return 'ALARMED';
+      default: return 'CALM';
+    }
+  }
+
   function opsModeLabel(mode, compact) {
     switch (mode) {
       case OpsMode.Defensive: return compact ? 'DEF' : 'DEFENSE';
@@ -54,7 +68,17 @@
     PetFace: 'PetFace',
     NearbyRadar: 'NearbyRadar',
     ChannelSpectrum: 'ChannelSpectrum',
-    RfGuard: 'RfGuard'
+    RfGuard: 'RfGuard',
+    Captures: 'Captures'
+  });
+
+  const NotifyKind = Object.freeze({
+    None: 'None',
+    LevelUp: 'LevelUp',
+    NewHighScore: 'NewHighScore',
+    CaptureSaved: 'CaptureSaved',
+    ThreatAlert: 'ThreatAlert',
+    Milestone: 'Milestone'
   });
 
   const ThemeId = themes.ThemeId;
@@ -264,7 +288,8 @@
     ScreenPage.PetFace,
     ScreenPage.NearbyRadar,
     ScreenPage.ChannelSpectrum,
-    ScreenPage.RfGuard
+    ScreenPage.RfGuard,
+    ScreenPage.Captures
   ]);
 
   function cyclePage(current, step) {
@@ -461,16 +486,16 @@
   function deriveLevelInfo(xp) {
     const safeXp = Math.max(0, Math.trunc(xp || 0));
     const tiers = [
-      { level: 1, minXp: 0, title: 'Packet Sprout' },
-      { level: 2, minXp: 40, title: 'Beacon Pup' },
-      { level: 3, minXp: 110, title: 'Channel Surfer' },
-      { level: 4, minXp: 220, title: 'Frame Ninja' },
-      { level: 5, minXp: 380, title: 'Spectrum Scout' },
-      { level: 6, minXp: 600, title: 'BLE Tracker' },
-      { level: 7, minXp: 900, title: 'SubGHz Stalker' },
-      { level: 8, minXp: 1300, title: 'RF Sentinel' },
-      { level: 9, minXp: 1850, title: '802.11 Wizard' },
-      { level: 10, minXp: 2500, title: 'ZeroDay Legend' }
+      { level: 1, minXp: 0, title: 'Packet Sprout', badge: 'SPRT' },
+      { level: 2, minXp: 40, title: 'Beacon Pup', badge: 'BPUP' },
+      { level: 3, minXp: 110, title: 'Channel Surfer', badge: 'SURF' },
+      { level: 4, minXp: 220, title: 'Frame Ninja', badge: 'NINJ' },
+      { level: 5, minXp: 380, title: 'Spectrum Scout', badge: 'SCOT' },
+      { level: 6, minXp: 600, title: 'BLE Tracker', badge: 'BTRK' },
+      { level: 7, minXp: 900, title: 'SubGHz Stalker', badge: 'SUBG' },
+      { level: 8, minXp: 1300, title: 'RF Sentinel', badge: 'SENT' },
+      { level: 9, minXp: 1850, title: '802.11 Wizard', badge: 'WIZD' },
+      { level: 10, minXp: 2500, title: 'ZeroDay Legend', badge: 'LGND' }
     ];
     let current = tiers[0];
     let nextTier = tiers[1];
@@ -490,28 +515,111 @@
     return {
       level: current.level,
       title: current.title,
+      badge: current.badge,
+      minXp: current.minXp,
       xp: safeXp,
       nextXp,
       progressPct
     };
   }
 
+  function notifyPriority(kind) {
+    switch (kind) {
+      case NotifyKind.LevelUp: return 5;
+      case NotifyKind.ThreatAlert: return 4;
+      case NotifyKind.NewHighScore: return 3;
+      case NotifyKind.CaptureSaved: return 2;
+      case NotifyKind.Milestone: return 1;
+      default: return 0;
+    }
+  }
+
+  function shortCapturePath(path) {
+    const s = String(path || '');
+    if (!s) return 'capture';
+    const slash = s.lastIndexOf('/');
+    if (slash >= 0 && slash + 1 < s.length) {
+      return s.slice(slash + 1);
+    }
+    return s;
+  }
+
+  function computeNotification(state, kind, text, nowMs, durationMs) {
+    if (!kind || kind === NotifyKind.None || !text) {
+      return {
+        notifyKind: state.notifyKind || NotifyKind.None,
+        notifyText: state.notifyText || '',
+        notifyUntilMs: state.notifyUntilMs || 0
+      };
+    }
+    const now = nowMs >>> 0;
+    const curKind = state.notifyKind || NotifyKind.None;
+    const active = themes.isThemeToastVisible(state.notifyUntilMs || 0, now);
+    if (active &&
+        (curKind === NotifyKind.LevelUp || curKind === NotifyKind.ThreatAlert) &&
+        notifyPriority(kind) < notifyPriority(curKind)) {
+      return {
+        notifyKind: curKind,
+        notifyText: state.notifyText || '',
+        notifyUntilMs: state.notifyUntilMs || 0
+      };
+    }
+    let until = (now + ((durationMs === undefined ? 2600 : durationMs) >>> 0)) >>> 0;
+    if (until === 0) until = 1;
+    return {
+      notifyKind: kind,
+      notifyText: String(text),
+      notifyUntilMs: until
+    };
+  }
+
   function applyXpFields(state, gain, nowMs) {
     const prevLevel = state.level || deriveLevelInfo(state.xp).level;
+    const prevHi = state.highScore || 0;
     const nextXp = (state.xp || 0) + Math.max(0, Math.trunc(gain || 0));
     const info = deriveLevelInfo(nextXp);
-    const highScore = Math.max(state.highScore || 0, nextXp);
+    const highScore = Math.max(prevHi, nextXp);
+    let highScoreBeaten = Boolean(state.highScoreBeaten);
     let levelUpUntilMs = state.levelUpUntilMs || 0;
+    const notifyState = {
+      notifyKind: state.notifyKind || NotifyKind.None,
+      notifyText: state.notifyText || '',
+      notifyUntilMs: state.notifyUntilMs || 0
+    };
+    if ((state.highScoreBaseline || 0) > 0 && !highScoreBeaten &&
+        nextXp > state.highScoreBaseline && nextXp > prevHi) {
+      highScoreBeaten = true;
+      Object.assign(
+        notifyState,
+        computeNotification(notifyState, NotifyKind.NewHighScore, 'NEW HI-SCORE! ' + highScore + ' XP', nowMs, 2500)
+      );
+    }
     if (info.level > prevLevel) {
       levelUpUntilMs = ((nowMs >>> 0) + 2400) >>> 0;
       if (levelUpUntilMs === 0) levelUpUntilMs = 1;
+      Object.assign(
+        notifyState,
+        computeNotification(notifyState, NotifyKind.LevelUp, 'LVL UP! Lv.' + info.level + ' ' + info.title, nowMs, 2800)
+      );
     }
-    return { xp: nextXp, highScore, level: info.level, levelUpUntilMs };
+    return Object.assign({
+      xp: nextXp,
+      highScore,
+      highScoreBeaten,
+      level: info.level,
+      levelUpUntilMs
+    }, notifyState);
   }
 
   function idleMoodForState(s) {
     if (s.offensiveArmed || s.opsMode === OpsMode.Offensive) {
       return Mood.CyberAttack;
+    }
+    if (s.secMood === SecMood.Alarmed) {
+      return Mood.ThreatAlert;
+    }
+    if (s.secMood === SecMood.Watchful) {
+      return Mood.ShieldGuard;
     }
     if (s.opsMode === OpsMode.Defensive) {
       return s.lastThreatLabel ? Mood.ThreatAlert : Mood.ShieldGuard;
@@ -553,11 +661,22 @@
       phrase: 'Hello world! Ready to scan.',
       latestScan: wifi.emptyScanSummary(),
       offensiveArmed: false,
-      // Progression, multi-radio & defensive guard state
+      preArmedOpsMode: OpsMode.Recon,
+      // Progression, multi-radio, capture storage & defensive guard state
       highScore: 0,
+      highScoreBaseline: 0,
+      highScoreBeaten: false,
       level: 1,
       levelUpUntilMs: 0,
+      capturesSaved: 0,
+      capturePath: '/captures/zeroday.pcap',
+      lastCaptureLabel: '',
+      lastCaptureMs: 0,
+      notifyKind: NotifyKind.None,
+      notifyText: '',
+      notifyUntilMs: 0,
       opsMode: OpsMode.Recon,
+      secMood: SecMood.Calm,
       bleDevices: Object.freeze([]),
       subGhzSignals: Object.freeze([]),
       subGhzFreqKhz: 433920,
@@ -663,6 +782,7 @@
           if (threatElapsed < 0x80000000 && threatElapsed >= THREAT_DISPLAY_TIMEOUT_MS) {
             next.lastThreatLabel = '';
             next.lastThreatMs = 0;
+            next.secMood = SecMood.Calm;
             if (!next.isScanning && next.mood === Mood.ThreatAlert) {
               next.mood = idleMoodForState(next);
               const picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
@@ -671,6 +791,12 @@
               next.lastPhraseChangeMs = next.uptimeMs;
             }
           }
+        }
+
+        if (next.notifyUntilMs && !themes.isThemeToastVisible(next.notifyUntilMs, next.uptimeMs)) {
+          next.notifyKind = NotifyKind.None;
+          next.notifyText = '';
+          next.notifyUntilMs = 0;
         }
 
         if (next.isScanning) {
@@ -697,6 +823,10 @@
         } else if (next.mood === Mood.LevelUp) {
           next.levelUpUntilMs = 0;
           next.mood = idleMoodForState(next);
+          const picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
+          next.phrase = picked.value;
+          next.rngSeed = picked.nextSeed;
+          next.lastPhraseChangeMs = next.uptimeMs;
         }
 
         const quietArea =
@@ -784,18 +914,45 @@
       case 'ScanCompleted': {
         const now = event.nowMs >>> 0;
         const summary = wifi.summarizeScan(event.rawNetworks || [], 12);
+        const prevPeak = state.peakApCount || 0;
+        const prevLevel = state.level || deriveLevelInfo(state.xp).level;
+        let preState = state;
+        if (prevPeak > 0 && summary.totalAps > prevPeak) {
+          preState = Object.assign(
+            {},
+            state,
+            computeNotification(
+              state,
+              NotifyKind.Milestone,
+              'PEAK APs! ' + summary.totalAps + ' networks',
+              now,
+              2200
+            )
+          );
+        }
         const xpGain = summary.totalAps > 0 ? 3 + Math.min(12, Math.floor(summary.totalAps / 2)) : 1;
-        const xpFields = applyXpFields(state, xpGain, now);
-        const nextBase = Object.assign({}, state, {
+        const xpFields = applyXpFields(preState, xpGain, now);
+        const nextBase = Object.assign({}, preState, {
           uptimeMs: now,
           isScanning: false,
           manualScanRequested: false,
           hasScannedOnce: true,
           lastScanCompleteMs: now,
           completedScans: state.completedScans + 1,
-          peakApCount: Math.max(state.peakApCount, summary.totalAps),
+          peakApCount: Math.max(prevPeak, summary.totalAps),
           latestScan: summary
         }, xpFields);
+        if (xpFields.level > prevLevel) {
+          const lvlInfo = deriveLevelInfo(xpFields.xp);
+          return Object.freeze(
+            Object.assign(nextBase, {
+              mood: Mood.LevelUp,
+              phrase: 'LEVEL UP! Lv.' + lvlInfo.level + ' ' + lvlInfo.title + '!',
+              rngSeed: fp.nextSeed(state.rngSeed),
+              lastPhraseChangeMs: now
+            })
+          );
+        }
         const mood = idleMoodForState(nextBase);
         const picked = selectPhrase(mood, summary, state.rngSeed);
         return Object.freeze(
@@ -810,13 +967,18 @@
 
       case 'CycleOpsMode': {
         const now = event.nowMs >>> 0;
-        const nextMode = cycleOpsMode(state.opsMode);
+        const nextMode = state.offensiveArmed ? OpsMode.Offensive : cycleOpsMode(state.opsMode);
+        const nextPre =
+          !state.offensiveArmed && nextMode !== OpsMode.Offensive
+            ? nextMode
+            : (state.preArmedOpsMode || OpsMode.Recon);
         const nextBase = Object.assign({}, state, {
           uptimeMs: now,
           lastInteractionMs: now,
-          opsMode: nextMode
+          opsMode: nextMode,
+          preArmedOpsMode: nextPre
         });
-        if (!nextBase.isScanning) {
+        if (!nextBase.isScanning && !nextBase.offensiveArmed) {
           nextBase.mood = idleMoodForState(nextBase);
           const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
           nextBase.phrase = picked.value;
@@ -828,11 +990,49 @@
 
       case 'SetOpsMode': {
         const now = event.nowMs >>> 0;
-        const nextMode = Object.values(OpsMode).includes(event.mode) ? event.mode : state.opsMode;
+        const requested = Object.values(OpsMode).includes(event.mode) ? event.mode : state.opsMode;
+        const nextMode = state.offensiveArmed ? OpsMode.Offensive : requested;
+        const nextPre =
+          !state.offensiveArmed && nextMode !== OpsMode.Offensive
+            ? nextMode
+            : (state.preArmedOpsMode || OpsMode.Recon);
         const nextBase = Object.assign({}, state, {
           uptimeMs: now,
           lastInteractionMs: now,
-          opsMode: nextMode
+          opsMode: nextMode,
+          preArmedOpsMode: nextPre
+        });
+        if (!nextBase.isScanning && !nextBase.offensiveArmed) {
+          nextBase.mood = idleMoodForState(nextBase);
+          const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+          nextBase.phrase = picked.value;
+          nextBase.rngSeed = picked.nextSeed;
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SetOffensiveArmed': {
+        const now = event.nowMs >>> 0;
+        const armed = Boolean(event.armed);
+        let nextOps = state.opsMode;
+        let nextPre = state.preArmedOpsMode || OpsMode.Recon;
+        if (armed && !state.offensiveArmed) {
+          if (state.opsMode !== OpsMode.Offensive) {
+            nextPre = state.opsMode;
+          }
+          nextOps = OpsMode.Offensive;
+        } else if (!armed && state.offensiveArmed) {
+          nextOps = nextPre === OpsMode.Offensive ? OpsMode.Recon : nextPre;
+        } else if (armed) {
+          nextOps = OpsMode.Offensive;
+        }
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          offensiveArmed: armed,
+          opsMode: nextOps,
+          preArmedOpsMode: nextPre
         });
         if (!nextBase.isScanning) {
           nextBase.mood = idleMoodForState(nextBase);
@@ -840,6 +1040,142 @@
           nextBase.phrase = picked.value;
           nextBase.rngSeed = picked.nextSeed;
           nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SyncMonitorSnapshot': {
+        const now = event.nowMs >>> 0;
+        const aps = Array.isArray(event.aps) ? event.aps : [];
+        const latestScan = wifi.summarizeScan(aps, 12);
+        const rawBle = Array.isArray(event.bleDevices) ? event.bleDevices : [];
+        const bleList = rawBle.map(function (d) {
+          const threat =
+            d.threat && d.threat !== wifi.BleThreatKind.None
+              ? d.threat
+              : wifi.classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid, d.trackerPayload);
+          return Object.freeze(Object.assign({}, d, { threat }));
+        });
+        bleList.sort(function (a, b) {
+          const ta = a.threat !== wifi.BleThreatKind.None ? 1 : 0;
+          const tb = b.threat !== wifi.BleThreatKind.None ? 1 : 0;
+          if (ta !== tb) return tb - ta;
+          return (b.rssi || -100) - (a.rssi || -100);
+        });
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          latestScan,
+          hasScannedOnce: state.hasScannedOnce || aps.length > 0,
+          peakApCount: Math.max(state.peakApCount || 0, latestScan.totalAps),
+          capturePath: event.capturePath ? String(event.capturePath) : state.capturePath,
+          lastCaptureLabel: event.lastCaptureLabel ? String(event.lastCaptureLabel) : state.lastCaptureLabel,
+          bleDevices: Object.freeze(bleList.slice(0, 16)),
+          threatsDetected: Math.max(state.threatsDetected || 0, Math.trunc(event.threatCount || 0))
+        });
+        if ((event.capturesSaved || 0) > (state.capturesSaved || 0)) {
+          nextBase.capturesSaved = Math.trunc(event.capturesSaved);
+          nextBase.lastCaptureMs = now === 0 ? 1 : now;
+          Object.assign(
+            nextBase,
+            computeNotification(
+              nextBase,
+              NotifyKind.CaptureSaved,
+              'SAVED #' + nextBase.capturesSaved + ' -> ' + shortCapturePath(nextBase.capturePath),
+              now,
+              2400
+            )
+          );
+        }
+        const nextSecMood = Object.values(SecMood).includes(event.secMood)
+          ? event.secMood
+          : SecMood.Calm;
+        nextBase.secMood = nextSecMood;
+        const topThr = event.topThreatLabel ? String(event.topThreatLabel) : '';
+        if (nextSecMood === SecMood.Calm && !topThr) {
+          nextBase.lastThreatLabel = '';
+          nextBase.lastThreatMs = 0;
+        }
+        if (topThr && topThr !== state.lastThreatLabel) {
+          nextBase.lastThreatLabel = topThr;
+          nextBase.lastThreatMs = now === 0 ? 1 : now;
+          Object.assign(
+            nextBase,
+            computeNotification(nextBase, NotifyKind.ThreatAlert, 'ALERT! ' + topThr, now, 3000)
+          );
+          if (!nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive && !nextBase.offensiveArmed) {
+            nextBase.mood = Mood.ThreatAlert;
+            nextBase.phrase = 'ALERT! ' + topThr;
+            nextBase.lastPhraseChangeMs = now;
+          }
+        } else if (!nextBase.isScanning && nextBase.mood !== Mood.LevelUp &&
+                   (nextBase.mood !== Mood.ThreatAlert ||
+                    (nextSecMood !== SecMood.Alarmed && !nextBase.lastThreatLabel))) {
+          const targetMood = idleMoodForState(nextBase);
+          if (targetMood !== nextBase.mood) {
+            nextBase.mood = targetMood;
+            const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+            nextBase.phrase = picked.value;
+            nextBase.rngSeed = picked.nextSeed;
+            nextBase.lastPhraseChangeMs = now;
+          }
+        }
+        return Object.freeze(nextBase);
+      }
+
+      case 'SetSecMood': {
+        const now = event.nowMs >>> 0;
+        const rawMood = event.mood !== undefined ? event.mood : event.secMood;
+        const m = Object.values(SecMood).includes(rawMood) ? rawMood : SecMood.Calm;
+        const detail = event.detail ? String(event.detail) : '';
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          secMood: m
+        });
+        if (m === SecMood.Alarmed) {
+          if (detail) {
+            nextBase.lastThreatLabel = detail;
+            nextBase.lastThreatMs = now === 0 ? 1 : now;
+            Object.assign(
+              nextBase,
+              computeNotification(nextBase, NotifyKind.ThreatAlert, 'ALERT! ' + detail, now, 3000)
+            );
+          }
+          if (!nextBase.isScanning && !nextBase.offensiveArmed && nextBase.opsMode !== OpsMode.Offensive) {
+            nextBase.mood = Mood.ThreatAlert;
+            if (!detail) {
+              const picked = selectPhrase(Mood.ThreatAlert, nextBase.latestScan, nextBase.rngSeed);
+              nextBase.phrase = picked.value;
+              nextBase.rngSeed = picked.nextSeed;
+            } else {
+              nextBase.phrase = 'ALERT! ' + detail;
+            }
+            nextBase.lastPhraseChangeMs = now;
+          }
+        } else if (m === SecMood.Watchful) {
+          if (!nextBase.isScanning && !nextBase.offensiveArmed &&
+              nextBase.opsMode !== OpsMode.Offensive && nextBase.mood !== Mood.LevelUp) {
+            nextBase.mood = Mood.ShieldGuard;
+            if (!detail) {
+              const picked = selectPhrase(Mood.ShieldGuard, nextBase.latestScan, nextBase.rngSeed);
+              nextBase.phrase = picked.value;
+              nextBase.rngSeed = picked.nextSeed;
+            } else {
+              nextBase.phrase = 'WATCHFUL: ' + detail;
+            }
+            nextBase.lastPhraseChangeMs = now;
+          }
+        } else {
+          if (!detail) {
+            nextBase.lastThreatLabel = '';
+            nextBase.lastThreatMs = 0;
+          }
+          if (!nextBase.isScanning && nextBase.mood !== Mood.LevelUp) {
+            nextBase.mood = idleMoodForState(nextBase);
+            const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
+            nextBase.phrase = picked.value;
+            nextBase.rngSeed = picked.nextSeed;
+            nextBase.lastPhraseChangeMs = now;
+          }
         }
         return Object.freeze(nextBase);
       }
@@ -873,13 +1209,34 @@
         const trimmed = normalized.slice(0, 16);
         const xpGain = threatCount > 0 ? 25 : trimmed.length > 0 ? 4 : 1;
         const xpFields = applyXpFields(state, xpGain, now);
+        const capCount = (state.capturesSaved || 0) + threatCount;
+        const capStamp = now === 0 ? 1 : now;
         const nextBase = Object.assign({}, state, {
           uptimeMs: now,
           bleDevices: Object.freeze(trimmed),
           threatsDetected: (state.threatsDetected || 0) + threatCount,
           lastThreatLabel: topThreat || state.lastThreatLabel,
-          lastThreatMs: threatCount > 0 ? (now === 0 ? 1 : now) : (state.lastThreatMs || 0)
+          lastThreatMs: threatCount > 0 ? capStamp : (state.lastThreatMs || 0),
+          capturesSaved: capCount,
+          lastCaptureLabel: threatCount > 0 ? topThreat : (state.lastCaptureLabel || ''),
+          lastCaptureMs: threatCount > 0 ? capStamp : (state.lastCaptureMs || 0)
         }, xpFields);
+        if (threatCount > 0) {
+          Object.assign(
+            nextBase,
+            computeNotification(
+              nextBase,
+              NotifyKind.CaptureSaved,
+              'SAVED #' + capCount + ' -> ' + shortCapturePath(nextBase.capturePath),
+              now,
+              2400
+            )
+          );
+          Object.assign(
+            nextBase,
+            computeNotification(nextBase, NotifyKind.ThreatAlert, 'ALERT! ' + topThreat, now, 3000)
+          );
+        }
         if (threatCount > 0 && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
           nextBase.mood = Mood.ThreatAlert;
           nextBase.phrase = 'DEFENSE! ' + topThreat + ' nearby!';
@@ -900,6 +1257,9 @@
         const list = [sig].concat(state.subGhzSignals || []).slice(0, 12);
         const isAnom = sig.anomaly && sig.anomaly !== wifi.SubGhzAnomaly.None;
         const xpFields = applyXpFields(state, isAnom ? 25 : 10, now);
+        const capCount = (state.capturesSaved || 0) + 1;
+        const capStamp = now === 0 ? 1 : now;
+        const capLbl = wifi.formatFreqMhz(sig.freqKhz) + ' ' + sig.protocol;
         const threatLbl = isAnom
           ? wifi.formatFreqMhz(sig.freqKhz) + ' ' + wifi.subGhzAnomalyLabel(sig.anomaly)
           : state.lastThreatLabel;
@@ -909,8 +1269,28 @@
           subGhzSignals: Object.freeze(list),
           threatsDetected: (state.threatsDetected || 0) + (isAnom ? 1 : 0),
           lastThreatLabel: threatLbl,
-          lastThreatMs: isAnom ? (now === 0 ? 1 : now) : (state.lastThreatMs || 0)
+          lastThreatMs: isAnom ? capStamp : (state.lastThreatMs || 0),
+          capturesSaved: capCount,
+          lastCaptureLabel: capLbl,
+          lastCaptureMs: capStamp
         }, xpFields);
+        if (isAnom) {
+          Object.assign(
+            nextBase,
+            computeNotification(nextBase, NotifyKind.ThreatAlert, 'ALERT! ' + threatLbl, now, 3000)
+          );
+        } else {
+          Object.assign(
+            nextBase,
+            computeNotification(
+              nextBase,
+              NotifyKind.CaptureSaved,
+              'SAVED #' + capCount + ' -> ' + shortCapturePath(nextBase.capturePath),
+              now,
+              2400
+            )
+          );
+        }
         if (isAnom && !nextBase.isScanning && nextBase.opsMode !== OpsMode.Offensive) {
           nextBase.mood = Mood.ThreatAlert;
           nextBase.phrase = 'SUBGHZ! ' + threatLbl;
@@ -935,13 +1315,63 @@
       case 'SetHighScore': {
         const now = event.nowMs >>> 0;
         const xp = Math.max(state.xp || 0, Math.trunc(event.xp || 0));
-        const hi = Math.max(state.highScore || 0, Math.trunc(event.highScore || 0), xp);
+        const reqHi = Math.trunc(event.highScore || 0);
+        const hi = Math.max(state.highScore || 0, reqHi, xp);
+        const baseline =
+          (state.highScoreBaseline || 0) === 0 && reqHi > (state.highScore || 0)
+            ? reqHi
+            : (state.highScoreBaseline || 0);
         return Object.freeze(Object.assign({}, state, {
           uptimeMs: now,
           xp,
           highScore: hi,
+          highScoreBaseline: baseline,
           level: deriveLevelInfo(xp).level
         }));
+      }
+
+      case 'CaptureSaved': {
+        const now = event.nowMs >>> 0;
+        const added = Math.max(0, Math.trunc(event.addedCount === undefined ? 1 : event.addedCount));
+        const nextPath = event.path ? String(event.path) : state.capturePath;
+        const nextLbl = event.label ? String(event.label) : (state.lastCaptureLabel || '');
+        if (added === 0) {
+          return Object.freeze(Object.assign({}, state, {
+            uptimeMs: now,
+            capturePath: nextPath,
+            lastCaptureLabel: nextLbl
+          }));
+        }
+        const prevLevel = state.level || deriveLevelInfo(state.xp).level;
+        const capCount = (state.capturesSaved || 0) + added;
+        const xpGain = 15 * Math.min(added, 4);
+        const xpFields = applyXpFields(state, xpGain, now);
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          capturePath: nextPath,
+          lastCaptureLabel: nextLbl,
+          capturesSaved: capCount,
+          lastCaptureMs: now === 0 ? 1 : now
+        }, xpFields);
+        if (event.notify !== false) {
+          Object.assign(
+            nextBase,
+            computeNotification(
+              nextBase,
+              NotifyKind.CaptureSaved,
+              'SAVED #' + capCount + ' -> ' + shortCapturePath(nextPath),
+              now,
+              2400
+            )
+          );
+        }
+        if (xpFields.level > prevLevel) {
+          const lvlInfo = deriveLevelInfo(xpFields.xp);
+          nextBase.mood = Mood.LevelUp;
+          nextBase.phrase = 'LEVEL UP! Lv.' + lvlInfo.level + ' ' + lvlInfo.title + '!';
+          nextBase.lastPhraseChangeMs = now;
+        }
+        return Object.freeze(nextBase);
       }
 
       // --- Playful Web-Toy Events ---
@@ -998,24 +1428,38 @@
           (state.latestScan.strongestSsid ? state.latestScan.strongestSsid : 'TestLab_AP');
         const s1 = fp.nextSeed(state.rngSeed);
         const count = state.toyHandshakes + 1;
+        const capCount = (state.capturesSaved || 0) + 1;
         const phrases = [
           'Toy pwn #' + count + ' on ' + target + '!',
           'Bagged virtual EAPOL from ' + target + '!',
           'Simulated handshake #' + count + ' -> /dev/fun!'
         ];
         const picked = fp.pickFrom(s1, phrases);
-        return Object.freeze(
-          Object.assign({}, state, {
-            uptimeMs: now,
-            lastInteractionMs: now,
-            page: ScreenPage.PetFace,
-            mood: state.isScanning ? state.mood : Mood.Mischief,
-            phrase: picked.value,
-            rngSeed: picked.nextSeed,
-            lastPhraseChangeMs: now,
-            toyHandshakes: count
-          }, applyXpFields(state, 25, now))
+        const xpFields = applyXpFields(state, 25, now);
+        const nextBase = Object.assign({}, state, {
+          uptimeMs: now,
+          lastInteractionMs: now,
+          page: ScreenPage.PetFace,
+          mood: state.isScanning ? state.mood : Mood.Mischief,
+          phrase: picked.value,
+          rngSeed: picked.nextSeed,
+          lastPhraseChangeMs: now,
+          toyHandshakes: count,
+          capturesSaved: capCount,
+          lastCaptureLabel: 'EAPOL ' + target,
+          lastCaptureMs: now === 0 ? 1 : now
+        }, xpFields);
+        Object.assign(
+          nextBase,
+          computeNotification(
+            nextBase,
+            NotifyKind.CaptureSaved,
+            'SAVED #' + capCount + ' -> ' + shortCapturePath(nextBase.capturePath),
+            now,
+            2400
+          )
         );
+        return Object.freeze(nextBase);
       }
 
       case 'PeerSpotted': {
@@ -1064,8 +1508,14 @@
           uptimeMs: now,
           lastInteractionMs: now,
           lastThreatLabel: '',
-          lastThreatMs: 0
+          lastThreatMs: 0,
+          secMood: SecMood.Calm
         });
+        if (nextBase.notifyKind === NotifyKind.ThreatAlert) {
+          nextBase.notifyKind = NotifyKind.None;
+          nextBase.notifyText = '';
+          nextBase.notifyUntilMs = 0;
+        }
         if (!nextBase.isScanning) {
           nextBase.mood = idleMoodForState(nextBase);
           const picked = selectPhrase(nextBase.mood, nextBase.latestScan, nextBase.rngSeed);
@@ -1093,9 +1543,12 @@
     THREAT_DISPLAY_TIMEOUT_MS,
     OpsMode,
     opsModeLabel,
+    SecMood,
+    secMoodLabel,
     cycleOpsMode,
     Mood,
     ScreenPage,
+    NotifyKind,
     ThemeId,
     EyeGlyph,
     MouthGlyph,

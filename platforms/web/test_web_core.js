@@ -158,6 +158,8 @@ function testStateReducerAndPlayfulEvents() {
   });
   assert.strictEqual(sPwn.mood, logic.Mood.Mischief);
   assert.strictEqual(sPwn.toyHandshakes, 1);
+  assert.strictEqual(sPwn.capturesSaved, 1);
+  assert.strictEqual(sPwn.lastCaptureLabel, 'EAPOL Mainframe_Lab');
   assert.strictEqual(sPwn.highScore, sPwn.xp);
 
   const sPeer = logic.reduce(sPwn, {
@@ -179,7 +181,11 @@ function testStateReducerAndPlayfulEvents() {
 
   // OpsMode, BLE tracker & Sub-GHz guard + 10-tier levels
   assert.strictEqual(logic.deriveLevelInfo(0).level, 1);
+  assert.strictEqual(logic.deriveLevelInfo(0).badge, 'SPRT');
   assert.strictEqual(logic.deriveLevelInfo(2500).level, 10);
+  assert.strictEqual(logic.deriveLevelInfo(2500).badge, 'LGND');
+  assert.strictEqual(logic.prevPage(logic.ScreenPage.PetFace), logic.ScreenPage.Captures);
+  assert.strictEqual(logic.nextPage(logic.ScreenPage.RfGuard), logic.ScreenPage.Captures);
   const sDef = logic.reduce(sNamed, { type: 'CycleOpsMode', nowMs: 102000 });
   assert.strictEqual(sDef.opsMode, logic.OpsMode.Defensive);
   assert.strictEqual(sDef.mood, logic.Mood.ShieldGuard);
@@ -285,13 +291,53 @@ function testThemesMultiDeviceAndCppParity() {
   assert.strictEqual(themes.themeFromKey('redrain'), themes.ThemeId.RedTeam);
   assert.strictEqual(themes.themeFromKey('operator'), themes.ThemeId.BlueTeam);
 
-  // FaceStyle parity across Classic vs PixelArtMascot themes
+  // FaceStyle is ClassicFace across all themes (PixelArtMascot preserved for future exploration)
   assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.PaperInk), themes.FaceStyle.ClassicFace);
   assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.CodeRain), themes.FaceStyle.ClassicFace);
-  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.ZeroDayCyan), themes.FaceStyle.PixelArtMascot);
-  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.AmberCrt), themes.FaceStyle.PixelArtMascot);
-  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.RedTeam), themes.FaceStyle.PixelArtMascot);
-  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.BlueTeam), themes.FaceStyle.PixelArtMascot);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.ZeroDayCyan), themes.FaceStyle.ClassicFace);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.AmberCrt), themes.FaceStyle.ClassicFace);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.RedTeam), themes.FaceStyle.ClassicFace);
+  assert.strictEqual(themes.themeFaceStyle(themes.ThemeId.BlueTeam), themes.FaceStyle.ClassicFace);
+
+  // Highscore baseline, CaptureSaved, notifications & Captures page rendering
+  let capSt = logic.initialState(33);
+  capSt = logic.reduce(capSt, { type: 'SetHighScore', nowMs: 100, highScore: 30, xp: 0 });
+  assert.strictEqual(capSt.highScoreBaseline, 30);
+  capSt = logic.reduce(capSt, {
+    type: 'CaptureSaved',
+    nowMs: 120,
+    addedCount: 0,
+    path: 'browser://localStorage/zeroday_captures.json',
+    label: 'Ready',
+    notify: false
+  });
+  assert.strictEqual(capSt.capturesSaved, 0);
+  capSt = logic.reduce(capSt, {
+    type: 'CaptureSaved',
+    nowMs: 200,
+    addedCount: 3,
+    path: 'browser://localStorage/zeroday_captures.json',
+    label: 'EAPOL x3',
+    notify: true
+  });
+  assert.strictEqual(capSt.capturesSaved, 3);
+  assert.strictEqual(capSt.xp, 45);
+  assert.strictEqual(capSt.highScoreBeaten, true);
+  assert.strictEqual(capSt.level, 2);
+  assert.strictEqual(capSt.mood, logic.Mood.LevelUp);
+  assert.strictEqual(capSt.notifyKind, logic.NotifyKind.LevelUp);
+
+  assert.deepStrictEqual(ui.formatCapturePathRows('/sd/cap.pcap', 26), ['PATH: /sd/cap.pcap']);
+  assert.strictEqual(ui.formatCapturePathRows('browser://localStorage/zeroday_captures.json', 26).length, 2);
+
+  capSt = logic.reduce(capSt, { type: 'SetPage', nowMs: 250, page: logic.ScreenPage.Captures });
+  for (const prof of ui.SCREEN_PROFILES) {
+    const cf = ui.buildUiFrame(capSt, prof.dims);
+    assert.strictEqual(cf.notifyActive, true);
+    assert.ok(cf.captureSummary.includes('3'));
+    const buf = gfxMod.createPixelBuffer(prof.dims.width, prof.dims.height);
+    gfxMod.paintUiFrame(buf, cf);
+  }
 
   // Toast lifecycle & multi-device rendering across all 5 screen profiles
   let s = logic.initialState(77);
@@ -498,6 +544,7 @@ function testWebAccessibilityMarkup() {
   const css = fs.readFileSync(path.resolve(__dirname, './styles.css'), 'utf8');
 
   assert.ok(html.includes('<h1 class="brand-logo">'), 'Page must include an <h1> heading');
+  assert.ok(html.includes('data-page="Captures"'), 'index.html must include Captures page button');
   assert.ok(!html.includes('1/10'), 'Initial theme counter must not be stale 1/10');
   assert.ok(html.includes('1/' + themes.THEME_COUNT), 'Initial theme counter must match THEME_COUNT');
   assert.ok(html.includes('Content-Security-Policy') && !html.includes("'unsafe-inline'"),
@@ -527,6 +574,14 @@ function testWebAccessibilityMarkup() {
     'Terminal log must expose role="log" with aria-live="off" so continuous logs do not chatter');
   assert.ok(html.includes('id="select-resolution"') && html.includes('aria-label="Target Hardware Display Profile"'),
     'Select controls must have explicit aria-label');
+  assert.ok(html.includes('id="tab-wifi"') && html.includes('id="tab-bt"') &&
+    html.includes('aria-controls="airspace-device-list"') &&
+    html.includes('aria-labelledby="tab-wifi"') &&
+    html.includes('id="act-bt-scan"') && html.includes('id="airspace-device-list"'),
+    'index.html must include WAI-ARIA Airspace Devices WiFi/Bluetooth tabs and device list');
+  assert.ok(html.includes('id="act-ack"') && html.includes('aria-describedby="btn-b-hint"') &&
+    html.includes('id="btn-b-hint"') && html.includes('id="term-log" class="term-log" tabindex="0"'),
+    'index.html must include Clear Threat button, Button B description, and keyboard-focusable term log');
   assert.ok(css.includes('--border-control:'), 'CSS must define >= 3:1 interactive control border token');
   assert.ok(css.includes(':focus-visible') && css.includes('.skip-link:focus'),
     'CSS must define visible :focus-visible rings and skip-link focus reveal');
@@ -534,12 +589,75 @@ function testWebAccessibilityMarkup() {
   assert.ok(css.includes('min-width: 24px') && css.includes('min-height: 24px'),
     'Remove button targets must meet WCAG 2.5.8 24x24px minimum');
 
-  // Parity check: deriveLevelInfo integer truncation & OpsMode decoupling & threat expiry
+  // Check BLE vendor/service labeling, sorting, and non-spurious sim behavior
+  assert.strictEqual(wifi.bleVendorLabel(0x0087), 'Garmin');
+  assert.strictEqual(wifi.bleServiceLabel(0x180d), 'HeartRate');
+  const sortedBle = wifi.bleTargetsByStrength([
+    { mac: '11:22:33:44:55:66', name: 'Watch', rssi: -45, threat: wifi.BleThreatKind.None },
+    { mac: 'aa:bb:cc:dd:ee:ff', name: 'Tracker', rssi: -75, threat: wifi.BleThreatKind.AirTagTracker }
+  ]);
+  assert.strictEqual(sortedBle[0].mac, 'aa:bb:cc:dd:ee:ff');
+
+  const safeBle = sim.generateBleSnapshot('cafe', 777, 5000, { includeThreats: false });
+  assert.ok(safeBle.devices.length >= 2);
+  assert.strictEqual(safeBle.devices.some((d) =>
+    wifi.classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid, d.trackerPayload) !== wifi.BleThreatKind.None
+  ), false, 'Default scan BLE snapshot must not inject threats when includeThreats=false');
+
+  const alertBle = sim.generateBleSnapshot('con', 777, 5000, { includeThreats: true });
+  assert.strictEqual(alertBle.devices.some((d) =>
+    wifi.classifyBleDevice(d.mac, d.name, d.companyId, d.serviceUuid, d.trackerPayload) !== wifi.BleThreatKind.None
+  ), true, 'includeThreats=true must include simulated threat devices');
+
+  // Assert WCAG 2.2 AA theme contrast invariants in JS
+  const relLum = (c) => {
+    const comp = (v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * comp(c.r) + 0.7152 * comp(c.g) + 0.0722 * comp(c.b);
+  };
+  const contrastRatio = (a, b) => {
+    const la = relLum(a);
+    const lb = relLum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  };
+  for (const spec of themes.THEME_CATALOG) {
+    assert.ok(contrastRatio(spec.palette.fg, spec.palette.bg) >= 4.5, spec.key + ' fg/bg');
+    assert.ok(contrastRatio(spec.palette.accent, spec.palette.bg) >= 4.5, spec.key + ' accent/bg');
+    assert.ok(contrastRatio(spec.palette.highlight, spec.palette.bg) >= 4.5, spec.key + ' highlight/bg');
+    assert.ok(contrastRatio(spec.palette.muted, spec.palette.bg) >= 3.0, spec.key + ' muted/bg');
+  }
+
+  // Parity check: deriveLevelInfo integer truncation & OpsMode arming/sync & lazy ui_model
   assert.strictEqual(logic.deriveLevelInfo(45).progressPct, 7, 'Math.floor((5*100)/70) === 7 matching C++');
   const baseSt = logic.initialState(42);
   const cycOff = logic.reduce(baseSt, { type: 'SetOpsMode', nowMs: 100, mode: logic.OpsMode.Offensive });
   assert.strictEqual(cycOff.opsMode, logic.OpsMode.Offensive);
   assert.strictEqual(cycOff.offensiveArmed, false, 'SetOpsMode must not flip offensiveArmed');
+  const defSt = logic.reduce(baseSt, { type: 'SetOpsMode', nowMs: 120, mode: logic.OpsMode.Defensive });
+  const armedSt = logic.reduce(defSt, { type: 'SetOffensiveArmed', nowMs: 150, armed: true });
+  assert.strictEqual(armedSt.offensiveArmed, true);
+  assert.strictEqual(armedSt.opsMode, logic.OpsMode.Offensive);
+  assert.strictEqual(armedSt.preArmedOpsMode, logic.OpsMode.Defensive);
+  const blockedCycleWhileArmed = logic.reduce(armedSt, { type: 'CycleOpsMode', nowMs: 160 });
+  assert.strictEqual(blockedCycleWhileArmed.opsMode, logic.OpsMode.Offensive);
+  const disarmedSt = logic.reduce(armedSt, { type: 'SetOffensiveArmed', nowMs: 200, armed: false });
+  assert.strictEqual(disarmedSt.offensiveArmed, false);
+  assert.strictEqual(disarmedSt.opsMode, logic.OpsMode.Defensive);
+  const syncedSt = logic.reduce(baseSt, {
+    type: 'SyncMonitorSnapshot',
+    nowMs: 500,
+    aps: [{ ssid: 'SyncAP', rssi: -41, channel: 6, secure: true }],
+    bleDevices: safeBle.devices,
+    threatCount: 1,
+    topThreatLabel: 'SYNC-THREAT'
+  });
+  assert.strictEqual(syncedSt.xp, 0);
+  assert.strictEqual(syncedSt.latestScan.totalAps, 1);
+  assert.strictEqual(syncedSt.bleDevices.length, safeBle.devices.length);
+  const faceFrame = ui.buildUiFrame(syncedSt, { width: 240, height: 135 });
+  assert.strictEqual(faceFrame.radarRows.length, 0, 'Lazy ui_model must skip off-page radarRows');
   const thrEv = logic.reduce(baseSt, {
     type: 'SubGhzObserved',
     nowMs: 1000,
@@ -592,7 +710,9 @@ function testWebAccessibilityMarkup() {
   assert.ok(html.includes('rel="manifest" href="./manifest.json"'), 'index.html must link manifest.json');
   const manifest = JSON.parse(fs.readFileSync(path.resolve(__dirname, './manifest.json'), 'utf8'));
   assert.ok(manifest.name && Array.isArray(manifest.icons) && manifest.icons.length > 0);
-  assert.ok(fs.existsSync(path.resolve(__dirname, './sw.js')), 'sw.js must exist');
+  const swSrc = fs.readFileSync(path.resolve(__dirname, './sw.js'), 'utf8');
+  assert.ok(swSrc.includes('zeroday-web-v3') && swSrc.includes('netResp.clone()'),
+    'sw.js must use bumped cache version and stale-while-revalidate cloning');
   assert.ok(fs.readFileSync(path.resolve(__dirname, './icon.svg'), 'utf8').includes('<svg'));
 
   // Lightweight DOM harness smoke-test of app.js interactions & CSP-safe behavior.
@@ -685,6 +805,87 @@ function testWebAccessibilityMarkup() {
   els['btn-motion'].dispatch('click');
   assert.strictEqual(els['btn-motion'].textContent, 'MOTION: OFF');
   assert.strictEqual(bodyEl.classList.contains('reduce-motion'), true);
+  els['act-bt-scan'].dispatch('click');
+  assert.ok(els['tab-bt'].textContent.includes('Bluetooth ('),
+    'Clicking #act-bt-scan must sweep BT and update Bluetooth tab counter');
+  assert.ok(els['airspace-device-list'].childNodes.length >= 1,
+    'Airspace device list must populate Bluetooth device rows after Sweep BT');
+  els['act-guard'].dispatch('click');
+  els['act-ack'].dispatch('click');
+  assert.ok(els['term-log'].childNodes.some((n) => JSON.stringify(n).includes('[ACK]')),
+    'Clicking #act-ack must clear threat and log [ACK]');
+}
+
+function testOui5GhzSpectrumAndSecMoodParity() {
+  // 1. Offline OUI catalog & BLE/OUI vendor fallback (bleVendorLabel untouched for companyId=0)
+  assert.strictEqual(wifi.bleVendorLabel(0), '-');
+  assert.strictEqual(wifi.lookupOuiVendor('b8:27:eb:11:22:33'), 'RaspberryPi');
+  assert.strictEqual(wifi.bleVendorOrOuiLabel(0, 'b8:27:eb:11:22:33'), 'RaspberryPi');
+  assert.strictEqual(wifi.bleVendorOrOuiLabel(0x004C, 'b8:27:eb:11:22:33'), 'Apple');
+  assert.strictEqual(wifi.isLocallyAdministeredMac('02:aa:bb:cc:dd:ee'), true);
+  assert.strictEqual(wifi.isLocallyAdministeredMac('00:00:0c:11:22:33'), false);
+  assert.strictEqual(wifi.ouiVendorLabel('02:aa:bb:cc:dd:ee'), 'random');
+  assert.strictEqual(wifi.ouiVendorLabel('00:00:0c:11:22:33'), 'Cisco');
+
+  // Exact C++ <-> JS OUI_CATALOG parity against core/include/zd/oui.hpp
+  const ouiCppPath = path.resolve(__dirname, '../../core/include/zd/oui.hpp');
+  const ouiCppSrc = fs.readFileSync(ouiCppPath, 'utf8');
+  const ouiRe = /\{0x([0-9A-Fa-f]{6})u,\s*"([^"]+)"\}/g;
+  const cppOuis = [];
+  let om;
+  while ((om = ouiRe.exec(ouiCppSrc)) !== null) {
+    cppOuis.push([parseInt(om[1], 16), om[2]]);
+  }
+  assert.strictEqual(
+    cppOuis.length,
+    wifi.OUI_CATALOG.length,
+    'C++ kOuiCatalog and JS OUI_CATALOG must have identical entry count'
+  );
+  for (let i = 0; i < cppOuis.length; i++) {
+    assert.strictEqual(wifi.OUI_CATALOG[i][0], cppOuis[i][0], 'OUI prefix mismatch at index ' + i);
+    assert.strictEqual(wifi.OUI_CATALOG[i][1], cppOuis[i][1], 'OUI vendor mismatch at index ' + i);
+  }
+
+  // Captures page FRENS row parity when peersMet > 0
+  let peerSt = logic.initialState(21);
+  peerSt = logic.reduce(peerSt, { type: 'PeerSpotted', nowMs: 100, peerName: 'cyber-neko', peerRssi: -45 });
+  peerSt = logic.reduce(peerSt, { type: 'SetPage', nowMs: 120, page: logic.ScreenPage.Captures });
+  const peerFrame = ui.buildUiFrame(peerSt, { width: 240, height: 135 });
+  assert.ok(
+    peerFrame.captureRows.some((r) => r.includes('FRENS: 1 (cyber-neko)')),
+    'Captures page must include FRENS row matching C++ ui_model.hpp'
+  );
+
+  // 2. 5 GHz / 6 GHz spectrum & ChannelSpectrum auto-switch
+  const mixed = [
+    { ssid: 'FiveG_36', rssi: -52, channel: 36, secure: true },
+    { ssid: 'SixG_37', rssi: -60, channel: wifi.K_6GHZ_CHANNEL_BASE + 37, secure: true }
+  ];
+  const hist = wifi.buildChannelHistogram(mixed);
+  assert.strictEqual(hist.band24GhzAps, 0);
+  assert.strictEqual(hist.band5GhzAps, 1);
+  assert.strictEqual(hist.band6GhzAps, 1);
+
+  let st = logic.initialState(55);
+  st = logic.reduce(st, { type: 'ScanCompleted', nowMs: 1000, rawNetworks: mixed });
+  st = logic.reduce(st, { type: 'SetPage', nowMs: 1100, page: logic.ScreenPage.ChannelSpectrum });
+  const specFrame = ui.buildUiFrame(st, { width: 240, height: 135 });
+  assert.strictEqual(specFrame.channelBars[0].channel, 36);
+  assert.ok(specFrame.spectrumSummary.includes('5GHz'));
+  assert.ok(specFrame.spectrumSummary.includes('6G:1'));
+
+  // 3. SetSecMood reducer reaction & SyncMonitorSnapshot reaction
+  st = logic.reduce(st, {
+    type: 'SetSecMood',
+    nowMs: 1200,
+    mood: logic.SecMood.Alarmed,
+    detail: 'DEAUTH-FLOOD LabNet'
+  });
+  assert.strictEqual(st.secMood, logic.SecMood.Alarmed);
+  assert.strictEqual(st.mood, logic.Mood.ThreatAlert);
+  st = logic.reduce(st, { type: 'ClearThreat', nowMs: 1300 });
+  assert.strictEqual(st.secMood, logic.SecMood.Calm);
+  assert.notStrictEqual(st.mood, logic.Mood.ThreatAlert);
 }
 
 testFunctionalCombinators();
@@ -692,4 +893,5 @@ testWifiAnalysisPipeline();
 testStateReducerAndPlayfulEvents();
 testResponsiveUiAndPixelRasterizer();
 testThemesMultiDeviceAndCppParity();
+testOui5GhzSpectrumAndSecMoodParity();
 console.log('All Web Port pure functional core, pixel rasterizer & C++ parity tests PASSED!');

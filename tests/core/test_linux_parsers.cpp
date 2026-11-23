@@ -279,6 +279,26 @@ void testEapolPmkidAndRsnOui() {
     assert(d2.has_value());
     assert(d2->kind == zd::sec::FrameKind::Pmkid);
     assert(d2->hasPmkid && d2->eapolMsg == 1u);
+    // extractEapolKeyMaterial must lift the 16-byte PMKID and the raw EAPOL frame out.
+    for (std::size_t i = 0u; i < 16u; ++i) {
+        assert(d2->pmkid[i] == static_cast<uint8_t>(i + 1u));
+    }
+    assert(d2->eapolBody.size() >= 99u);
+
+    // 4. EAPOL-Key M1 carrying a real non-zero ANonce + replay counter: material extracted.
+    // The last 95 bytes of eapolNoPmkid are the EAPOL-Key body starting at the Descriptor Type
+    // field (EAPOL-header offset 4), so within it: replay counter at +5..+12, nonce at +13..+44.
+    std::vector<uint8_t> m1Nonce = eapolNoPmkid;
+    const std::size_t body = m1Nonce.size() - 95u;
+    m1Nonce[body + 12u] = 0x07;  // replay counter LSB (8-byte BE) -> rc = 7
+    for (std::size_t i = 0u; i < 32u; ++i) {
+        m1Nonce[body + 13u + i] = static_cast<uint8_t>(0xA0u + i);  // ANonce
+    }
+    const auto d3 = decodeRadiotapFrame(m1Nonce.data(), m1Nonce.size(), 300u);
+    assert(d3.has_value() && d3->eapolMsg == 1u);
+    assert(d3->hasEapolNonce);
+    assert(d3->eapolReplayCounter == 7u);
+    assert(d3->eapolNonce[0] == 0xA0u && d3->eapolNonce[31] == static_cast<uint8_t>(0xA0u + 31u));
 }
 
 void testIwScanDetailedParser() {
@@ -325,6 +345,180 @@ void testBleAndSubGhzParsers() {
     const auto s2 = parseRtl433Line("868.35MHz|-45|FSK|10|1");
     assert(s2.has_value());
     assert(s2->freqKhz == 868350u && s2->continuousCarrier);
+
+    // JSON (`rtl_433 -F json`) parsing including Hz/kHz/MHz normalization & malformed inputs
+    const auto sj1 = parseRtl433Line(
+        "{\"time\":\"2026-11-22 12:00:00\",\"model\":\"Acurite-Tower\",\"freq\":433.92,"
+        "\"rssi\":-49,\"burst_count\":4}");
+    assert(sj1.has_value());
+    assert(sj1->freqKhz == 433920u && sj1->rssi == -49 && sj1->protocol == "Acurite-Tower" &&
+           sj1->burstCount == 4u);
+
+    const auto sjHz = parseRtl433Line("{\"mod\":\"OOK\",\"frequency\":915000000,\"snr\":-35}");
+    assert(sjHz.has_value() && sjHz->freqKhz == 915000u && sjHz->protocol == "OOK" &&
+           sjHz->rssi == -35);
+
+    assert(!parseRtl433Line("{\"unrelated\":\"field\"}").has_value());
+    assert(!parseRtl433Line("{\"freq\":9999999999}").has_value());
+
+    // ANSI escape stripping & BlueZ `bluetoothctl scan/devices/info` + `btmgmt find` parsers
+    assert(stripAnsiEscapes("\x1b[0;94m[\x1b[0mbluetooth\x1b[0;94m]# Device AA:BB") ==
+           "[bluetooth]# Device AA:BB");
+
+    const std::string scanLog =
+        "\x1b[0m[NEW] Device A4:5E:60:11:22:02 Earbuds Pro\r\n"
+        "[CHG] Device 7A:3C:91:04:88:12 RSSI: 0xffffffc8 (-56)\n"
+        "Device 44:12:AA:BB:10:01 SmartWatch\n"
+        "[DEL] Device 11:22:33:44:55:66 Gone\n";
+    const auto devs = parseBluezScanOutput(scanLog);
+    assert(devs.size() == 3u);
+    assert(devs[0].mac == "a4:5e:60:11:22:02" && devs[0].name == "Earbuds Pro");
+    assert(devs[1].mac == "7a:3c:91:04:88:12" && devs[1].rssi == -56);
+    assert(devs[2].mac == "44:12:aa:bb:10:01" && devs[2].name == "SmartWatch");
+
+    ScannedBleDevice enriched{};
+    enriched.mac = "7a:3c:91:04:88:12";
+    const std::string btInfo =
+        "Device 7A:3C:91:04:88:12 (random)\n"
+        "\tName: AirTag Tracker\n"
+        "\tAlias: AirTag Tracker\n"
+        "\tRSSI: -52\n"
+        "\tUUID: Apple Find My            (0000fd6f-0000-1000-8000-00805f9b34fb)\n"
+        "\tManufacturerData Key: 0x004c\n"
+        "\tManufacturerData Value:\n"
+        "  12 19 00 01\n";
+    assert(parseBluezDeviceInfo(btInfo, enriched));
+    assert(enriched.rssi == -52 && enriched.companyId == 0x004Cu &&
+           enriched.serviceUuid == 0xFD6Fu && enriched.trackerPayload);
+
+    const std::string mgmtLog =
+        "hci0 dev_found: 00:80:E1:42:13:37 type LE Random rssi -47 flags 0x0000\n"
+        "name SubGHz_Tool\n";
+    const auto mgmtDevs = parseBtmgmtFindOutput(mgmtLog);
+    assert(mgmtDevs.size() == 1u);
+    assert(mgmtDevs[0].mac == "00:80:e1:42:13:37" && mgmtDevs[0].rssi == -47 &&
+           mgmtDevs[0].name == "SubGHz_Tool");
+}
+
+void testPmfCsa6GhzAndGpsd() {
+    // 1. 802.11w PMF RSN capabilities parsing (MFPR = 0x0040, MFPC = 0x0080)
+    const std::vector<uint8_t> rsnDisabled = {
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F,
+        0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, 0x00, 0x00
+    };
+    const std::vector<uint8_t> rsnOptional = {
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F,
+        0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02, 0x80, 0x00
+    };
+    const std::vector<uint8_t> rsnRequired = {
+        0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F,
+        0xAC, 0x04, 0x01, 0x00, 0x00, 0x0F, 0xAC, 0x08, 0xC0, 0x00
+    };
+    assert(pmfFromRsn(rsnDisabled.data(), rsnDisabled.size()) == zd::sec::PmfStatus::Disabled);
+    assert(pmfFromRsn(rsnOptional.data(), rsnOptional.size()) == zd::sec::PmfStatus::Optional);
+    assert(pmfFromRsn(rsnRequired.data(), rsnRequired.size()) == zd::sec::PmfStatus::Required);
+
+    // 2. Beacon carrying RSN (PMF Required) + Tag 37 CSA (channel 149, count 2)
+    std::vector<uint8_t> beacon(36, 0x00);
+    beacon[0] = 0x80;  // Management Beacon
+    // dst ff..ff, src/bssid 02:aa:bb:cc:dd:01
+    for (int i = 4; i < 10; ++i) beacon[i] = 0xFF;
+    const uint8_t bssid[6] = {0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x01};
+    for (int i = 0; i < 6; ++i) {
+        beacon[10 + i] = bssid[i];
+        beacon[16 + i] = bssid[i];
+    }
+    beacon[34] = 0x11;  // Capability Privacy
+    beacon.push_back(0u); beacon.push_back(3u); beacon.push_back('P'); beacon.push_back('M'); beacon.push_back('F');
+    beacon.push_back(48u);
+    beacon.push_back(static_cast<uint8_t>(rsnRequired.size()));
+    beacon.insert(beacon.end(), rsnRequired.begin(), rsnRequired.end());
+    beacon.push_back(37u); beacon.push_back(3u); beacon.push_back(1u); beacon.push_back(149u); beacon.push_back(2u);
+    const auto bf = decodeDot11(beacon.data(), beacon.size(), 500u, -45);
+    assert(bf.has_value());
+    assert(bf->kind == zd::sec::FrameKind::Beacon);
+    assert(bf->enc == zd::sec::Encryption::Wpa3);
+    assert(bf->pmf == zd::sec::PmfStatus::Required);
+    assert(bf->csaChannel == 149 && bf->csaCount == 2u);
+
+    // 3. Action frame CSA (Category 0 Action 4, Tag 37 element targeting invalid channel 0)
+    std::vector<uint8_t> csaAct(31, 0x00);
+    csaAct[0] = 0xD0;  // Management Action (subtype 13)
+    for (int i = 4; i < 10; ++i) csaAct[i] = 0xFF;
+    for (int i = 0; i < 6; ++i) {
+        csaAct[10 + i] = bssid[i];
+        csaAct[16 + i] = bssid[i];
+    }
+    csaAct[24] = 0u;  // Spectrum Management
+    csaAct[25] = 4u;  // CSA Action
+    csaAct[26] = 37u;
+    csaAct[27] = 3u;
+    csaAct[28] = 1u;
+    csaAct[29] = 0u;  // Invalid channel 0
+    csaAct[30] = 1u;
+    const auto af1 = decodeDot11(csaAct.data(), csaAct.size(), 600u, -42);
+    assert(af1.has_value() && af1->kind == zd::sec::FrameKind::Csa);
+    assert(af1->csaChannel == 0 && af1->csaCount == 1u);
+
+    // Public Action ECSA (Category 4 Action 0)
+    std::vector<uint8_t> ecsaAct(30, 0x00);
+    ecsaAct[0] = 0xD0;
+    for (int i = 0; i < 6; ++i) {
+        ecsaAct[10 + i] = bssid[i];
+        ecsaAct[16 + i] = bssid[i];
+    }
+    ecsaAct[24] = 4u;  // Public Action
+    ecsaAct[25] = 0u;
+    ecsaAct[26] = 1u;
+    ecsaAct[27] = 81u;
+    ecsaAct[28] = 36u;
+    ecsaAct[29] = 4u;
+    const auto af2 = decodeDot11(ecsaAct.data(), ecsaAct.size(), 700u, -50);
+    assert(af2.has_value() && af2->kind == zd::sec::FrameKind::Csa);
+    assert(af2->csaChannel == 36 && af2->csaCount == 4u);
+
+    // 4. 6 GHz channel helper + `iw scan` PMF capabilities parsing
+    assert(freqMhzToChannel(5955) == zd::k6GhzChannelBase + 1);
+    assert(freqMhzToChannel(6115) == zd::k6GhzChannelBase + 33);
+    const std::string iwSample =
+        "BSS 02:11:22:33:44:55(on wlan0)\n"
+        "\tfreq: 5955\n"
+        "\tsignal: -58.00 dBm\n"
+        "\tSSID: SixGigLab\n"
+        "\tRSN:\n"
+        "\t\t * Authentication suites: SAE\n"
+        "\t\t * Capabilities: MFP-required MFP-capable\n"
+        "BSS 02:11:22:33:44:66(on wlan0)\n"
+        "\tfreq: 5180\n"
+        "\tsignal: -65.00 dBm\n"
+        "\tSSID: OptionalPmfAp\n"
+        "\tRSN:\n"
+        "\t\t * Authentication suites: PSK\n"
+        "\t\t * Capabilities: MFP-capable\n";
+    const auto iwAps = parseIwScanDetailed(iwSample);
+    assert(iwAps.size() == 2u);
+    assert(iwAps[0].channel == zd::k6GhzChannelBase + 1);
+    assert(iwAps[0].enc == zd::sec::Encryption::Wpa3 &&
+           iwAps[0].pmf == zd::sec::PmfStatus::Required);
+    assert(iwAps[1].channel == 36);
+    assert(iwAps[1].enc == zd::sec::Encryption::Wpa2 &&
+           iwAps[1].pmf == zd::sec::PmfStatus::Optional);
+
+    // 5. gpsd JSON TPV / SKY + NMEA sentence parser
+    zd::esp32_common::GpsState gps{};
+    assert(parseGpsdLine(
+        R"({"class":"TPV","mode":3,"time":"2026-11-22T18:45:12.000Z","lat":37.7749,"lon":-122.4194})",
+        gps, 1000u));
+    assert(gps.hasFix);
+    assert(gps.latitude > 37.7f && gps.latitude < 37.8f);
+    assert(gps.longitude < -122.4f && gps.longitude > -122.5f);
+    assert(std::string(gps.utcDate) == "2026-11-22");
+    assert(std::string(gps.utcTime) == "18:45:12");
+    assert(parseGpsdLine(R"({"class":"SKY","uSat":9,"hdop":0.9})", gps, 1100u));
+    assert(gps.satellites == 9u);
+    // No-fix TPV (mode=1) clears fix
+    assert(parseGpsdLine(R"({"class":"TPV","mode":1})", gps, 1200u));
+    assert(!gps.hasFix);
 }
 
 }  // namespace
@@ -340,6 +534,7 @@ int main() {
     testEapolPmkidAndRsnOui();
     testIwScanDetailedParser();
     testBleAndSubGhzParsers();
+    testPmfCsa6GhzAndGpsd();
     std::cout << "[linux-parsers] all backend parser/decoder tests passed\n";
     return 0;
 }

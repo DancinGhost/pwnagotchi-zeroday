@@ -110,16 +110,62 @@ inline char* const* safeEnviron() noexcept {
 
 inline int safeMaxFd() noexcept {
     long m = ::sysconf(_SC_OPEN_MAX);
-    if (m < 256 || m > 4096) {
+    if (m < 256 || m > 65536) {
         m = 1024;
     }
     return static_cast<int>(m);
 }
 
+#if defined(__linux__) && defined(SYS_getdents64)
+namespace fd_detail {
+struct LinuxDirent64Header {
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+    char d_name[1];
+};
+}  // namespace fd_detail
+#endif
+
 // Async-signal-safe close of all FDs >= 3 before execve().
 inline void closeNonStdioFds(int maxFd) noexcept {
 #if defined(__linux__) && defined(SYS_close_range)
     if (::syscall(SYS_close_range, 3u, ~0u, 0u) == 0) {
+        return;
+    }
+#endif
+#if defined(__linux__) && defined(SYS_getdents64)
+    const int dirfd = ::open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirfd >= 0) {
+        char buf[2048];
+        for (;;) {
+            const long nread = ::syscall(SYS_getdents64, dirfd, buf, sizeof(buf));
+            if (nread <= 0) {
+                break;
+            }
+            for (long pos = 0; pos < nread;) {
+                const auto* d = reinterpret_cast<const fd_detail::LinuxDirent64Header*>(buf + pos);
+                if (d->d_reclen == 0) {
+                    break;
+                }
+                int parsed = 0;
+                bool isDigits = (d->d_name[0] != '\0');
+                for (std::size_t i = 0; i < 16u && d->d_name[i] != '\0'; ++i) {
+                    const char ch = d->d_name[i];
+                    if (ch < '0' || ch > '9') {
+                        isDigits = false;
+                        break;
+                    }
+                    parsed = parsed * 10 + (ch - '0');
+                }
+                if (isDigits && parsed >= 3 && parsed != dirfd) {
+                    ::close(parsed);
+                }
+                pos += d->d_reclen;
+            }
+        }
+        ::close(dirfd);
         return;
     }
 #endif
@@ -172,11 +218,17 @@ inline CommandResult runCapture(const std::vector<std::string>& argv,
     }
 
     int pipefd[2];
+#if defined(__linux__)
+    if (::pipe2(pipefd, O_CLOEXEC) != 0) {
+        return res;
+    }
+#else
     if (::pipe(pipefd) != 0) {
         return res;
     }
     ::fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
     ::fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+#endif
 
     // Pre-build argv pointers BEFORE fork() so the child performs zero heap allocations.
     std::vector<std::string> ownedArgs = argv;

@@ -17,9 +17,18 @@ struct AccessPoint {
     bool secure = false;
 };
 
-// 2.4 GHz channel counts (index 0 = other/5GHz, indices 1..13 = channels 1..13).
+inline constexpr std::array<int32_t, 13> kSpectrum5GhzChannels = {
+    36, 40, 44, 48, 52, 64, 100, 116, 132, 149, 153, 157, 161
+};
+
+// 2.4 GHz channel counts (index 0 = other/5GHz/6GHz, indices 1..13 = channels 1..13)
+// plus 5 GHz UNII buckets and per-band AP totals.
 struct ChannelHistogram {
     std::array<uint16_t, 14> counts{};
+    std::array<uint16_t, 13> counts5Ghz{};
+    uint16_t band24GhzAps = 0;
+    uint16_t band5GhzAps = 0;
+    uint16_t band6GhzAps = 0;
 };
 
 // Immutable aggregated summary computed purely from raw scan results.
@@ -40,6 +49,17 @@ enum class OpsMode : uint8_t {
     Defensive,
     Offensive
 };
+
+enum class SecMood : uint8_t { Calm = 0, Watchful, Alarmed };
+
+constexpr const char* secMoodLabel(SecMood m) {
+    switch (m) {
+        case SecMood::Calm:     return "CALM";
+        case SecMood::Watchful: return "WATCHFUL";
+        case SecMood::Alarmed:  return "ALARMED";
+    }
+    return "CALM";
+}
 
 constexpr const char* opsModeLabel(OpsMode m, bool compact = false) {
     switch (m) {
@@ -111,7 +131,18 @@ enum class ScreenPage : uint8_t {
     PetFace = 0,
     NearbyRadar,
     ChannelSpectrum,
-    RfGuard
+    RfGuard,
+    Captures
+};
+
+// Priority-ranked transient pet notification kind.
+enum class NotifyKind : uint8_t {
+    None = 0,
+    LevelUp,
+    NewHighScore,
+    CaptureSaved,
+    ThreatAlert,
+    Milestone
 };
 
 // Color palette themes cycled via Button B long-press.
@@ -155,11 +186,20 @@ struct AppState {
     ScanSummary latestScan{};
     bool offensiveArmed = false;
 
-    // Progression, multi-radio telemetry & defensive guard state
+    // Progression, multi-radio telemetry, capture storage & defensive guard state
     uint32_t xp = 0;
     uint32_t highScore = 0;
+    uint32_t highScoreBaseline = 0;
+    bool highScoreBeaten = false;
     uint8_t level = 1;
     uint32_t levelUpUntilMs = 0;
+    uint32_t capturesSaved = 0;
+    std::string capturePath = "/captures/zeroday.pcap";
+    std::string lastCaptureLabel{};
+    uint32_t lastCaptureMs = 0;
+    NotifyKind notifyKind = NotifyKind::None;
+    std::string notifyText{};
+    uint32_t notifyUntilMs = 0;
     OpsMode opsMode = OpsMode::Recon;
     std::vector<BleDevice> bleDevices{};
     std::vector<SubGhzSignal> subGhzSignals{};
@@ -168,6 +208,12 @@ struct AppState {
     std::string lastThreatLabel{};
     uint32_t lastThreatMs = 0;
     OpsMode preArmedOpsMode = OpsMode::Recon;
+    SecMood secMood = SecMood::Calm;
+
+    // Multi-transport peering (see core/include/zd/peering.hpp): distinct ZeroDay /
+    // Pwnagotchi / Palnagotchi units greeted this session, and the most recent one's name.
+    uint32_t peersMet = 0u;
+    std::string lastPeerName{};
 };
 
 // --- Algebraic Sum Type of Events fed from the Imperative Shell into the Pure Reducer ---
@@ -269,12 +315,38 @@ struct ClearThreatEvent {
     uint32_t nowMs = 0u;
 };
 
+struct CaptureSavedEvent {
+    uint32_t nowMs = 0u;
+    uint32_t addedCount = 1u;
+    std::string path{};
+    std::string label{};
+    bool notify = true;
+};
+
 struct SyncMonitorSnapshotEvent {
     uint32_t nowMs = 0u;
     std::vector<AccessPoint> aps{};
     std::vector<BleDevice> bleDevices{};
     uint32_t threatCount = 0u;
     std::string topThreatLabel{};
+    uint32_t capturesSaved = 0u;
+    std::string capturePath{};
+    std::string lastCaptureLabel{};
+    SecMood secMood = SecMood::Calm;
+};
+
+struct SetSecMoodEvent {
+    uint32_t nowMs = 0u;
+    SecMood mood = SecMood::Calm;
+    std::string detail{};
+};
+
+// A peer unit (another ZeroDay, or a classic Pwnagotchi/Palnagotchi) was greeted for the
+// first time this session over any transport (WiFi/BLE/LoRa). Drives the pet's social mood.
+struct PeerSpottedEvent {
+    uint32_t nowMs = 0u;
+    std::string peerName{};   // advertised name; sanitized + clamped by the reducer
+    int32_t peerRssi = -44;
 };
 
 using AppEvent = std::variant<
@@ -296,6 +368,9 @@ using AppEvent = std::variant<
     SetSubGhzFreqEvent,
     SetHighScoreEvent,
     ClearThreatEvent,
-    SyncMonitorSnapshotEvent>;
+    CaptureSavedEvent,
+    SyncMonitorSnapshotEvent,
+    SetSecMoodEvent,
+    PeerSpottedEvent>;
 
 }  // namespace zd

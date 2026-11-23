@@ -4,6 +4,7 @@ pwnagotchi-zeroday Easy Board Flasher
 Cross-platform tool to flash precompiled factory binaries to ESP32 / ESP32-S3 boards.
 """
 
+import argparse
 import glob
 import hashlib
 import hmac
@@ -74,11 +75,11 @@ def flasher_venv_python():
     return os.path.join(venv_dir, "bin", "python"), venv_dir
 
 
-def verify_sha256(factory_bin):
-    """Verify `factory_bin` against an adjacent `.sha256` or `SHA256SUMS*` manifest if present.
+def verify_sha256(factory_bin, require_manifest=True):
+    """Verify `factory_bin` against an adjacent `.sha256` or `SHA256SUMS*` manifest.
 
-    Returns (ok: bool, message: str). If a checksum file is present and the digest mismatches
-    or the file is missing from that manifest, returns False so callers abort before flashing.
+    Returns (ok: bool, message: str). Fails closed when `require_manifest=True` and
+    no manifest file is found, or if the digest is missing or mismatched.
     """
     search_dir = os.path.dirname(os.path.abspath(factory_bin)) or "."
     target_name = os.path.basename(factory_bin)
@@ -90,7 +91,9 @@ def verify_sha256(factory_bin):
     ]
     manifest = next((p for p in candidates if os.path.isfile(p)), None)
     if manifest is None:
-        return True, "no local SHA-256 manifest found; skipping offline checksum check"
+        if require_manifest:
+            return False, "no local SHA-256 manifest found (pass --skip-verify to bypass)"
+        return True, "no local SHA-256 manifest found; checksum check bypassed (--skip-verify)"
 
     expected = None
     with open(manifest, "r", encoding="utf-8", errors="replace") as fh:
@@ -125,7 +128,7 @@ def verify_sha256(factory_bin):
     return True, f"SHA-256 verified ({actual[:16]}... via {os.path.basename(manifest)})"
 
 
-def ensure_esptool():
+def ensure_esptool(allow_unhashed_pip=False):
     """Ensure esptool is installed and accessible (prefer current Python or an isolated venv)."""
     venv_py, venv_dir = flasher_venv_python()
     candidates = [
@@ -137,21 +140,31 @@ def ensure_esptool():
         if base_cmd[0] == venv_py and not os.path.isfile(venv_py):
             continue
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 base_cmd + ["version"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=True,
                 check=True,
             )
+            combined = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+            if "esptool" not in combined:
+                continue
             return base_cmd
         except (subprocess.SubprocessError, FileNotFoundError):
             pass
 
     print("[*] esptool not detected.")
-    if not sys.stdin.isatty():
-        print("[!] Please install esptool in a venv or via pipx: pipx install 'esptool==4.8.1'")
+    if not allow_unhashed_pip:
+        print("[!] Refusing unverified pip install without --allow-unhashed-pip.")
+        print("    Install esptool manually: pipx install 'esptool==4.8.1'")
         sys.exit(1)
-    ans = input(f"    Create isolated venv at {venv_dir} and install esptool==4.8.1? [y/N]: ").strip().lower()
+    if not sys.stdin.isatty():
+        print("[!] Non-interactive shell: please install esptool manually (pipx install 'esptool==4.8.1')")
+        sys.exit(1)
+    ans = input(
+        f"    Create isolated venv at {venv_dir} and install esptool==4.8.1 (--allow-unhashed-pip)? [y/N]: "
+    ).strip().lower()
     if ans != "y":
         print("[!] Aborted. Install esptool manually: pipx install 'esptool==4.8.1'")
         sys.exit(1)
@@ -165,7 +178,28 @@ def ensure_esptool():
         sys.exit(1)
 
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="pwnagotchi-zeroday Easy Board Flasher")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Allow flashing without a local SHA-256 manifest (fails closed on digest mismatch)",
+    )
+    parser.add_argument(
+        "--allow-unhashed-pip",
+        action="store_true",
+        help="Allow interactive venv pip install of esptool==4.8.1 if missing from PATH",
+    )
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="Explicit serial port device path (e.g. /dev/ttyUSB0 or COM3)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     print("==================================================")
     print("      pwnagotchi-zeroday Easy Board Flasher       ")
     print("==================================================")
@@ -181,7 +215,7 @@ def main():
     display_bin = os.path.basename(factory_bin)
     print(f"[*] Target Firmware: {display_bin}")
 
-    sha_ok, sha_msg = verify_sha256(factory_bin)
+    sha_ok, sha_msg = verify_sha256(factory_bin, require_manifest=not args.skip_verify)
     if not sha_ok:
         print(f"[!] Firmware integrity check FAILED: {sha_msg}")
         sys.exit(1)
@@ -204,7 +238,13 @@ def main():
     ports = get_serial_ports()
     selected_port = None
 
-    if not ports:
+    if args.port:
+        if not is_safe_port_name(args.port):
+            print(f"[!] Error: invalid serial port name '{args.port}'.")
+            sys.exit(1)
+        selected_port = args.port
+        print(f"[*] Using specified port: {selected_port}")
+    elif not ports:
         print("[*] No serial port detected automatically.")
         print("    Please plug in your board via USB.")
         manual = input("    Enter serial port name (or press Enter to let esptool auto-probe): ").strip()
@@ -232,7 +272,7 @@ def main():
         print(f"[*] Selected port: {selected_port}")
 
     # 3. Ensure esptool is ready
-    esptool_cmd = ensure_esptool()
+    esptool_cmd = ensure_esptool(allow_unhashed_pip=args.allow_unhashed_pip)
 
     # 4. Construct flashing command (unified factory image at offset 0x0)
     cmd = esptool_cmd + chip_arg

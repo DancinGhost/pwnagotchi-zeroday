@@ -74,11 +74,7 @@ jobs:
             chip: esp32
             boot_offset: '0x1000'
           - env: t-deck-plus
-            name: LILYGO T-Deck Plus
-            chip: esp32s3
-            boot_offset: '0x0'
-          - env: t-deck
-            name: LILYGO T-Deck
+            name: LILYGO T-Deck / T-Deck Plus
             chip: esp32s3
             boot_offset: '0x0'
           - env: cyd-esp32-2432s028
@@ -159,15 +155,19 @@ jobs:
           # License compliance: ship our license + third-party notices with the binaries
           cp LICENSE THIRD_PARTY_NOTICES.md "$DIST_DIR/"
 
-          # Create zip archive
+          # Create zip archive(s) in dedicated upload directory
+          mkdir -p upload_artifacts
           ZIP_NAME="pwnagotchi-zd-${{ matrix.target.env }}.zip"
-          (cd "$DIST_DIR" && zip -r "../../$ZIP_NAME" ./*)
+          (cd "$DIST_DIR" && zip -r "../../upload_artifacts/$ZIP_NAME" ./*)
+          if [ "${{ matrix.target.env }}" = "t-deck-plus" ]; then
+            cp "upload_artifacts/$ZIP_NAME" "upload_artifacts/pwnagotchi-zd-t-deck.zip"
+          fi
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-${{ matrix.target.env }}
-          path: pwnagotchi-zd-${{ matrix.target.env }}.zip
+          path: upload_artifacts/*.zip
           if-no-files-found: error
 
   # --------------------------------------------------------------------------------------
@@ -300,8 +300,8 @@ jobs:
             - **Web Pocket Cyberdeck**: `pwnagotchi-zd-web.zip` (HTML5 Canvas simulator)
 
             ### How to Flash Embedded Devices
-            - **In-Browser Web Flasher**: Connect your board to Chrome/Edge and open [Espressif Web Flasher](https://espressif.github.io/esptool-js/), choose baud rate `921600`, select offset `0x0000`, and flash `pwnagotchi-zd-*-factory.bin`!
-            - **One-Click Script**: Extract the board's zip and run `./flash.sh` (Linux/macOS) or `flash.bat` (Windows).
+            - **In-Browser Web Flasher (Zero Software Installation)**: Connect your board to Chrome/Edge and open [Espressif Web Flasher](https://espressif.github.io/esptool-js/) — or, if Espressif's site is temporarily down, use [Adafruit WebSerial ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/) or [Spacehuhn ESP Tool](https://esptool.spacehuhn.com/). Choose baud rate `921600` (or `115200` if unstable), select offset `0x0` (`0x0000`), and flash `pwnagotchi-zd-*-factory.bin`!
+            - **One-Click Offline Script**: Extract the board's zip and run `./flash.sh` (Linux/macOS) or `flash.bat` (Windows).
             - For detailed instructions, see [FLASHING.md](https://github.com/DancinGhost/pwnagotchi-zeroday/blob/main/docs/FLASHING.md).
           files: release-assets/*
           prerelease: true

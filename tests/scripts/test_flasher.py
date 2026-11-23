@@ -54,9 +54,11 @@ class TestFlasherScript(unittest.TestCase):
                 fh.write(payload)
             digest = hashlib.sha256(payload).hexdigest()
 
-            # Without a manifest present locally, returns True with skip note.
-            ok_none, _ = flasher.verify_sha256(fw)
-            self.assertTrue(ok_none)
+            # Without a manifest present locally, fail closed unless require_manifest=False (--skip-verify).
+            ok_none, msg_none = flasher.verify_sha256(fw)
+            self.assertFalse(ok_none, msg_none)
+            ok_skip, _ = flasher.verify_sha256(fw, require_manifest=False)
+            self.assertTrue(ok_skip)
 
             # Matching .sha256 passes.
             sha_file = fw + ".sha256"
@@ -78,10 +80,22 @@ class TestFlasherScript(unittest.TestCase):
             ok_missing, _ = flasher.verify_sha256(fw)
             self.assertFalse(ok_missing)
 
+    def test_ensure_esptool_refuses_unhashed_pip_by_default(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("no esptool")):
+            with mock.patch("sys.stdout", new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as cm:
+                    flasher.ensure_esptool(allow_unhashed_pip=False)
+                self.assertEqual(cm.exception.code, 1)
+
     def test_main_multiport_abort_does_not_default_silently(self):
         with tempfile.TemporaryDirectory() as tmp:
             fw = os.path.join(tmp, "pwnagotchi-zd-m5stick-c-factory.bin")
-            open(fw, "wb").close()
+            payload = b"test-fw"
+            with open(fw, "wb") as fh:
+                fh.write(payload)
+            digest = hashlib.sha256(payload).hexdigest()
+            with open(fw + ".sha256", "w", encoding="utf-8") as fh:
+                fh.write(f"{digest}  pwnagotchi-zd-m5stick-c-factory.bin\n")
             cwd = os.getcwd()
             try:
                 os.chdir(tmp)
@@ -89,7 +103,7 @@ class TestFlasherScript(unittest.TestCase):
                     with mock.patch("builtins.input", side_effect=["invalid", "q"]):
                         with mock.patch("sys.stdout", new_callable=io.StringIO):
                             with self.assertRaises(SystemExit) as cm:
-                                flasher.main()
+                                flasher.main([])
                             self.assertEqual(cm.exception.code, 0)
             finally:
                 os.chdir(cwd)

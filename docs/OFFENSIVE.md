@@ -63,7 +63,8 @@ Over the USB serial monitor (115200 baud) — also the QWERTY keyboard on the T-
 | `sec deny <bssid>` | Remove a BSSID from the allow-list |
 | `sec arm I-HAVE-AUTHORIZATION` | Confirm authorization (required; typed token prevents stray arming) |
 | `sec disarm` | Revoke authorization |
-| `sec deauth <bssid> [count]` | Transmit (gated: must be allow-listed **and** armed) |
+| `sec deauth <bssid> [count] [client]` | Transmit deauth burst (gated: must be allow-listed **and** armed) |
+| `sec pmkid <bssid> [count]` | Clientless PMKID probe sending open auth + RSN assoc (gated; WPA2 only — use `sec deauth` for WPA3-SAE/PMF) |
 
 Typical authorized flow against a lab AP you own:
 

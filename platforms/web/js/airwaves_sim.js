@@ -208,44 +208,102 @@
     };
   }
 
-  function generateBleSnapshot(presetId, seed, nowMs) {
+  function generateBleSnapshot(presetId, seed, nowMs, opts) {
     let s = fp.nextSeed(seed);
     const effectiveId = presetId === 'roam' ? resolveRoamSubPreset(nowMs || 0) : presetId;
     if (effectiveId === 'bunker') {
       return { devices: [], nextSeed: s };
     }
     const devices = [
-      { mac: '44:12:aa:bb:10:01', name: 'SmartWatch_BT', rssi: -68, companyId: 0x0000, serviceUuid: 0x180d, trackerPayload: false }
+      {
+        mac: '44:12:aa:bb:10:01',
+        name: 'SmartWatch_BT',
+        rssi: -68 + (s % 5),
+        companyId: 0x0087,
+        serviceUuid: 0x180d,
+        trackerPayload: false
+      }
     ];
     if (effectiveId === 'cafe' || effectiveId === 'con') {
       devices.push({
-        mac: '7a:3c:91:04:88:12',
-        name: 'Tracker_Tag',
-        rssi: -54 - (s % 12),
-        companyId: 0x004c,
-        serviceUuid: 0x0000,
-        trackerPayload: true
+        mac: 'a4:5e:60:11:22:02',
+        name: 'Earbuds_Pro',
+        rssi: -54 - (s % 10),
+        companyId: 0x0047,
+        serviceUuid: 0x110b,
+        trackerPayload: false
+      });
+      devices.push({
+        mac: 'd8:3a:dd:40:19:03',
+        name: 'DeskMouse_BT',
+        rssi: -62 - (s % 8),
+        companyId: 0x0059,
+        serviceUuid: 0x1812,
+        trackerPayload: false
       });
     }
     if (effectiveId === 'con' || effectiveId === 'lab') {
       devices.push({
-        mac: '00:80:e1:42:13:37',
-        name: 'SubGHz_Tool',
-        rssi: -49 - (s % 10),
-        companyId: 0x0000,
-        serviceUuid: 0x3082,
+        mac: 'e2:91:44:77:20:04',
+        name: 'FitBand_BLE',
+        rssi: -59 - (s % 9),
+        companyId: 0x0157,
+        serviceUuid: 0x180d,
+        trackerPayload: false
+      });
+      devices.push({
+        mac: 'bc:30:7e:88:12:05',
+        name: 'Speaker_Mini',
+        rssi: -52 - (s % 12),
+        companyId: 0x0310,
+        serviceUuid: 0x110b,
         trackerPayload: false
       });
     }
     if (effectiveId === 'quiet') {
       devices.push({
-        mac: 'c2:11:22:33:44:55',
-        name: 'Key_Beacon',
-        rssi: -76,
-        companyId: 0x0000,
-        serviceUuid: 0xfeed,
-        trackerPayload: true
+        mac: 'c2:11:22:33:44:56',
+        name: 'TempSensor_BLE',
+        rssi: -74 - (s % 6),
+        companyId: 0x0059,
+        serviceUuid: 0x180f,
+        trackerPayload: false
       });
+    }
+    const forceThreats = Boolean(opts && opts.includeThreats === true);
+    const suppressThreats = Boolean(opts && opts.includeThreats === false);
+    const rareConThreat = !suppressThreats && effectiveId === 'con' && (s % 7) === 0;
+    if (forceThreats || rareConThreat) {
+      if (forceThreats || effectiveId === 'cafe' || effectiveId === 'con') {
+        devices.push({
+          mac: '7a:3c:91:04:88:12',
+          name: 'Tracker_Tag',
+          rssi: -54 - (s % 12),
+          companyId: 0x004c,
+          serviceUuid: 0x0000,
+          trackerPayload: true
+        });
+      }
+      if (forceThreats && (effectiveId === 'con' || effectiveId === 'lab')) {
+        devices.push({
+          mac: '00:80:e1:42:13:37',
+          name: 'SubGHz_Tool',
+          rssi: -49 - (s % 10),
+          companyId: 0x0000,
+          serviceUuid: 0x3082,
+          trackerPayload: false
+        });
+      }
+      if (forceThreats && effectiveId === 'quiet') {
+        devices.push({
+          mac: 'c2:11:22:33:44:55',
+          name: 'Key_Beacon',
+          rssi: -76,
+          companyId: 0x0000,
+          serviceUuid: 0xfeed,
+          trackerPayload: true
+        });
+      }
     }
     s = fp.nextSeed(s);
     return { devices, nextSeed: s };

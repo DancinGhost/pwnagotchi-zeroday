@@ -70,7 +70,7 @@
       blurb: 'Classic e-paper: charcoal ink on warm paper',
       lightBackground: true,
       effect: ThemeEffect.None,
-      palette: makePalette([242, 240, 230], [22, 24, 28], [48, 58, 92], [155, 152, 142], [215, 95, 110])
+      palette: makePalette([242, 240, 230], [22, 24, 28], [48, 58, 92], [132, 128, 118], [178, 36, 56])
     }),
     Object.freeze({
       id: ThemeId.ZeroDayCyan,
@@ -79,7 +79,7 @@
       blurb: 'Signature cyber cyan and dish wave scanner',
       lightBackground: false,
       effect: ThemeEffect.RadarDish,
-      palette: makePalette([6, 12, 22], [0, 238, 255], [120, 255, 200], [30, 68, 96], [255, 90, 180])
+      palette: makePalette([6, 12, 22], [0, 238, 255], [120, 255, 200], [54, 104, 136], [255, 90, 180])
     }),
     Object.freeze({
       id: ThemeId.CodeRain,
@@ -88,7 +88,7 @@
       blurb: 'Cascading digital rain and lightning strikes',
       lightBackground: false,
       effect: ThemeEffect.LightningStorm,
-      palette: makePalette([2, 8, 4], [36, 255, 112], [190, 255, 210], [24, 96, 48], [235, 255, 140])
+      palette: makePalette([2, 8, 4], [36, 255, 112], [190, 255, 210], [36, 118, 64], [235, 255, 140])
     }),
     Object.freeze({
       id: ThemeId.AmberCrt,
@@ -97,7 +97,7 @@
       blurb: 'Warm amber-orange pocket deck monochrome glow',
       lightBackground: false,
       effect: ThemeEffect.None,
-      palette: makePalette([16, 10, 2], [255, 178, 0], [255, 216, 128], [100, 64, 10], [255, 124, 40])
+      palette: makePalette([16, 10, 2], [255, 178, 0], [255, 216, 128], [138, 92, 20], [255, 124, 40])
     }),
     Object.freeze({
       id: ThemeId.RedTeam,
@@ -106,7 +106,7 @@
       blurb: 'Offensive ops HUD: orbital satellite beam',
       lightBackground: false,
       effect: ThemeEffect.SatelliteBeam,
-      palette: makePalette([12, 4, 6], [255, 68, 82], [255, 188, 196], [132, 34, 48], [255, 146, 56])
+      palette: makePalette([12, 4, 6], [255, 68, 82], [255, 188, 196], [172, 56, 72], [255, 146, 56])
     }),
     Object.freeze({
       id: ThemeId.BlueTeam,
@@ -115,7 +115,7 @@
       blurb: 'Defensive ops HUD: crisp ice blue shield grid',
       lightBackground: false,
       effect: ThemeEffect.TacticalHud,
-      palette: makePalette([6, 12, 24], [96, 192, 255], [188, 232, 255], [36, 76, 128], [82, 255, 188])
+      palette: makePalette([6, 12, 24], [96, 192, 255], [188, 232, 255], [60, 108, 162], [82, 255, 188])
     })
   ]);
 
@@ -143,11 +143,8 @@
   }
 
   function themeFaceStyle(id) {
-    const resolved = themeSpec(id).id;
-    if (resolved === ThemeId.PaperInk || resolved === ThemeId.CodeRain) {
-      return FaceStyle.ClassicFace;
-    }
-    return FaceStyle.PixelArtMascot;
+    void id;
+    return FaceStyle.ClassicFace;
   }
 
   function resolvePalette(id) {

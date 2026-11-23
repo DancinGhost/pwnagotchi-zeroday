@@ -128,6 +128,23 @@
     return lines;
   }
 
+  function formatCapturePathRows(path, maxCols) {
+    const safePath = path || '(unset)';
+    if (safePath.length + 6 <= maxCols) {
+      return ['PATH: ' + safePath];
+    }
+    const slash = safePath.lastIndexOf('/');
+    if (slash >= 0 && slash + 1 < safePath.length) {
+      const dirPart = slash === 0 ? '/' : safePath.slice(0, slash);
+      const filePart = safePath.slice(slash + 1);
+      return [
+        truncateText('DIR:  ' + dirPart, maxCols),
+        truncateText('FILE: ' + filePart, maxCols)
+      ];
+    }
+    return [truncateText('PATH: ' + safePath, maxCols)];
+  }
+
   function buildThemeToast(state, dims, compact, bodyTop, bodyBottom) {
     if (!themes.isThemeToastVisible(state.themeToastUntilMs || 0, state.uptimeMs || 0)) {
       return Object.freeze({
@@ -196,9 +213,13 @@
 
     const chText = state.isScanning
       ? 'CH:*'
-      : state.latestScan.busiestChannel > 0
-        ? 'CH:' + twoDigit(state.latestScan.busiestChannel)
-        : 'CH:--';
+      : state.latestScan.busiestChannel >= 6001
+        ? '6G:' + (state.latestScan.busiestChannel - 6000)
+        : state.latestScan.busiestChannel >= 100
+          ? 'CH:' + state.latestScan.busiestChannel
+          : state.latestScan.busiestChannel > 0
+            ? 'CH:' + twoDigit(state.latestScan.busiestChannel)
+            : 'CH:--';
 
     const apText = 'AP:' + state.latestScan.totalAps;
     const upText = 'UP:' + formatUptime(state.uptimeMs, compact);
@@ -249,9 +270,14 @@
       ? ActivityScene.RadarDish
       : effectiveMode === logic.OpsMode.Offensive
         ? ActivityScene.SatelliteBeam
-        : effectiveMode === logic.OpsMode.Defensive || state.mood === logic.Mood.ThreatAlert
+        : effectiveMode === logic.OpsMode.Defensive ||
+            state.mood === logic.Mood.ThreatAlert ||
+            (state.secMood && state.secMood !== logic.SecMood.Calm)
           ? ActivityScene.ThreatShield
           : ActivityScene.None;
+    const faceStyle = themes.themeFaceStyle(state.theme);
+    const reserveMascotScene =
+      faceStyle === themes.FaceStyle.PixelArtMascot && scene !== ActivityScene.None;
 
     const centerX = Math.trunc(dims.width / 2);
     let geom;
@@ -278,7 +304,7 @@
       speechX = 4;
       speechTopY = bodyTop + 1;
       lineStepY = 8;
-      const reserve = scene !== ActivityScene.None ? 18 : 0;
+      const reserve = reserveMascotScene ? 18 : 0;
       speechCols = Math.max(6, Math.floor((dims.width - 8 - reserve) / 6));
       speechMaxLines = 1;
     } else if (compact) {
@@ -298,7 +324,7 @@
       speechX = 4;
       speechTopY = bodyTop + 2;
       lineStepY = 9;
-      const reserve = scene !== ActivityScene.None ? 24 : 0;
+      const reserve = reserveMascotScene ? 24 : 0;
       speechCols = Math.max(8, Math.floor((dims.width - 8 - reserve) / 6));
       speechMaxLines = 1;
     } else if (wide) {
@@ -318,7 +344,7 @@
       speechX = 6;
       speechTopY = bodyTop + 4;
       lineStepY = 11;
-      const reserve = scene !== ActivityScene.None ? 40 : 0;
+      const reserve = reserveMascotScene ? 40 : 0;
       speechCols = Math.max(12, Math.floor((dims.width - 12 - reserve) / 6));
       speechMaxLines = 2;
     } else {
@@ -338,44 +364,68 @@
       speechX = 4;
       speechTopY = bodyTop + 2;
       lineStepY = 9;
-      const reserve = scene !== ActivityScene.None ? 32 : 0;
+      const reserve = reserveMascotScene ? 32 : 0;
       speechCols = Math.max(12, Math.floor((dims.width - 8 - reserve) / 6));
       speechMaxLines = 1;
     }
 
-    const promptMaxCols = compact
-      ? (speechCols > 10 ? Math.min(9, Math.trunc(speechCols / 2)) : speechCols)
-      : speechCols;
-    const promptLabel = truncateText(state.petName + '>', promptMaxCols);
-    const phraseCols = compact
-      ? (speechCols > promptLabel.length + 1 ? speechCols - promptLabel.length - 1 : 0)
-      : speechCols;
-    const wrappedPhrase = wrapWords(state.phrase, phraseCols, speechMaxLines);
+    const onPetFace = state.page === logic.ScreenPage.PetFace;
+    const onRadar = state.page === logic.ScreenPage.NearbyRadar;
+    const onSpectrum = state.page === logic.ScreenPage.ChannelSpectrum;
+    const onRfGuard = state.page === logic.ScreenPage.RfGuard;
+    const onCaptures = state.page === logic.ScreenPage.Captures;
 
     const lvlInfo = logic.deriveLevelInfo(state.xp || 0);
-    const highScore = Math.max(state.highScore || 0, lvlInfo.xp);
-    let rankLine = '';
-    if (!compact) {
-      const maxRankCols = wide
-        ? (dims.width > 68 ? Math.floor((dims.width - 64) / 6) : maxFrameCols)
-        : 16;
-      rankLine = truncateText(
-        'LV' + lvlInfo.level + ' HI:' + highScore,
-        maxRankCols
-      );
-    }
+    const highScore = state.highScore || 0;
+    const capturesSaved = state.capturesSaved || 0;
+    const capturePath = state.capturePath || '/captures/zeroday.pcap';
+    const highScoreBeaten = Boolean(state.highScoreBeaten);
+    const notifyActive =
+      themes.isThemeToastVisible(state.notifyUntilMs || 0, state.uptimeMs || 0) &&
+      Boolean(state.notifyText);
+    const notifyKind = notifyActive ? (state.notifyKind || logic.NotifyKind.None) : logic.NotifyKind.None;
+    const notifyBanner = notifyActive ? truncateText('* ' + state.notifyText, maxFrameCols) : '';
 
+    let promptLabel = '';
+    let wrappedPhrase = Object.freeze([]);
+    let rankLine = '';
     const threatBanner = state.lastThreatLabel
       ? truncateText('! ' + state.lastThreatLabel, maxFrameCols)
       : '';
-
     let spotlightLabel = '';
-    if (!compact && threatBanner.length > 0) {
-      spotlightLabel = threatBanner;
-    } else if (!compact && state.latestScan.totalAps > 0 && state.latestScan.strongestSsid.length > 0) {
-      const rawSpot =
-        '> ' + state.latestScan.strongestSsid + ' (' + state.latestScan.strongestRssi + ')';
-      spotlightLabel = truncateText(rawSpot, maxFrameCols);
+
+    if (onPetFace) {
+      const promptMaxCols = compact
+        ? (speechCols > 10 ? Math.min(9, Math.trunc(speechCols / 2)) : speechCols)
+        : speechCols;
+      promptLabel = truncateText(state.petName + '>', promptMaxCols);
+      const phraseCols = compact
+        ? (speechCols > promptLabel.length + 1 ? speechCols - promptLabel.length - 1 : 0)
+        : speechCols;
+      wrappedPhrase = wrapWords(state.phrase, phraseCols, speechMaxLines);
+
+      if (!compact) {
+        const maxRankCols = wide
+          ? (dims.width > 68 ? Math.floor((dims.width - 64) / 6) : maxFrameCols)
+          : 22;
+        const hiSuffix = highScoreBeaten ? '!' : '';
+        const capPart =
+          capturesSaved > 0 ? ((wide ? ' CAP:' : ' C:') + capturesSaved) : '';
+        const rawRank = wide
+          ? ('LV' + lvlInfo.level + ' ' + lvlInfo.title + ' HI:' + highScore + hiSuffix + capPart)
+          : ('LV' + lvlInfo.level + ' HI:' + highScore + hiSuffix + capPart);
+        rankLine = truncateText(rawRank, maxRankCols);
+      }
+
+      if (!compact && notifyActive) {
+        spotlightLabel = notifyBanner;
+      } else if (!compact && threatBanner.length > 0) {
+        spotlightLabel = threatBanner;
+      } else if (!compact && state.latestScan.totalAps > 0 && state.latestScan.strongestSsid.length > 0) {
+        const rawSpot =
+          '> ' + state.latestScan.strongestSsid + ' (' + state.latestScan.strongestRssi + ')';
+        spotlightLabel = truncateText(rawSpot, maxFrameCols);
+      }
     }
 
     const radarRowStep = compact ? 12 : 15;
@@ -384,102 +434,188 @@
       6,
       Math.floor((dims.width - (micro ? 80 : compact ? 88 : 126)) / 6)
     );
-    const visibleAps = fp.take(state.latestScan.topNetworks, maxRadarRows);
-    const radarRows = fp.map(visibleAps, function (ap) {
-      const chStr = ap.channel > 0 ? 'c' + twoDigit(ap.channel) : 'c--';
-      const details = chStr + ' ' + ap.rssi;
-      return {
-        ssid: truncateText(ap.ssid, maxSsidChars),
-        details,
-        bars: wifi.rssiToBars(ap.rssi),
-        secure: ap.secure
-      };
-    });
 
-    const radarEmptyHint = truncateText(
-      state.isScanning
-        ? 'Scanning nearby WiFi...'
-        : state.hasScannedOnce
-          ? 'No WiFi APs in range.'
-          : 'Waiting for first scan...',
-      maxFrameCols
-    );
+    let radarRows = Object.freeze([]);
+    let radarEmptyHint = '';
+    if (onRadar) {
+      const visibleAps = fp.take(state.latestScan.topNetworks, maxRadarRows);
+      radarRows = fp.map(visibleAps, function (ap) {
+        let chStr = 'c--';
+        if (ap.channel >= 6001) {
+          chStr = '6g' + (ap.channel - 6000);
+        } else if (ap.channel >= 100) {
+          chStr = 'c' + ap.channel;
+        } else if (ap.channel > 0) {
+          chStr = 'c' + twoDigit(ap.channel);
+        }
+        const details = chStr + ' ' + ap.rssi;
+        return {
+          ssid: truncateText(ap.ssid, maxSsidChars),
+          details,
+          bars: wifi.rssiToBars(ap.rssi),
+          secure: ap.secure
+        };
+      });
+      radarEmptyHint = truncateText(
+        state.isScanning
+          ? 'Scanning nearby WiFi...'
+          : state.hasScannedOnce
+            ? 'No WiFi APs in range.'
+            : 'Waiting for first scan...',
+        maxFrameCols
+      );
+    }
 
     const chartBaseY = bodyBottom - (micro ? 9 : compact ? 11 : 14);
     const chartMaxBarH = Math.max(
       14,
       chartBaseY - bodyTop - (micro ? 12 : compact ? 16 : 29)
     );
-
-    let maxChCount = 1;
-    for (let ch = 1; ch <= 13; ch++) {
-      if (state.latestScan.histogram.counts[ch] > maxChCount) {
-        maxChCount = state.latestScan.histogram.counts[ch];
-      }
-    }
-
     const channelBars = [];
-    for (let idx = 0; idx < 13; idx++) {
-      const c = state.latestScan.histogram.counts[idx + 1] || 0;
-      const barH =
-        c === 0 ? 0 : Math.max(2, Math.trunc((c * chartMaxBarH) / maxChCount));
-      channelBars.push({
-        channel: idx + 1,
-        count: c,
-        heightPx: barH
-      });
-    }
+    let spectrumSummary = '';
+    if (onSpectrum) {
+      const hist = state.latestScan.histogram || {};
+      const band24 = hist.band24GhzAps || 0;
+      const band5 = hist.band5GhzAps || 0;
+      const band6 = hist.band6GhzAps || 0;
+      const counts5 = hist.counts5Ghz || [];
+      const k5Chs = wifi.K_SPECTRUM_5GHZ_CHANNELS || [36, 40, 44, 48, 52, 64, 100, 116, 132, 149, 153, 157, 161];
 
-    const spectrumSummary = compact
-      ? 'SEC:' + state.latestScan.secureAps + ' OPN:' + state.latestScan.openAps
-      : '2.4GHz CH 1-13 | SEC:' +
-        state.latestScan.secureAps +
-        ' OPEN:' +
-        state.latestScan.openAps;
-
-    const bleDevs = state.bleDevices || [];
-    const subSigs = state.subGhzSignals || [];
-    let bleThreatCnt = 0;
-    for (let i = 0; i < bleDevs.length; i++) {
-      if (bleDevs[i].threat && bleDevs[i].threat !== wifi.BleThreatKind.None) {
-        bleThreatCnt++;
+      if (band24 === 0 && band5 > 0) {
+        let maxChCount = 1;
+        for (let idx = 0; idx < 13; idx++) {
+          if ((counts5[idx] || 0) > maxChCount) {
+            maxChCount = counts5[idx];
+          }
+        }
+        for (let idx = 0; idx < 13; idx++) {
+          const c = counts5[idx] || 0;
+          const barH = c === 0 ? 0 : Math.max(2, Math.trunc((c * chartMaxBarH) / maxChCount));
+          channelBars.push({
+            channel: k5Chs[idx],
+            count: c,
+            heightPx: barH
+          });
+        }
+        let rawSummary = compact
+          ? '5G SEC:' + state.latestScan.secureAps + ' OPN:' + state.latestScan.openAps
+          : '5GHz UNII | SEC:' + state.latestScan.secureAps + ' OPEN:' + state.latestScan.openAps;
+        if (!compact && band6 > 0) {
+          rawSummary += ' 6G:' + band6;
+        }
+        spectrumSummary = truncateText(rawSummary, maxFrameCols);
+      } else {
+        let maxChCount = 1;
+        for (let ch = 1; ch <= 13; ch++) {
+          if ((hist.counts && hist.counts[ch] || 0) > maxChCount) {
+            maxChCount = hist.counts[ch];
+          }
+        }
+        for (let idx = 0; idx < 13; idx++) {
+          const c = (hist.counts && hist.counts[idx + 1]) || 0;
+          const barH = c === 0 ? 0 : Math.max(2, Math.trunc((c * chartMaxBarH) / maxChCount));
+          channelBars.push({
+            channel: idx + 1,
+            count: c,
+            heightPx: barH
+          });
+        }
+        let rawSummary = compact
+          ? 'SEC:' + state.latestScan.secureAps + ' OPN:' + state.latestScan.openAps
+          : '2.4GHz CH 1-13 | SEC:' + state.latestScan.secureAps + ' OPEN:' + state.latestScan.openAps;
+        if (!compact && band5 > 0) {
+          rawSummary += ' 5G:' + band5;
+        }
+        if (!compact && band6 > 0) {
+          rawSummary += ' 6G:' + band6;
+        }
+        spectrumSummary = truncateText(rawSummary, maxFrameCols);
       }
     }
-    const freqStr = wifi.formatFreqMhz(state.subGhzFreqKhz || 433920);
-    const rfGuardSummary = compact
-      ? 'B:' + bleDevs.length + ' T:' + bleThreatCnt + ' ' + freqStr
-      : 'BLE:' + bleDevs.length + ' TAG:' + bleThreatCnt + ' | SUB:' + freqStr;
 
-    const maxGuardRows = Math.max(1, maxRadarRows - 1);
     const rfGuardRows = [];
-    for (let i = 0; i < bleDevs.length && rfGuardRows.length < maxGuardRows; i++) {
-      const d = bleDevs[i];
-      const isThreat = Boolean(d.threat && d.threat !== wifi.BleThreatKind.None);
-      const baseName = d.name || d.mac || 'BLE';
-      const title = isThreat ? '[' + wifi.bleThreatLabel(d.threat) + '] ' + baseName : baseName;
-      rfGuardRows.push({
-        ssid: truncateText(title, maxSsidChars),
-        details: 'BLE ' + d.rssi,
-        bars: wifi.rssiToBars(d.rssi),
-        secure: isThreat
-      });
+    let rfGuardSummary = '';
+    let rfGuardEmptyHint = '';
+    if (onRfGuard) {
+      const bleDevs = state.bleDevices || [];
+      const subSigs = state.subGhzSignals || [];
+      let bleThreatCnt = 0;
+      for (let i = 0; i < bleDevs.length; i++) {
+        if (bleDevs[i].threat && bleDevs[i].threat !== wifi.BleThreatKind.None) {
+          bleThreatCnt++;
+        }
+      }
+      const freqStr = wifi.formatFreqMhz(state.subGhzFreqKhz || 433920);
+      rfGuardSummary = compact
+        ? 'B:' + bleDevs.length + ' T:' + bleThreatCnt + ' ' + freqStr
+        : 'BLE:' + bleDevs.length + ' TAG:' + bleThreatCnt + ' | SUB:' + freqStr;
+
+      const maxGuardRows = Math.max(1, maxRadarRows - 1);
+      for (let i = 0; i < bleDevs.length && rfGuardRows.length < maxGuardRows; i++) {
+        const d = bleDevs[i];
+        const isThreat = Boolean(d.threat && d.threat !== wifi.BleThreatKind.None);
+        const baseName = d.name || d.mac || 'BLE';
+        const title = isThreat ? '[' + wifi.bleThreatLabel(d.threat) + '] ' + baseName : baseName;
+        rfGuardRows.push({
+          ssid: truncateText(title, maxSsidChars),
+          details: 'BLE ' + d.rssi,
+          bars: wifi.rssiToBars(d.rssi),
+          secure: isThreat
+        });
+      }
+      for (let i = 0; i < subSigs.length && rfGuardRows.length < maxGuardRows; i++) {
+        const sig = subSigs[i];
+        const isAnom = Boolean(sig.anomaly && sig.anomaly !== wifi.SubGhzAnomaly.None);
+        const title =
+          wifi.formatFreqMhz(sig.freqKhz) +
+          ' ' +
+          sig.protocol +
+          (isAnom ? ' ' + wifi.subGhzAnomalyLabel(sig.anomaly) : '');
+        rfGuardRows.push({
+          ssid: truncateText(title, maxSsidChars),
+          details: 'SUB ' + sig.rssi,
+          bars: wifi.rssiToBars(sig.rssi),
+          secure: isAnom
+        });
+      }
+      rfGuardEmptyHint = truncateText('RF Guard idle (' + freqStr + ')', maxFrameCols);
     }
-    for (let i = 0; i < subSigs.length && rfGuardRows.length < maxGuardRows; i++) {
-      const sig = subSigs[i];
-      const isAnom = Boolean(sig.anomaly && sig.anomaly !== wifi.SubGhzAnomaly.None);
-      const title =
-        wifi.formatFreqMhz(sig.freqKhz) +
-        ' ' +
-        sig.protocol +
-        (isAnom ? ' ' + wifi.subGhzAnomalyLabel(sig.anomaly) : '');
-      rfGuardRows.push({
-        ssid: truncateText(title, maxSsidChars),
-        details: 'SUB ' + sig.rssi,
-        bars: wifi.rssiToBars(sig.rssi),
-        secure: isAnom
-      });
+
+    let captureSummary = '';
+    let captureRows = [];
+    if (onCaptures) {
+      const bleDevs = state.bleDevices || [];
+      const subSigs = state.subGhzSignals || [];
+      captureSummary = truncateText(
+        compact ? 'SAVED:' + capturesSaved + ' [STORAGE]' : 'CAPTURES SAVED: ' + capturesSaved,
+        maxFrameCols
+      );
+      captureRows = formatCapturePathRows(capturePath, maxFrameCols);
+      captureRows.push(
+        truncateText(
+          'AP:' + state.latestScan.totalAps + ' BLE:' + bleDevs.length + ' SUB:' + subSigs.length,
+          maxFrameCols
+        )
+      );
+      if (!micro) {
+        captureRows.push(truncateText('LAST: ' + (state.lastCaptureLabel || 'Ready'), maxFrameCols));
+      }
+      if (wide) {
+        captureRows.push(
+          truncateText(
+            'RANK: Lv.' + lvlInfo.level + ' ' + lvlInfo.title + ' (HI:' + highScore + (highScoreBeaten ? '!' : '') + ')',
+            maxFrameCols
+          )
+        );
+      }
+      if (!micro && (state.peersMet || 0) > 0) {
+        let frens = 'FRENS: ' + state.peersMet;
+        if (state.lastPeerName) {
+          frens += ' (' + state.lastPeerName + ')';
+        }
+        captureRows.push(truncateText(frens, maxFrameCols));
+      }
     }
-    const rfGuardEmptyHint = truncateText('RF Guard idle (' + freqStr + ')', maxFrameCols);
 
     const toast = buildThemeToast(state, dims, compact, bodyTop, bodyBottom);
 
@@ -511,9 +647,13 @@
       rfGuardRows,
       rfGuardSummary,
       rfGuardEmptyHint,
+      capturesSaved,
+      capturePath,
+      captureSummary,
+      captureRows: Object.freeze(captureRows),
       theme: state.theme,
       themeEffect: themes.themeSpec(state.theme).effect,
-      faceStyle: themes.themeFaceStyle(state.theme),
+      faceStyle,
       animTick: Math.floor((state.uptimeMs >>> 0) / 140),
       toast,
       offensiveArmed: Boolean(state.offensiveArmed),
@@ -525,7 +665,12 @@
       xpProgressPct: lvlInfo.progressPct,
       rankLine,
       scene,
-      threatBanner
+      threatBanner,
+      highScoreBeaten,
+      levelTitle: lvlInfo.title,
+      notifyActive,
+      notifyKind,
+      notifyBanner
     });
   }
 
@@ -576,7 +721,7 @@
           })
           .join(' ');
       out += padLine(countsRow);
-    } else {
+    } else if (frame.page === logic.ScreenPage.RfGuard) {
       out += padLine(frame.rfGuardSummary);
       if (frame.rfGuardRows.length === 0) {
         out += padLine(frame.rfGuardEmptyHint);
@@ -587,6 +732,14 @@
           out += padLine(alertChar + row.ssid + ' ' + row.details);
         }
       }
+    } else {
+      out += padLine(frame.captureSummary);
+      for (let i = 0; i < frame.captureRows.length; i++) {
+        out += padLine(frame.captureRows[i]);
+      }
+    }
+    if (frame.notifyActive && frame.page !== logic.ScreenPage.PetFace && frame.notifyBanner) {
+      out += padLine(frame.notifyBanner);
     }
 
     out += border;
@@ -605,6 +758,7 @@
     formatUptime,
     truncateText,
     wrapWords,
+    formatCapturePathRows,
     buildThemeToast,
     buildUiFrame,
     renderAsciiPreview

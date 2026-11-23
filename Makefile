@@ -3,7 +3,7 @@ CXXFLAGS ?= -std=c++17 -Wall -Wextra -Werror -O2
 HARDEN_CXXFLAGS := -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fstack-clash-protection -Wformat -Wformat-security -fPIE
 HARDEN_LDFLAGS  := -pie -Wl,-z,relro,-z,now -Wl,-z,noexecstack
 INCLUDES := -Icore/include -Irender/include
-LINUX_INCLUDES := $(INCLUDES) -Iplatforms/linux/backend -Iplatforms/linux/app
+LINUX_INCLUDES := $(INCLUDES) -Iplatforms/common -Iplatforms/linux/backend -Iplatforms/linux/app
 BUILD    := build
 
 # Native libpcap capture/injection is optional (mirrors the CMake build): when present we
@@ -31,25 +31,25 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 $(BUILD)/test_functional_core: tests/core/test_functional_core.cpp core/include/zd/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_functional_core.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_functional_core.cpp $(HARDEN_LDFLAGS) -o $@
 
 $(BUILD)/test_painter: tests/render/test_painter.cpp core/include/zd/*.hpp render/include/zd/render/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG $(INCLUDES) tests/render/test_painter.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG $(INCLUDES) tests/render/test_painter.cpp $(HARDEN_LDFLAGS) -o $@
 
 $(BUILD)/test_secops: tests/core/test_secops.cpp core/include/zd/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_secops.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_secops.cpp $(HARDEN_LDFLAGS) -o $@
 
-$(BUILD)/test_linux_parsers: tests/core/test_linux_parsers.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include -Iplatforms/linux/backend tests/core/test_linux_parsers.cpp -o $@
+$(BUILD)/test_linux_parsers: tests/core/test_linux_parsers.cpp core/include/zd/*.hpp platforms/common/*.hpp platforms/linux/backend/*.hpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG -Icore/include -Iplatforms/common -Iplatforms/linux/backend tests/core/test_linux_parsers.cpp $(HARDEN_LDFLAGS) -o $@
 
 $(BUILD)/test_dot11_frames: tests/core/test_dot11_frames.cpp core/include/zd/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_dot11_frames.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG -Icore/include tests/core/test_dot11_frames.cpp $(HARDEN_LDFLAGS) -o $@
 
 $(BUILD)/test_linux_shell: tests/core/test_linux_shell.cpp core/include/zd/*.hpp platforms/linux/backend/*.hpp platforms/linux/app/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -UNDEBUG $(LINUX_INCLUDES) tests/core/test_linux_shell.cpp -lpthread -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -UNDEBUG $(LINUX_INCLUDES) tests/core/test_linux_shell.cpp $(HARDEN_LDFLAGS) -lpthread -o $@
 
 $(BUILD)/test_esp32_common: tests/core/test_esp32_common.cpp core/include/zd/*.hpp platforms/common/*.hpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) -fno-exceptions -fno-rtti -UNDEBUG -Icore/include -Iplatforms/common tests/core/test_esp32_common.cpp -o $@
+	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) -fno-exceptions -fno-rtti -UNDEBUG -Icore/include -Iplatforms/common tests/core/test_esp32_common.cpp $(HARDEN_LDFLAGS) -o $@
 
 $(BUILD)/zd_sim: platforms/native/main.cpp core/include/zd/*.hpp render/include/zd/render/*.hpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(HARDEN_CXXFLAGS) $(INCLUDES) platforms/native/main.cpp $(HARDEN_LDFLAGS) -o $@

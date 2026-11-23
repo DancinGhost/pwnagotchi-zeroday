@@ -54,10 +54,15 @@ inline std::string csvSafeCell(const std::string& raw) {
         }
     }
     if (!clean.empty()) {
-        const char first = clean[0];
-        if (first == '=' || first == '+' || first == '-' || first == '@' ||
-            first == '\t' || first == '\r') {
-            clean.insert(clean.begin(), '\'');
+        std::size_t firstNonWs = 0u;
+        while (firstNonWs < clean.size() && (clean[firstNonWs] == ' ' || clean[firstNonWs] == '\t')) {
+            ++firstNonWs;
+        }
+        if (firstNonWs < clean.size()) {
+            const char first = clean[firstNonWs];
+            if (first == '=' || first == '+' || first == '-' || first == '@') {
+                clean.insert(clean.begin(), '\'');
+            }
         }
     }
     std::string out = "\"";
@@ -100,14 +105,19 @@ inline std::string htmlEscape(const std::string& raw) {
 inline std::string markdownSafeCell(const std::string& raw) {
     const std::string clean = sanitizePrintableText(raw, 96u);
     std::string out;
-    out.reserve(clean.size());
+    out.reserve(clean.size() + 8u);
     for (char c : clean) {
-        if (c == '|') {
-            out += "\\|";
-        } else if (c == '`') {
-            out += "'";
-        } else {
-            out.push_back(c);
+        switch (c) {
+            case '&':  out += "&amp;"; break;
+            case '<':  out += "&lt;"; break;
+            case '>':  out += "&gt;"; break;
+            case '|':  out += "\\|"; break;
+            case '`':  out += "\\`"; break;
+            case '[':  out += "\\["; break;
+            case ']':  out += "\\]"; break;
+            case '(':  out += "\\("; break;
+            case ')':  out += "\\)"; break;
+            default:   out.push_back(c); break;
         }
     }
     return out;
@@ -128,6 +138,8 @@ inline std::string targetCaptureFlags(const WifiTarget& t, bool trusted) {
     if (t.handshake) flags += "HS ";
     if (t.pmkid) flags += "PMKID ";
     if (t.wps) flags += "WPS ";
+    if (t.pmf == PmfStatus::Required) flags += "PMF-REQ ";
+    else if (t.pmf == PmfStatus::Optional) flags += "PMF-OPT ";
     if (!flags.empty() && flags.back() == ' ') {
         flags.pop_back();
     }
@@ -174,20 +186,22 @@ inline std::string formatReport(const SecState& s, ReportFormat fmt, uint32_t no
                    csvSafeCell("STA") + "," + csvSafeCell("probes") + "," +
                    std::to_string(st.probeCount) + "," + csvSafeCell(probed) + "\n";
         }
-        for (const BleTarget& b : s.bleTargets) {
+        const std::vector<BleTarget> bleSorted = bleTargetsByStrength(s);
+        for (const BleTarget& b : bleSorted) {
             out += "ble," + csvSafeCell(b.mac) + "," + csvSafeCell(b.name) + ",2402," +
                    std::to_string(b.rssi) + "," +
                    csvSafeCell(b.threat == BleThreatKind::None ? "BENIGN"
                                                                : bleThreatLabel(b.threat)) +
-                   "," + std::to_string(b.companyId) + "," + std::to_string(b.seenCount) + "," +
-                   csvSafeCell("uuid=" + std::to_string(b.serviceUuid)) + "\n";
+                   "," + csvSafeCell(bleVendorOrOuiLabel(b.companyId, b.mac)) + "," +
+                   std::to_string(b.seenCount) + "," +
+                   csvSafeCell("svc=" + bleServiceLabel(b.serviceUuid)) + "\n";
         }
         for (const SubGhzCapture& sub : s.subGhzCaptures) {
             out += "subghz," + csvSafeCell(formatFreqMhz(sub.freqKhz)) + "," +
                    csvSafeCell(sub.protocol) + "," + std::to_string(sub.freqKhz) + "," +
                    std::to_string(sub.rssi) + "," +
                    csvSafeCell(sub.continuousCarrier ? "JAMMER"
-                                                     : (sub.burstCount >= 6u ? "REPLAY" : "RX")) +
+                                                     : (sub.burstCount >= 5u ? "REPLAY" : "RX")) +
                    "," + csvSafeCell(sub.continuousCarrier ? "carrier" : "pulse") + "," +
                    std::to_string(sub.burstCount) + ",\n";
         }
@@ -258,10 +272,14 @@ inline std::string formatReport(const SecState& s, ReportFormat fmt, uint32_t no
 
         if (!s.bleTargets.empty() || !s.subGhzCaptures.empty()) {
             out += "## RF Guard (BLE & Sub-GHz)\n\n";
-            for (const BleTarget& b : s.bleTargets) {
+            const std::vector<BleTarget> bleSorted = bleTargetsByStrength(s);
+            for (const BleTarget& b : bleSorted) {
                 out += "- **BLE** `" + markdownSafeCell(b.mac) + "` " +
                        markdownSafeCell(b.name.empty() ? "Unnamed" : b.name) + " (" +
-                       std::to_string(b.rssi) + " dBm)" +
+                       std::to_string(b.rssi) + " dBm, vendor=" +
+                       markdownSafeCell(bleVendorOrOuiLabel(b.companyId, b.mac)) + ", svc=" +
+                       markdownSafeCell(bleServiceLabel(b.serviceUuid)) + ", seen=" +
+                       std::to_string(b.seenCount) + ")" +
                        (b.threat != BleThreatKind::None
                             ? (" **[" + std::string(bleThreatLabel(b.threat)) + "]**")
                             : "") +
@@ -271,7 +289,9 @@ inline std::string formatReport(const SecState& s, ReportFormat fmt, uint32_t no
                 out += "- **Sub-GHz** `" + formatFreqMhz(sub.freqKhz) + "` " +
                        markdownSafeCell(sub.protocol) + " (" + std::to_string(sub.rssi) +
                        " dBm, bursts=" + std::to_string(sub.burstCount) +
-                       (sub.continuousCarrier ? ", **JAMMER**" : "") + ")\n";
+                       (sub.continuousCarrier ? ", **JAMMER**"
+                                              : (sub.burstCount >= 5u ? ", **REPLAY**" : "")) +
+                       ")\n";
             }
             out += "\n";
         }
@@ -358,6 +378,44 @@ inline std::string formatReport(const SecState& s, ReportFormat fmt, uint32_t no
                     htmlEscape(st.lastBssid.empty() ? "-" : st.lastBssid) + "</code></td><td>" +
                     std::to_string(st.probeCount) + "</td><td>" +
                     htmlEscape(probed.empty() ? "-" : probed) + "</td></tr>";
+        }
+        html += "</tbody></table>";
+    }
+
+    if (!s.bleTargets.empty()) {
+        html += "<h2>Bluetooth / BLE Devices</h2><table><thead><tr>"
+                "<th>MAC</th><th>Name</th><th>RSSI</th><th>Vendor</th>"
+                "<th>Service</th><th>Threat</th><th>Seen</th></tr></thead><tbody>";
+        for (const BleTarget& b : bleTargetsByStrength(s)) {
+            const char* cls = (b.threat != BleThreatKind::None) ? " class=\"warn\"" : "";
+            html += "<tr><td><code>" + htmlEscape(b.mac) + "</code></td><td>" +
+                    htmlEscape(b.name.empty() ? "-" : b.name) + "</td><td>" +
+                    std::to_string(b.rssi) + " dBm</td><td>" +
+                    htmlEscape(bleVendorOrOuiLabel(b.companyId, b.mac)) + "</td><td>" +
+                    htmlEscape(bleServiceLabel(b.serviceUuid)) + "</td><td" + cls + ">" +
+                    htmlEscape(b.threat == BleThreatKind::None ? "BENIGN"
+                                                               : bleThreatLabel(b.threat)) +
+                    "</td><td>" + std::to_string(b.seenCount) + "</td></tr>";
+        }
+        html += "</tbody></table>";
+    }
+
+    if (!s.subGhzCaptures.empty()) {
+        html += "<h2>Sub-GHz Captures</h2><table><thead><tr>"
+                "<th>Frequency</th><th>Protocol</th><th>RSSI</th><th>Bursts</th><th>Status</th>"
+                "</tr></thead><tbody>";
+        for (const SubGhzCapture& sub : s.subGhzCaptures) {
+            const bool alert = sub.continuousCarrier || sub.burstCount >= 5u;
+            const char* cls = sub.continuousCarrier ? " class=\"crit\""
+                                                    : (alert ? " class=\"warn\"" : "");
+            const std::string status = sub.continuousCarrier
+                                           ? "JAMMER"
+                                           : (sub.burstCount >= 5u ? "REPLAY" : "RX");
+            html += "<tr><td><code>" + htmlEscape(formatFreqMhz(sub.freqKhz)) + "</code></td><td>" +
+                    htmlEscape(sub.protocol.empty() ? "-" : sub.protocol) + "</td><td>" +
+                    std::to_string(sub.rssi) + " dBm</td><td>" +
+                    std::to_string(sub.burstCount) + "</td><td" + cls + ">" +
+                    htmlEscape(status) + "</td></tr>";
         }
         html += "</tbody></table>";
     }

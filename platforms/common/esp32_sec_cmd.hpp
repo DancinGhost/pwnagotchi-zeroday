@@ -29,6 +29,7 @@ public:
     virtual ~IAuditCounters() = default;
     virtual unsigned long transmittedTotal() const = 0;
     virtual unsigned long blockedTotal() const = 0;
+    virtual unsigned long pmkidProbeTotal() const { return 0u; }
 };
 
 class OffensiveConsoleCore {
@@ -105,8 +106,10 @@ public:
                                    "To confirm: sec arm ") +
                        kArmToken + "\n";
             }
+            if (!audit_.record("ARM operatorConfirmed=true")) {
+                return "BLOCKED: audit log unavailable; refusing to arm\n";
+            }
             session_.authorization().operatorConfirmed = true;
-            (void)audit_.record("ARM operatorConfirmed=true");
             return "ARMED. Gate still requires each target on the allow-list. `sec disarm` to revert.\n";
         }
         if (sub == "disarm") {
@@ -116,6 +119,9 @@ public:
         }
         if (sub == "deauth") {
             return deauth(tok, nowMs);
+        }
+        if (sub == "pmkid") {
+            return pmkidProbe(tok, nowMs);
         }
         return "unknown subcommand '" + sub + "'\n" + help();
     }
@@ -148,7 +154,9 @@ private:
                "  sec deny  <bssid>          remove a BSSID from the allow-list\n"
                "  sec arm I-HAVE-AUTHORIZATION  confirm authorization (required to transmit)\n"
                "  sec disarm                 revoke authorization\n"
-               "  sec deauth <bssid> [count] [client] transmit deauth (gated; allow-listed + armed)\n";
+               "  sec deauth <bssid> [count] [client] transmit deauth (gated; allow-listed + armed)\n"
+               "  sec pmkid  <bssid> [count]  clientless PMKID probe (gated; WPA2 only — use\n"
+               "                              deauth for WPA3-SAE/PMF, which has no PMKID)\n";
     }
 
     std::string status() const {
@@ -166,7 +174,8 @@ private:
         if (counters_ != nullptr) {
             out += "\n  durable counters: deauth_tx=" +
                    std::to_string(counters_->transmittedTotal()) +
-                   " deauth_blk=" + std::to_string(counters_->blockedTotal());
+                   " deauth_blk=" + std::to_string(counters_->blockedTotal()) +
+                   " pmkid_tx=" + std::to_string(counters_->pmkidProbeTotal());
         }
         out += "\n";
         return out;
@@ -202,6 +211,32 @@ private:
                    "\n  (need: sec allow " + bssid + "  then  sec arm " + kArmToken + ")\n";
         }
         return std::string(r.transmitted ? "OK: " : "TX-FAIL: ") + r.detail + "\n";
+    }
+
+    std::string pmkidProbe(const std::vector<std::string>& tok, uint32_t nowMs) {
+        if (tok.size() < 3 || !zd::sec::isValidMac(tok[2]) || zd::sec::isMulticastMac(tok[2])) {
+            return "usage: sec pmkid <unicast-bssid> [count 1-64]\n";
+        }
+        const std::string bssid = zd::sec::normalizeMac(tok[2]);
+        uint32_t reqCount = 4u;
+        if (tok.size() >= 4 && !parseStrictBurstCount(tok[3], reqCount)) {
+            return "invalid count '" + tok[3] + "' (must be 1..64)\n";
+        }
+        const zd::sec::WifiTarget* t = zd::sec::findTarget(session_.state(), bssid);
+        if (t == nullptr) {
+            return "unknown BSSID " + bssid + " — run `sec scan` first\n";
+        }
+        injector_.setChannel(t->channel);
+
+        const zd::sec::InjectResult r =
+            session_.requestPmkidProbe(injector_, bssid, t->ssid, reqCount, nowMs, &audit_);
+        if (r.decision != zd::sec::AuthDecision::Allowed) {
+            return std::string("BLOCKED: ") + zd::sec::authDecisionLabel(r.decision) +
+                   "\n  (need: sec allow " + bssid + "  then  sec arm " + kArmToken + ")\n";
+        }
+        return std::string(r.transmitted ? "OK: " : "TX-FAIL: ") + r.detail +
+               "\n  clientless probe sent; watch for a captured PMKID. On WPA3-SAE/PMF a PMKID\n"
+               "  is unavailable — use `sec deauth " + bssid + "` there instead.\n";
     }
 
     IOffensiveChannelInjector& injector_;

@@ -106,11 +106,11 @@ constexpr FaceDescriptor faceForMood(Mood mood) {
 
 // Pure cycle helpers for screen pages. (Theme cycling lives in theme.hpp: nextTheme/prevTheme.)
 constexpr bool isValidPage(ScreenPage p) {
-    return static_cast<uint8_t>(p) <= static_cast<uint8_t>(ScreenPage::RfGuard);
+    return static_cast<uint8_t>(p) <= static_cast<uint8_t>(ScreenPage::Captures);
 }
 
 constexpr ScreenPage cyclePage(ScreenPage current, int step) {
-    constexpr int kPageCount = 4;
+    constexpr int kPageCount = 5;
     const int base = isValidPage(current) ? static_cast<int>(current) : 0;
     const int idx = ((base + (step % kPageCount)) % kPageCount + kPageCount) % kPageCount;
     return static_cast<ScreenPage>(idx);
@@ -312,6 +312,8 @@ inline fp::RngPick<std::string> selectPhrase(Mood mood, const ScanSummary& scan,
 struct LevelInfo {
     uint8_t level;
     const char* title;
+    const char* badge;
+    uint32_t minXp;
     uint32_t xp;
     uint32_t nextXp;
     uint8_t progressPct;
@@ -322,18 +324,19 @@ constexpr LevelInfo deriveLevelInfo(uint32_t xp) {
         uint8_t level;
         uint32_t minXp;
         const char* title;
+        const char* badge;
     };
     constexpr std::array<Tier, 10> kTiers = {{
-        {1u, 0u,    "Packet Sprout"},
-        {2u, 40u,   "Beacon Pup"},
-        {3u, 110u,  "Channel Surfer"},
-        {4u, 220u,  "Frame Ninja"},
-        {5u, 380u,  "Spectrum Scout"},
-        {6u, 600u,  "BLE Tracker"},
-        {7u, 900u,  "SubGHz Stalker"},
-        {8u, 1300u, "RF Sentinel"},
-        {9u, 1850u, "802.11 Wizard"},
-        {10u, 2500u, "ZeroDay Legend"},
+        {1u, 0u,    "Packet Sprout",  "SPRT"},
+        {2u, 40u,   "Beacon Pup",     "BPUP"},
+        {3u, 110u,  "Channel Surfer", "SURF"},
+        {4u, 220u,  "Frame Ninja",    "NINJ"},
+        {5u, 380u,  "Spectrum Scout", "SCOT"},
+        {6u, 600u,  "BLE Tracker",    "BTRK"},
+        {7u, 900u,  "SubGHz Stalker", "SUBG"},
+        {8u, 1300u, "RF Sentinel",    "SENT"},
+        {9u, 1850u, "802.11 Wizard",  "WIZD"},
+        {10u, 2500u, "ZeroDay Legend","LGND"},
     }};
     Tier current = kTiers[0];
     std::size_t nextIdx = 1u;
@@ -344,7 +347,8 @@ constexpr LevelInfo deriveLevelInfo(uint32_t xp) {
         }
     }
     if (nextIdx >= kTiers.size()) {
-        return LevelInfo{current.level, current.title, xp, current.minXp, 100u};
+        return LevelInfo{current.level, current.title, current.badge, current.minXp,
+                         xp, current.minXp, 100u};
     }
     const uint32_t nextMin = kTiers[nextIdx].minXp;
     const uint32_t span = nextMin - current.minXp;
@@ -352,17 +356,98 @@ constexpr LevelInfo deriveLevelInfo(uint32_t xp) {
     return LevelInfo{
         current.level,
         current.title,
+        current.badge,
+        current.minXp,
         xp,
         nextMin,
         static_cast<uint8_t>(pct > 100u ? 100u : pct)
     };
 }
 
+constexpr uint8_t notifyPriority(NotifyKind kind) {
+    switch (kind) {
+        case NotifyKind::LevelUp:      return 5u;
+        case NotifyKind::ThreatAlert:  return 4u;
+        case NotifyKind::NewHighScore: return 3u;
+        case NotifyKind::CaptureSaved: return 2u;
+        case NotifyKind::Milestone:    return 1u;
+        case NotifyKind::None:         break;
+    }
+    return 0u;
+}
+
+inline std::string shortCapturePath(const std::string& path) {
+    if (path.empty()) {
+        return "capture";
+    }
+    const std::size_t slash = path.rfind('/');
+    if (slash != std::string::npos && slash + 1u < path.size()) {
+        return path.substr(slash + 1u);
+    }
+    return path;
+}
+
+inline void pushNotification(AppState& s,
+                             NotifyKind kind,
+                             std::string text,
+                             uint32_t nowMs,
+                             uint32_t durationMs = 2600u) {
+    if (kind == NotifyKind::None || text.empty()) {
+        return;
+    }
+    if (isThemeToastVisible(s.notifyUntilMs, nowMs) &&
+        (s.notifyKind == NotifyKind::LevelUp || s.notifyKind == NotifyKind::ThreatAlert) &&
+        notifyPriority(kind) < notifyPriority(s.notifyKind)) {
+        return;
+    }
+    s.notifyKind = kind;
+    s.notifyText = std::move(text);
+    uint32_t until = nowMs + durationMs;
+    if (until == 0u) {
+        until = 1u;
+    }
+    s.notifyUntilMs = until;
+}
+
+// Sanitize an advertised peer name for display: keep printable ASCII (0x20..0x7E), clamp to
+// 16 chars, and fall back to "unit-404" when nothing usable remains. Peer names arrive over
+// the air from untrusted units, so this never trusts the bytes. Mirrors the web port's
+// sanitizePetName() clamp used for PeerSpotted.
+inline std::string sanitizePeerName(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size() < 16u ? raw.size() : 16u);
+    for (char c : raw) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u >= 0x20u && u <= 0x7Eu) {
+            out.push_back(c);
+            if (out.size() >= 16u) {
+                break;
+            }
+        }
+    }
+    // Trim trailing spaces so a padded name doesn't render ragged.
+    while (!out.empty() && out.back() == ' ') {
+        out.pop_back();
+    }
+    if (out.empty()) {
+        out = "unit-404";
+    }
+    return out;
+}
+
 inline void awardXp(AppState& next, uint32_t gain, uint32_t nowMs) {
     const uint8_t prevLevel = next.level;
+    const uint32_t prevHi = next.highScore;
     next.xp += gain;
     if (next.xp > next.highScore) {
         next.highScore = next.xp;
+    }
+    if (next.highScoreBaseline > 0u && !next.highScoreBeaten &&
+        next.xp > next.highScoreBaseline && next.xp > prevHi) {
+        next.highScoreBeaten = true;
+        pushNotification(next, NotifyKind::NewHighScore,
+                         "NEW HI-SCORE! " + std::to_string(next.highScore) + " XP",
+                         nowMs, 2500u);
     }
     const LevelInfo info = deriveLevelInfo(next.xp);
     next.level = info.level;
@@ -372,6 +457,9 @@ inline void awardXp(AppState& next, uint32_t gain, uint32_t nowMs) {
             until = 1u;
         }
         next.levelUpUntilMs = until;
+        pushNotification(next, NotifyKind::LevelUp,
+                         "LVL UP! Lv." + std::to_string(info.level) + " " + info.title,
+                         nowMs, 2800u);
     }
 }
 
@@ -387,6 +475,12 @@ constexpr OpsMode cycleOpsMode(OpsMode current) {
 constexpr Mood idleMoodForState(const AppState& s) {
     if (s.offensiveArmed || s.opsMode == OpsMode::Offensive) {
         return Mood::CyberAttack;
+    }
+    if (s.secMood == SecMood::Alarmed) {
+        return Mood::ThreatAlert;
+    }
+    if (s.secMood == SecMood::Watchful) {
+        return Mood::ShieldGuard;
     }
     if (s.opsMode == OpsMode::Defensive) {
         return !s.lastThreatLabel.empty() ? Mood::ThreatAlert : Mood::ShieldGuard;
@@ -512,6 +606,7 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                     if (elapsed < 0x80000000u && elapsed >= kThreatDisplayTimeoutMs) {
                         next.lastThreatLabel.clear();
                         next.lastThreatMs = 0u;
+                        next.secMood = SecMood::Calm;
                         if (!next.isScanning && next.mood == Mood::ThreatAlert) {
                             next.mood = idleMoodForState(next);
                             const auto picked =
@@ -521,6 +616,13 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                             next.lastPhraseChangeMs = ev.nowMs;
                         }
                     }
+                }
+
+                // Auto-expire transient pet notification banners.
+                if (next.notifyUntilMs != 0u && !isThemeToastVisible(next.notifyUntilMs, ev.nowMs)) {
+                    next.notifyKind = NotifyKind::None;
+                    next.notifyText.clear();
+                    next.notifyUntilMs = 0u;
                 }
 
                 if (next.isScanning) {
@@ -547,6 +649,10 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 } else if (next.mood == Mood::LevelUp) {
                     next.levelUpUntilMs = 0u;
                     next.mood = idleMoodForState(next);
+                    const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                    next.phrase = picked.value;
+                    next.rngSeed = picked.nextSeed;
+                    next.lastPhraseChangeMs = ev.nowMs;
                 }
 
                 // Transition to Sleepy if idle >= 60s in a quiet WiFi area (Recon mode only).
@@ -698,7 +804,16 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                     next.threatsDetected += threatCount;
                     next.lastThreatLabel = topThreat;
                     next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    next.capturesSaved += threatCount;
+                    next.lastCaptureLabel = topThreat;
+                    next.lastCaptureMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
                     awardXp(next, 25u, ev.nowMs);
+                    pushNotification(next, NotifyKind::CaptureSaved,
+                                     "SAVED #" + std::to_string(next.capturesSaved) + " -> " +
+                                         shortCapturePath(next.capturePath),
+                                     ev.nowMs, 2400u);
+                    pushNotification(next, NotifyKind::ThreatAlert, "ALERT! " + topThreat,
+                                     ev.nowMs, 3000u);
                     if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
                         !next.offensiveArmed) {
                         next.mood = Mood::ThreatAlert;
@@ -719,6 +834,10 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 if (next.subGhzSignals.size() > 12u) {
                     next.subGhzSignals.resize(12u);
                 }
+                next.capturesSaved += 1u;
+                next.lastCaptureLabel =
+                    formatFreqMhz(ev.signal.freqKhz) + " " + ev.signal.protocol;
+                next.lastCaptureMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
                 if (ev.signal.anomaly != SubGhzAnomaly::None) {
                     next.threatsDetected += 1u;
                     next.lastThreatLabel =
@@ -726,6 +845,8 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                         subGhzAnomalyLabel(ev.signal.anomaly);
                     next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
                     awardXp(next, 25u, ev.nowMs);
+                    pushNotification(next, NotifyKind::ThreatAlert,
+                                     "ALERT! " + next.lastThreatLabel, ev.nowMs, 3000u);
                     if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
                         !next.offensiveArmed) {
                         next.mood = Mood::ThreatAlert;
@@ -734,6 +855,10 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                     }
                 } else {
                     awardXp(next, 10u, ev.nowMs);
+                    pushNotification(next, NotifyKind::CaptureSaved,
+                                     "SAVED #" + std::to_string(next.capturesSaved) + " -> " +
+                                         shortCapturePath(next.capturePath),
+                                     ev.nowMs, 2400u);
                 }
                 return next;
             },
@@ -759,6 +884,9 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 }
                 if (ev.highScore > next.highScore) {
                     next.highScore = ev.highScore;
+                    if (next.highScoreBaseline == 0u) {
+                        next.highScoreBaseline = ev.highScore;
+                    }
                 }
                 if (next.xp > next.highScore) {
                     next.highScore = next.xp;
@@ -772,12 +900,50 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 next.lastInteractionMs = ev.nowMs;
                 next.lastThreatLabel.clear();
                 next.lastThreatMs = 0u;
+                next.secMood = SecMood::Calm;
+                if (next.notifyKind == NotifyKind::ThreatAlert) {
+                    next.notifyKind = NotifyKind::None;
+                    next.notifyText.clear();
+                    next.notifyUntilMs = 0u;
+                }
                 if (!next.isScanning) {
                     next.mood = idleMoodForState(next);
                     const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
                     next.phrase = picked.value;
                     next.rngSeed = picked.nextSeed;
                     next.lastPhraseChangeMs = ev.nowMs;
+                }
+                return next;
+            },
+
+            [&](const CaptureSavedEvent& ev) -> AppState {
+                AppState next = std::move(state);
+                next.uptimeMs = ev.nowMs;
+                if (!ev.path.empty()) {
+                    next.capturePath = ev.path;
+                }
+                if (!ev.label.empty()) {
+                    next.lastCaptureLabel = ev.label;
+                }
+                if (ev.addedCount > 0u) {
+                    next.capturesSaved += ev.addedCount;
+                    next.lastCaptureMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    const uint8_t prevLevel = next.level;
+                    const uint32_t xpGain = 15u * (std::min)(ev.addedCount, uint32_t{4});
+                    awardXp(next, xpGain, ev.nowMs);
+                    if (ev.notify) {
+                        pushNotification(next, NotifyKind::CaptureSaved,
+                                         "SAVED #" + std::to_string(next.capturesSaved) + " -> " +
+                                             shortCapturePath(next.capturePath),
+                                         ev.nowMs, 2400u);
+                    }
+                    if (next.level > prevLevel) {
+                        const LevelInfo lvlInfo = deriveLevelInfo(next.xp);
+                        next.mood = Mood::LevelUp;
+                        next.phrase = "LEVEL UP! Lv." + std::to_string(lvlInfo.level) + " " +
+                                      lvlInfo.title + "!";
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
                 }
                 return next;
             },
@@ -792,6 +958,20 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 if (next.latestScan.totalAps > next.peakApCount) {
                     next.peakApCount = static_cast<uint32_t>(next.latestScan.totalAps);
                 }
+                if (!ev.capturePath.empty()) {
+                    next.capturePath = ev.capturePath;
+                }
+                if (!ev.lastCaptureLabel.empty()) {
+                    next.lastCaptureLabel = ev.lastCaptureLabel;
+                }
+                if (ev.capturesSaved > next.capturesSaved) {
+                    next.capturesSaved = ev.capturesSaved;
+                    next.lastCaptureMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    pushNotification(next, NotifyKind::CaptureSaved,
+                                     "SAVED #" + std::to_string(next.capturesSaved) + " -> " +
+                                         shortCapturePath(next.capturePath),
+                                     ev.nowMs, 2400u);
+                }
                 next.bleDevices.clear();
                 next.bleDevices.reserve(ev.bleDevices.size());
                 for (BleDevice d : ev.bleDevices) {
@@ -802,12 +982,19 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                     next.bleDevices.push_back(std::move(d));
                 }
                 sortAndCapBleDevices(next.bleDevices);
+                next.secMood = ev.secMood;
+                if (ev.secMood == SecMood::Calm && ev.topThreatLabel.empty()) {
+                    next.lastThreatLabel.clear();
+                    next.lastThreatMs = 0u;
+                }
                 if (ev.threatCount > next.threatsDetected) {
                     next.threatsDetected = ev.threatCount;
                 }
                 if (!ev.topThreatLabel.empty() && ev.topThreatLabel != next.lastThreatLabel) {
                     next.lastThreatLabel = ev.topThreatLabel;
                     next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                    pushNotification(next, NotifyKind::ThreatAlert,
+                                     "ALERT! " + ev.topThreatLabel, ev.nowMs, 3000u);
                     if (!next.isScanning && next.opsMode != OpsMode::Offensive &&
                         !next.offensiveArmed) {
                         next.mood = Mood::ThreatAlert;
@@ -815,7 +1002,8 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                         next.lastPhraseChangeMs = ev.nowMs;
                     }
                 } else if (!next.isScanning && next.mood != Mood::LevelUp &&
-                           next.mood != Mood::ThreatAlert) {
+                           (next.mood != Mood::ThreatAlert ||
+                            (ev.secMood != SecMood::Alarmed && next.lastThreatLabel.empty()))) {
                     const Mood targetMood = idleMoodForState(next);
                     if (targetMood != next.mood) {
                         next.mood = targetMood;
@@ -826,6 +1014,87 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                         next.lastPhraseChangeMs = ev.nowMs;
                     }
                 }
+                return next;
+            },
+
+            [&](const SetSecMoodEvent& ev) -> AppState {
+                AppState next = std::move(state);
+                next.uptimeMs = ev.nowMs;
+                next.secMood = ev.mood;
+                if (ev.mood == SecMood::Alarmed) {
+                    if (!ev.detail.empty()) {
+                        next.lastThreatLabel = ev.detail;
+                        next.lastThreatMs = (ev.nowMs == 0u) ? 1u : ev.nowMs;
+                        pushNotification(next, NotifyKind::ThreatAlert,
+                                         "ALERT! " + ev.detail, ev.nowMs, 3000u);
+                    }
+                    if (!next.isScanning && !next.offensiveArmed &&
+                        next.opsMode != OpsMode::Offensive) {
+                        next.mood = Mood::ThreatAlert;
+                        if (ev.detail.empty()) {
+                            const auto picked =
+                                selectPhrase(Mood::ThreatAlert, next.latestScan, next.rngSeed);
+                            next.phrase = picked.value;
+                            next.rngSeed = picked.nextSeed;
+                        } else {
+                            next.phrase = "ALERT! " + ev.detail;
+                        }
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
+                } else if (ev.mood == SecMood::Watchful) {
+                    if (!next.isScanning && !next.offensiveArmed &&
+                        next.opsMode != OpsMode::Offensive && next.mood != Mood::LevelUp) {
+                        next.mood = Mood::ShieldGuard;
+                        if (ev.detail.empty()) {
+                            const auto picked =
+                                selectPhrase(Mood::ShieldGuard, next.latestScan, next.rngSeed);
+                            next.phrase = picked.value;
+                            next.rngSeed = picked.nextSeed;
+                        } else {
+                            next.phrase = "WATCHFUL: " + ev.detail;
+                        }
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
+                } else {
+                    if (ev.detail.empty()) {
+                        next.lastThreatLabel.clear();
+                        next.lastThreatMs = 0u;
+                    }
+                    if (!next.isScanning && next.mood != Mood::LevelUp) {
+                        next.mood = idleMoodForState(next);
+                        const auto picked =
+                            selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                        next.phrase = picked.value;
+                        next.rngSeed = picked.nextSeed;
+                        next.lastPhraseChangeMs = ev.nowMs;
+                    }
+                }
+                return next;
+            },
+
+            [&](const PeerSpottedEvent& ev) -> AppState {
+                AppState next = std::move(state);
+                next.uptimeMs = ev.nowMs;
+                next.lastInteractionMs = ev.nowMs;
+                const std::string peer = sanitizePeerName(ev.peerName);
+                next.peersMet += 1u;
+                next.lastPeerName = peer;
+                // Social greeting: a friendly beacon, not a threat. Don't interrupt an active
+                // scan or an armed/offensive session or a level-up celebration.
+                if (!next.isScanning && next.mood != Mood::LevelUp && !next.offensiveArmed &&
+                    next.opsMode != OpsMode::Offensive) {
+                    next.page = ScreenPage::PetFace;
+                    next.mood = Mood::Excited;
+                    const std::array<std::string, 3> phrases = {
+                        "OMG! Peer [" + peer + "] (" + std::to_string(ev.peerRssi) + "dB) waved hi!",
+                        "New fren! [" + peer + "] is chirping nearby!",
+                        "Synced memes with peer [" + peer + "]!"};
+                    const auto picked = fp::pickFrom(fp::nextSeed(next.rngSeed), phrases);
+                    next.phrase = picked.value;
+                    next.rngSeed = picked.nextSeed;
+                    next.lastPhraseChangeMs = ev.nowMs;
+                }
+                awardXp(next, 20u, ev.nowMs);
                 return next;
             },
 
@@ -854,18 +1123,34 @@ inline AppState reduce(AppState state, const AppEvent& event) {
                 next.lastScanCompleteMs = ev.nowMs;
                 next.completedScans = next.completedScans + 1u;
                 next.latestScan = summarizeScan(ev.rawNetworks, 12u);
+                const uint32_t prevPeak = next.peakApCount;
+                const uint8_t prevLevel = next.level;
                 if (next.latestScan.totalAps > next.peakApCount) {
                     next.peakApCount = static_cast<uint32_t>(next.latestScan.totalAps);
+                }
+                if (prevPeak > 0u && next.latestScan.totalAps > prevPeak) {
+                    pushNotification(next, NotifyKind::Milestone,
+                                     "PEAK APs! " + std::to_string(next.peakApCount) + " networks",
+                                     ev.nowMs, 2200u);
                 }
                 const uint32_t apBonus = static_cast<uint32_t>(next.latestScan.totalAps / 2u);
                 const uint32_t xpGain =
                     (next.latestScan.totalAps > 0u) ? (3u + (apBonus > 12u ? 12u : apBonus)) : 1u;
                 awardXp(next, xpGain, ev.nowMs);
-                next.mood = idleMoodForState(next);
-                const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
-                next.phrase = picked.value;
-                next.rngSeed = picked.nextSeed;
-                next.lastPhraseChangeMs = ev.nowMs;
+                if (next.level > prevLevel) {
+                    const LevelInfo lvlInfo = deriveLevelInfo(next.xp);
+                    next.mood = Mood::LevelUp;
+                    next.phrase = "LEVEL UP! Lv." + std::to_string(lvlInfo.level) + " " +
+                                  lvlInfo.title + "!";
+                    next.rngSeed = fp::nextSeed(next.rngSeed);
+                    next.lastPhraseChangeMs = ev.nowMs;
+                } else {
+                    next.mood = idleMoodForState(next);
+                    const auto picked = selectPhrase(next.mood, next.latestScan, next.rngSeed);
+                    next.phrase = picked.value;
+                    next.rngSeed = picked.nextSeed;
+                    next.lastPhraseChangeMs = ev.nowMs;
+                }
                 return next;
             }
         },

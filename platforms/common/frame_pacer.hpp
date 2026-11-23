@@ -22,6 +22,7 @@ class DirtyFramePacer {
 public:
     bool shouldRender(const zd::AppState& st, uint32_t nowMs) {
         const bool toastVisible = zd::isThemeToastVisible(st.themeToastUntilMs, nowMs);
+        const bool notifyVisible = zd::isThemeToastVisible(st.notifyUntilMs, nowMs);
         const bool hasEffect = zd::themeSpec(st.theme).effect != zd::ThemeEffect::None;
         const uint32_t animTick = nowMs / 140u;
 
@@ -34,9 +35,16 @@ public:
             st.highScore != lastHighScore_ || st.threatsDetected != lastThreats_ ||
             st.lastThreatLabel != lastThreatLabel_ || st.subGhzFreqKhz != lastSubGhzFreq_ ||
             st.bleDevices.size() != lastBleCount_ ||
-            st.subGhzSignals.size() != lastSubGhzCount_ || toastVisible != lastToastVisible_;
+            st.subGhzSignals.size() != lastSubGhzCount_ ||
+            st.capturesSaved != lastCapturesSaved_ ||
+            st.capturePath != lastCapturePath_ ||
+            notifyVisible != lastNotifyVisible_ ||
+            st.notifyText != lastNotifyText_ ||
+            toastVisible != lastToastVisible_;
 
-        const bool hasPetIdleAnim = (st.page == zd::ScreenPage::PetFace);
+        const bool hasPetIdleAnim =
+            (st.page == zd::ScreenPage::PetFace &&
+             zd::themeFaceStyle(st.theme) == zd::FaceStyle::PixelArtMascot);
         const bool hasSceneAnim = st.isScanning || st.offensiveArmed ||
                                   st.opsMode != zd::OpsMode::Recon ||
                                   st.mood == zd::Mood::ThreatAlert ||
@@ -73,6 +81,10 @@ public:
         lastSubGhzFreq_ = st.subGhzFreqKhz;
         lastBleCount_ = st.bleDevices.size();
         lastSubGhzCount_ = st.subGhzSignals.size();
+        lastCapturesSaved_ = st.capturesSaved;
+        lastCapturePath_ = st.capturePath;
+        lastNotifyVisible_ = notifyVisible;
+        lastNotifyText_ = st.notifyText;
         lastToastVisible_ = toastVisible;
         lastAnimTick_ = animTick;
         lastScanAnimTick_ = st.scanAnimTick;
@@ -95,14 +107,18 @@ private:
     uint32_t lastSubGhzFreq_ = 433920u;
     std::size_t lastBleCount_ = 0;
     std::size_t lastSubGhzCount_ = 0;
+    uint32_t lastCapturesSaved_ = 0;
     int32_t lastBat_ = -1;
     bool lastCharging_ = false;
     bool lastArmed_ = false;
+    bool lastNotifyVisible_ = false;
     bool lastToastVisible_ = false;
     uint32_t lastAnimTick_ = 0;
     uint8_t lastScanAnimTick_ = 0;
     std::string lastPhrase_;
     std::string lastThreatLabel_;
+    std::string lastCapturePath_;
+    std::string lastNotifyText_;
 };
 
 }  // namespace esp32_common

@@ -14,6 +14,7 @@ required by, the distributed binaries**. Each remains under its own license.
 | M5Unified (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5Unified |
 | M5GFX (M5Stack targets) | MIT, Copyright (c) 2021 M5Stack | https://github.com/m5stack/M5GFX |
 | LovyanGFX (T-Deck & CYD targets) | FreeBSD (BSD-2-Clause); incorporates Adafruit_GFX (BSD) and Adafruit_ILI9341 (MIT); bundled fonts under their own licenses | https://github.com/lovyan03/LovyanGFX |
+| RadioLib (opt-in `t-deck-lora` target only) | MIT, Copyright (c) 2018 Jan Gromeš | https://github.com/jgromes/RadioLib |
 
 **LGPL notice (Arduino-ESP32):** the firmware images statically link the Arduino core for
 ESP32. The complete corresponding source of this project (MIT) and the upstream library
@@ -77,17 +78,20 @@ under the **BSD-2-Clause License**:
 ## Trademarks
 
 "Pwnagotchi" refers to the original open-source project by evilsocket
-(https://github.com/evilsocket/pwnagotchi, GPL-3.0); this project is an independent
-clean-room C++17/JS implementation inspired by it and is not affiliated with or endorsed by it.
+(https://github.com/evilsocket/pwnagotchi, GPL-3.0), and "Palnagotchi" refers to the
+open-source ESP32 peer-compatible project; this project is an independent clean-room
+C++17/JS implementation inspired by it and is not affiliated with or endorsed by either.
 Tamagotchi is a registered trademark of Bandai; Wi-Fi is a registered trademark of Wi-Fi
 Alliance; LoRa is a registered trademark of Semtech Corporation; Linux is a registered trademark
 of Linus Torvalds; Windows and Microsoft Edge are trademarks of Microsoft Corporation; macOS,
 Apple, AirTag, and Find My are trademarks or registered trademarks of Apple Inc.; Google and
 Google Chrome are trademarks of Google LLC; Kali Linux is a registered trademark of OffSec;
-Samsung and SmartTag are trademarks of Samsung Electronics Co., Ltd.; Linksys, NETGEAR, D-Link,
-TP-Link, ASUS, Xfinity, AT&T, and Starbucks are trademarks of their respective owners; M5Stack,
-M5StickC, LILYGO, T-Deck, Espressif, Adafruit, STMicroelectronics, Qt, Bluetooth, Tile, WiGLE,
-Flipper Zero, and Texas Instruments (CC1101) are trademarks or registered trademarks of their
-respective owners. Their use in hardware target names, passive signature matching, and
-documentation is strictly nominative and descriptive to identify compatible hardware, radio
-standards, file formats, and toolchains.
+Samsung and SmartTag are trademarks of Samsung Electronics Co., Ltd.; Cisco, Ubiquiti, Aruba,
+MikroTik, Linksys, NETGEAR, D-Link, TP-Link, ASUS, Intel, MediaTek, Realtek, VMware,
+VirtualBox, Sony, Raspberry Pi, Alfa, Belkin, Buffalo, Edimax, Xfinity, AT&T, and Starbucks
+are trademarks of their respective owners; M5Stack, M5StickC, LILYGO, T-Deck, Espressif,
+Adafruit, STMicroelectronics, Qt, Bluetooth, Tile, WiGLE, Hashcat, Flipper Zero, Spacehuhn,
+and Texas Instruments (CC1101) are trademarks or registered trademarks of their respective
+owners. Their use in hardware target names, IEEE OUI vendor lookup, passive signature
+matching, file format labels, and documentation is strictly nominative and descriptive to
+identify compatible hardware, radio standards, file formats, and toolchains.

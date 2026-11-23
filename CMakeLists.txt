@@ -64,6 +64,7 @@ if(UNIX AND NOT APPLE)
     set(ZD_LINUX_INCLUDES
         "${CMAKE_CURRENT_SOURCE_DIR}/core/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/render/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/platforms/common"
         "${CMAKE_CURRENT_SOURCE_DIR}/platforms/linux/backend"
         "${CMAKE_CURRENT_SOURCE_DIR}/platforms/linux/app")
 
@@ -122,6 +123,7 @@ add_test(NAME security_engine_tests COMMAND test_secops)
 add_executable(test_linux_parsers tests/core/test_linux_parsers.cpp)
 target_include_directories(test_linux_parsers PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/core/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/platforms/common"
     "${CMAKE_CURRENT_SOURCE_DIR}/platforms/linux/backend")
 target_compile_options(test_linux_parsers PRIVATE ${ZD_WARN_FLAGS})
 add_test(NAME linux_backend_parser_tests COMMAND test_linux_parsers)
@@ -179,6 +181,8 @@ endif()
 # assertion away (making the tests no-ops and tripping -Werror on assert-only variables),
 # so force assertions back on for the test executables regardless of build type.
 foreach(zd_test ${ZD_TEST_TARGETS})
+    target_compile_options(${zd_test} PRIVATE ${ZD_HARDEN_COMPILE_FLAGS})
+    target_link_options(${zd_test} PRIVATE ${ZD_HARDEN_LINK_FLAGS})
     if(MSVC)
         target_compile_options(${zd_test} PRIVATE /UNDEBUG)
     else()

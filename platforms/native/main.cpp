@@ -11,18 +11,31 @@
 //   ./build/zd_sim --size <key>            micro | compact | plus | epaper | wide
 //   ./build/zd_sim --theme <key>           Start on a specific theme (e.g. neon, volt, operator)
 //   ./build/zd_sim --ppm <file.ppm>        Render pixel-accurate RGB frame to a PPM image & exit
+//   ./build/zd_sim --ppm-seq <prefix>      Export multi-frame PPM sequence (<prefix>_000.ppm...)
+//   ./build/zd_sim --gif <file.gif>        Export animated GIF89a sequence & exit
+//   ./build/zd_sim --frames <N>            Frame count for --ppm-seq / --gif (1..120, default 12)
 //   ./build/zd_sim --no-color              Plain monochrome ASCII output
 
 #include <array>
+#include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#if (defined(__unix__) || defined(__APPLE__)) && !defined(ESP_PLATFORM)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "zd/fp.hpp"
 #include "zd/hal.hpp"
+#include "zd/render/gif_export.hpp"
 #include "zd/render/painter.hpp"
 #include "zd/render/surface_rgb565.hpp"
 #include "zd/theme.hpp"
@@ -36,6 +49,9 @@ struct Options {
     zd::ScreenDimensions dims{240, 135};
     std::string theme;
     std::string ppmPath;
+    std::string ppmSeqPrefix;
+    std::string gifPath;
+    uint32_t frameCount = 12u;
 };
 
 uint32_t nowMs() {
@@ -107,18 +123,57 @@ void printTerminalFrame(const zd::UiFrame& frame, bool color) {
     }
 }
 
-bool writePpmScreenshot(const std::string& path, const zd::UiFrame& frame) {
-    zd::render::Rgb565Surface surf(frame.dims.width, frame.dims.height);
-    zd::render::paintUiFrame(surf, frame);
+bool writePpmSurface(const std::string& path, const zd::render::Rgb565Surface& surf) {
+    if (path.empty()) {
+        return false;
+    }
     const std::vector<uint8_t> rgb = surf.toRgb888Buffer();
-
+    const std::string hdr =
+        "P6\n" + std::to_string(surf.width()) + " " + std::to_string(surf.height()) + "\n255\n";
+#if (defined(__unix__) || defined(__APPLE__)) && !defined(ESP_PLATFORM)
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+                          0644);
+    if (fd < 0) {
+        return false;
+    }
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || ::ftruncate(fd, 0) != 0) {
+        ::close(fd);
+        return false;
+    }
+    auto writeExact = [fd](const void* buf, std::size_t len) -> bool {
+        const auto* ptr = static_cast<const uint8_t*>(buf);
+        std::size_t off = 0u;
+        while (off < len) {
+            const ssize_t n = ::write(fd, ptr + off, len - off);
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return false;
+            }
+            off += static_cast<std::size_t>(n);
+        }
+        return true;
+    };
+    const bool ok = writeExact(hdr.data(), hdr.size()) && writeExact(rgb.data(), rgb.size());
+    ::close(fd);
+    return ok;
+#else
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         return false;
     }
-    out << "P6\n" << surf.width() << " " << surf.height() << "\n255\n";
+    out.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
     out.write(reinterpret_cast<const char*>(rgb.data()), static_cast<std::streamsize>(rgb.size()));
     return static_cast<bool>(out);
+#endif
+}
+
+bool writePpmScreenshot(const std::string& path, const zd::UiFrame& frame) {
+    zd::render::Rgb565Surface surf(frame.dims.width, frame.dims.height);
+    zd::render::paintUiFrame(surf, frame);
+    return writePpmSurface(path, surf);
 }
 
 void runInstantScan(zd::hal::PlatformSession& session, SimulatedRadioScanner& radio, uint32_t t) {
@@ -150,6 +205,42 @@ ParseStatus parseOptions(int argc, char** argv, Options& opt) {
                 return ParseStatus::ExitError;
             }
             opt.ppmPath = argv[++i];
+        } else if (a == "--ppm-seq") {
+            if (i + 1 >= argc) {
+                std::cerr << "--ppm-seq requires a filename prefix\n";
+                return ParseStatus::ExitError;
+            }
+            opt.ppmSeqPrefix = argv[++i];
+        } else if (a == "--gif") {
+            if (i + 1 >= argc) {
+                std::cerr << "--gif requires an output path\n";
+                return ParseStatus::ExitError;
+            }
+            opt.gifPath = argv[++i];
+        } else if (a == "--frames") {
+            if (i + 1 >= argc) {
+                std::cerr << "--frames requires an integer 1..120\n";
+                return ParseStatus::ExitError;
+            }
+            const std::string raw = argv[++i];
+            uint32_t v = 0u;
+            bool ok = !raw.empty();
+            for (unsigned char c : raw) {
+                if (!std::isdigit(c)) {
+                    ok = false;
+                    break;
+                }
+                v = v * 10u + static_cast<uint32_t>(c - '0');
+                if (v > 120u) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok || v < 1u || v > 120u) {
+                std::cerr << "--frames must be an integer 1..120\n";
+                return ParseStatus::ExitError;
+            }
+            opt.frameCount = v;
         } else if (a == "--size") {
             if (i + 1 >= argc) {
                 std::cerr << "--size requires an argument\n";
@@ -165,7 +256,8 @@ ParseStatus parseOptions(int argc, char** argv, Options& opt) {
             }
         } else if (a == "--help" || a == "-h") {
             std::cout << "Usage: zd_sim [--demo] [--theme <key>] "
-                         "[--size <micro|compact|plus|epaper|wide>] [--ppm <out.ppm>] [--no-color]\n";
+                         "[--size <micro|compact|plus|epaper|wide>] [--ppm <out.ppm>] "
+                         "[--ppm-seq <prefix>] [--gif <out.gif>] [--frames N] [--no-color]\n";
             return ParseStatus::ExitZero;
         } else {
             std::cerr << "Unknown option '" << a << "'\n";
@@ -208,6 +300,49 @@ int main(int argc, char** argv) {
         }
         std::cout << "Wrote " << opt.dims.width << "x" << opt.dims.height << " screenshot ("
                   << zd::themeSpec(session.state().theme).name << ") to " << opt.ppmPath << "\n";
+        return 0;
+    }
+
+    if (!opt.ppmSeqPrefix.empty() || !opt.gifPath.empty()) {
+        std::vector<zd::render::Rgb565Surface> seqSurfaces;
+        if (!opt.gifPath.empty()) {
+            seqSurfaces.reserve(opt.frameCount);
+        }
+        uint32_t animMs = nowMs();
+        for (uint32_t fi = 0u; fi < opt.frameCount; ++fi) {
+            const zd::UiFrame uf = session.buildFrame(opt.dims);
+            zd::render::Rgb565Surface surf(opt.dims.width, opt.dims.height);
+            zd::render::paintUiFrame(surf, uf);
+            if (!opt.ppmSeqPrefix.empty()) {
+                char seqBuf[16];
+                std::snprintf(seqBuf, sizeof(seqBuf), "_%03u.ppm", static_cast<unsigned>(fi));
+                const std::string fpath = opt.ppmSeqPrefix + seqBuf;
+                if (!writePpmSurface(fpath, surf)) {
+                    std::cerr << "Failed to write PPM sequence frame to " << fpath << "\n";
+                    return 1;
+                }
+            }
+            if (!opt.gifPath.empty()) {
+                seqSurfaces.push_back(std::move(surf));
+            }
+            animMs += 450u;
+            session.stepTick(animMs, power);
+            if ((fi % 4u) == 3u) {
+                session.dispatch(zd::ButtonAPressedEvent{animMs}, &store);
+            }
+        }
+        if (!opt.gifPath.empty()) {
+            if (!zd::render::writeAnimatedGifFile(opt.gifPath, seqSurfaces, 18u)) {
+                std::cerr << "Failed to write animated GIF to " << opt.gifPath << "\n";
+                return 1;
+            }
+            std::cout << "Wrote " << seqSurfaces.size() << "-frame GIF (" << opt.dims.width << "x"
+                      << opt.dims.height << ") to " << opt.gifPath << "\n";
+        }
+        if (!opt.ppmSeqPrefix.empty()) {
+            std::cout << "Wrote " << opt.frameCount << " PPM frame(s) with prefix "
+                      << opt.ppmSeqPrefix << "\n";
+        }
         return 0;
     }
 

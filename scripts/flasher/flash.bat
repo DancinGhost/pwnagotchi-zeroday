@@ -15,8 +15,10 @@ if %errorlevel% equ 0 (
 )
 
 echo Python 3 is required for the automated flasher.
-echo Please install Python from python.org or flash using Chrome at:
+echo Please install Python from python.org or flash using Chrome/Edge at:
 echo   https://espressif.github.io/esptool-js/
+echo   https://adafruit.github.io/Adafruit_WebSerial_ESPTool/
+echo   https://esptool.spacehuhn.com/
 pause
 
 :done

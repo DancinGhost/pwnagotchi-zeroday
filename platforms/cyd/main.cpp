@@ -18,6 +18,7 @@
 #include "esp32_cli.hpp"
 #include "esp32_hal.hpp"
 #include "esp32_offensive.hpp"
+#include "esp32_sd_capture.hpp"
 
 #include <Arduino.h>
 #define LGFX_USE_V1
@@ -26,6 +27,11 @@
 #include <cstdlib>
 #include <esp_system.h>
 #include <string>
+
+#if __has_include(<SD.h>) && !defined(ZD_NO_ESP32_SD)
+#include <SD.h>
+#define ZD_HAS_ESP32_SD 1
+#endif
 
 #ifndef ZD_CYD_PANEL_ST7789
 #define ZD_CYD_PANEL_ST7789 0
@@ -227,6 +233,9 @@ public:
         sprite_.setTextColor(fg, bg);
     }
 
+    int32_t clipYMin() const { return yOffset_; }
+    int32_t clipYMax() const { return yOffset_ + bandHeight_; }
+
     void drawString(const char* text, int32_t x, int32_t y) {
         // Font0 at textSize(1) is 8 px tall.
         if ((y + 8) <= yOffset_ || y >= (yOffset_ + bandHeight_)) {
@@ -346,9 +355,17 @@ zd::hal::PlatformSession gSession;
 // Active-offense console (deauth injection). Inert until explicitly armed + allow-listed at
 // the serial `sec` console; runtime-gated only. See docs/OFFENSIVE.md.
 zd::esp32_common::OffensiveConsole gOffensive;
+zd::esp32_common::Esp32PromiscuousMonitor gDefMon;
+zd::esp32_common::Esp32PeerBeacon gPeerBeacon;  // opt-in WiFi greeting beacon (off by default)
+zd::esp32_common::Esp32PeerBleAdvertiser gPeerBle;  // opt-in BLE greeting (off; never in Offensive)
 
 zd::esp32_common::DirtyFramePacer gFramePacer;
+zd::esp32_common::SdCaptureBuffer gCapture;
 std::string gSerialLine;
+bool gSdReady = false;
+bool gCaptureEnabled = false;
+uint32_t gLastCaptureFlushMs = 0u;
+constexpr uint32_t kCaptureFlushMs = 5000u;  // batch SD writes to spare the card
 
 // BOOT button (GPIO 0) state & touch gesture state
 zd::esp32_common::ShortLongButton gBootBtn;
@@ -412,10 +429,46 @@ bool parseStrictRangeInt(const char* raw, int minVal, int maxVal, int& out) {
     return true;
 }
 
+// Persist captured artifacts to SD: append the streamed `.zds` defensive event log and
+// rewrite the `.hc22000` crackable-handshake export whenever new material has been captured.
+void flushCaptureToSd() {
+#ifdef ZD_HAS_ESP32_SD
+    if (!gCaptureEnabled || !gSdReady) {
+        return;
+    }
+    if (gCapture.hasPendingEvents()) {
+        File zds = SD.open("/zeroday.zds", FILE_APPEND);
+        if (zds) {
+            zds.print(gCapture.takePendingEvents().c_str());
+            zds.close();
+        }
+    }
+    const std::size_t hsCount = gOffensive.session().collectedHandshakes().size();
+    if (gCapture.handshakesChanged(hsCount) && hsCount > 0u) {
+        File hc = SD.open("/zeroday.hc22000", FILE_WRITE);  // full dedup set: overwrite
+        if (hc) {
+            hc.print(gOffensive.session().exportHc22000().c_str());
+            hc.close();
+            gCapture.markHandshakesFlushed(hsCount);
+            gSession.dispatch(
+                zd::CaptureSavedEvent{millis(), static_cast<uint32_t>(hsCount),
+                                      "sd:/zeroday.hc22000",
+                                      "HS->SD x" + std::to_string(hsCount), true},
+                &gThemeStore);
+        }
+    }
+#endif
+}
+
 void pollSerialCli(uint32_t nowMs) {
     zd::esp32_common::pollSerialLines(gSerialLine, [&](const std::string& line) {
         if (line == "sec" || line.rfind("sec ", 0) == 0) {
-            Serial.print(gOffensive.handleLine(line, nowMs, &gSession).c_str());
+            Serial.print(
+                gOffensive.handleLine(line, nowMs, &gSession, &gThemeStore, &gDefMon.core()).c_str());
+            return;
+        }
+        if (line == "defmon" || line.rfind("defmon ", 0) == 0) {
+            Serial.print(gDefMon.handleCommand(line, gOffensive.session().state()).c_str());
             return;
         }
         if (line == "autobl on") {
@@ -432,12 +485,71 @@ void pollSerialCli(uint32_t nowMs) {
             gLedEnabled = false;
             updateStatusLed(gSession.state());
             Serial.println("Status RGB LED: disabled");
-        } else if (line == "ble on") {
+        } else if (line == "ble scan" || line == "bt scan") {
+            gBle.setEnabled(true);
+            gBle.requestScanNow();
+            Serial.println("Bluetooth scan queued...");
+        } else if (line == "ble on" || line == "bt on") {
             gBle.setEnabled(true);
             Serial.println("BLE scanner: enabled");
-        } else if (line == "ble off") {
+        } else if (line == "ble off" || line == "bt off") {
             gBle.setEnabled(false);
             Serial.println("BLE scanner: disabled");
+        } else if (line == "capture on") {
+#ifdef ZD_HAS_ESP32_SD
+            if (!gSdReady) {
+                gSdReady = SD.begin(PIN_SD_CS);
+            }
+            if (!gSdReady) {
+                Serial.println("SD card not detected; capture-to-SD unavailable");
+            } else {
+                gCaptureEnabled = true;
+                gLastCaptureFlushMs = nowMs;
+                gOffensive.mutableSession().setRecorder(&gCapture);  // stream .zds event log
+                Serial.println("SD capture ON: /zeroday.zds + /zeroday.hc22000 (enable defmon)");
+            }
+#else
+            Serial.println("SD support disabled in build");
+#endif
+        } else if (line == "capture off") {
+            gCaptureEnabled = false;
+            gOffensive.mutableSession().setRecorder(nullptr);
+            flushCaptureToSd();  // best-effort final flush of anything buffered
+            gCapture.clear();
+            Serial.println("SD capture OFF");
+        } else if (line == "capture") {
+            Serial.printf("Capture: %s | SD:%s | Handshakes:%lu%s\n",
+                          gCaptureEnabled ? "ON" : "OFF", gSdReady ? "OK" : "NO",
+                          static_cast<unsigned long>(
+                              gOffensive.session().collectedHandshakes().size()),
+                          gCapture.overflowed() ? " | .zds BUFFER OVERFLOW" : "");
+        } else if (line == "peers advertise on") {
+            gPeerBeacon.setEnabled(true);
+            Serial.println("Peer greeting beacon ON (broadcasting ZeroDay presence ~every 30s).");
+        } else if (line == "peers advertise off") {
+            gPeerBeacon.setEnabled(false);
+            Serial.println("Peer greeting beacon OFF.");
+        } else if (line == "peers ble on") {
+            gPeerBle.setEnabled(true);
+            Serial.println("BLE peer greeting ON (suppressed automatically in Offensive mode).");
+        } else if (line == "peers ble off") {
+            gPeerBle.setEnabled(false);
+            gPeerBle.stop();
+            Serial.println("BLE peer greeting OFF.");
+        } else if (line == "peers") {
+            const zd::peer::PeerRegistry& reg = gDefMon.core().peers();
+            Serial.printf("Peers met: %lu (tracking %u) | wifi-adv: %s | ble-adv: %s\n",
+                          static_cast<unsigned long>(reg.peersMet()),
+                          static_cast<unsigned>(reg.size()),
+                          gPeerBeacon.enabled() ? "ON" : "off",
+                          !gPeerBle.enabled() ? "off"
+                              : (gPeerBle.advertising() ? "ON" : "ON(suppressed:offensive)"));
+            for (const zd::peer::Peer& p : reg.peers()) {
+                Serial.printf("  %s %s %s %s %ddBm%s\n", p.id.c_str(),
+                              zd::peer::peerKindLabel(p.kind),
+                              zd::peer::peerTransportLabel(p.transport), p.name.c_str(),
+                              static_cast<int>(p.rssi), p.widsAlert ? " [WIDS!]" : "");
+            }
         } else if (line == "ldr") {
             const int raw = analogRead(PIN_LDR_ADC);
             const uint32_t mv = analogReadMilliVolts(PIN_LDR_ADC);
@@ -524,9 +636,13 @@ void setup() {
     gBle.init();
     gThemeStore.init();
     gOffensive.begin();
+    gDefMon.init();
 
     // Seed pure functional PRNG with hardware entropy & restore theme from NVS
-    gSession.boot(esp_random(), millis(), &gThemeStore);
+    const uint32_t bootMs = millis();
+    gSession.boot(esp_random(), bootMs, &gThemeStore);
+    gSession.dispatch(zd::CaptureSavedEvent{bootMs, 0u, "nvs://zeroday", "NVS Flash", false},
+                      &gThemeStore);
     gSession.renderTo(gDisplay);
     logSerialStatus("BOOT");
 }
@@ -539,7 +655,20 @@ void loop() {
     pollBootButton(nowMs);
     pollSerialCli(nowMs);
 
-    // 2. Step non-blocking multi-radio scanner & periodic telemetry tick
+    // 2. Step promiscuous defensive monitor, multi-radio scanner & telemetry tick
+    gDefMon.step(nowMs, gOffensive.mutableSession(), &gSession, &gThemeStore);
+    // Opt-in peer greetings (no-op unless enabled). BLE is additionally force-suppressed while
+    // in Offensive ops mode — we never beacon our presence over BLE while actively attacking.
+    if (gPeerBeacon.enabled() || gPeerBle.enabled()) {
+        zd::peer::PeerAdvert advert;
+        advert.name = gSession.state().petName;
+        advert.pwned = static_cast<uint16_t>(
+            (std::min<std::size_t>)(gOffensive.session().collectedHandshakes().size(), 0xFFFFu));
+        advert.flags = (gSession.state().secMood == zd::SecMood::Alarmed) ? zd::peer::kFlagWidsAlert
+                                                                          : 0u;
+        gPeerBeacon.maybeEmit(nowMs, advert, gDefMon.currentChannel());
+        gPeerBle.sync(advert, gSession.state().opsMode == zd::OpsMode::Offensive);
+    }
     if (const char* scanTag = gSession.stepMultiRadio(
             nowMs, gRadio, &gBle, nullptr, &gThemeStore)) {
         logSerialStatus(scanTag);
@@ -547,6 +676,12 @@ void loop() {
     gSession.stepTick(nowMs, gPower);
     stepAutoBacklight(nowMs);
     updateStatusLed(gSession.state());
+
+    // Batch-persist captured handshakes/events to SD on a timer (spares the SD card).
+    if (gCaptureEnabled && (nowMs - gLastCaptureFlushMs) >= kCaptureFlushMs) {
+        gLastCaptureFlushMs = nowMs;
+        flushCaptureToSd();
+    }
 
     // 3. Refresh display only when state changed, animating, or on 1 Hz uptime tick
     if (gFramePacer.shouldRender(gSession.state(), nowMs)) {

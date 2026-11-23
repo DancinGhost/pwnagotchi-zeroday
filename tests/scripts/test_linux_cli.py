@@ -52,6 +52,25 @@ class TestLinuxCliBinaries(unittest.TestCase):
                 header = fh.read(16)
             self.assertTrue(header.startswith(b"P6\n240 135\n255\n"))
 
+            gif = os.path.join(tmp, "anim.gif")
+            seq_prefix = os.path.join(tmp, "seq")
+            gif_res = subprocess.run(
+                [ZDSIM_BIN, "--size", "compact", "--frames", "3", "--ppm-seq", seq_prefix, "--gif", gif],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(gif_res.returncode, 0, msg=gif_res.stderr)
+            with open(gif, "rb") as gfh:
+                gbytes = gfh.read()
+            self.assertTrue(gbytes.startswith(b"GIF89a"))
+            self.assertEqual(gbytes[-1], 0x3B)
+            for idx in range(3):
+                pframe = f"{seq_prefix}_{idx:03d}.ppm"
+                self.assertTrue(os.path.isfile(pframe), msg=f"missing {pframe}")
+                with open(pframe, "rb") as pfh:
+                    self.assertTrue(pfh.read(16).startswith(b"P6\n160 80\n255\n"))
+
     def test_zd_linux_cli_validation_and_replay(self):
         if not ZDLINUX_BIN:
             self.skipTest("zd-linux binary not found")
@@ -59,6 +78,8 @@ class TestLinuxCliBinaries(unittest.TestCase):
         help_res = subprocess.run([ZDLINUX_BIN, "--help"], capture_output=True, text=True, check=False)
         self.assertEqual(help_res.returncode, 0)
         self.assertIn("zd-linux", help_res.stdout)
+        self.assertIn("--notify", help_res.stdout)
+        self.assertIn("--wardrive", help_res.stdout)
 
         for bad_args in (
             ["--not-a-flag"],

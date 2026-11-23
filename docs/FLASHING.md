@@ -14,7 +14,7 @@ This guide covers how to easily flash **pwnagotchi-zeroday** to any supported ES
 You can flash directly from **Google Chrome** or **Microsoft Edge** over WebSerial without installing Python, drivers, or command-line tools.
 
 1. Download the firmware zip for your device from the **[Releases Tab](https://github.com/DancinGhost/pwnagotchi-zeroday/releases)** (e.g. `pwnagotchi-zd-t-deck-plus.zip`) and extract it.
-2. Open the official **[Espressif Web Flasher](https://espressif.github.io/esptool-js/)** or **[Adafruit WebSerial ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/)** in Chrome or Edge.
+2. Open the official **[Espressif Web Flasher](https://espressif.github.io/esptool-js/)** — or, if unavailable, **[Adafruit WebSerial ESPTool](https://adafruit.github.io/Adafruit_WebSerial_ESPTool/)** or **[Spacehuhn ESP Tool](https://esptool.spacehuhn.com/)** — in Chrome or Edge.
 3. Plug your board into your computer with a high-quality USB-C data cable.
 4. Set the **Baud rate** to `921600` (or `115200`).
 5. Click **Connect** and select your board's serial port from the pop-up prompt.

@@ -115,27 +115,27 @@ struct ThemeSpec {
 inline constexpr std::array<ThemeSpec, kThemeCount> kThemeCatalog = {{
     {ThemeId::PaperInk, "paper", "Paper Ink",
      "Classic e-paper: charcoal ink on warm paper", true, ThemeEffect::None,
-     {{242, 240, 230}, {22, 24, 28}, {48, 58, 92}, {155, 152, 142}, {215, 95, 110}}},
+     {{242, 240, 230}, {22, 24, 28}, {48, 58, 92}, {132, 128, 118}, {178, 36, 56}}},
 
     {ThemeId::ZeroDayCyan, "cyan", "ZeroDay",
      "Signature cyber cyan and dish wave scanner", false, ThemeEffect::RadarDish,
-     {{6, 12, 22}, {0, 238, 255}, {120, 255, 200}, {30, 68, 96}, {255, 90, 180}}},
+     {{6, 12, 22}, {0, 238, 255}, {120, 255, 200}, {54, 104, 136}, {255, 90, 180}}},
 
     {ThemeId::CodeRain, "rain", "Storm Rain",
      "Cascading digital rain and lightning strikes", false, ThemeEffect::LightningStorm,
-     {{2, 8, 4}, {36, 255, 112}, {190, 255, 210}, {24, 96, 48}, {235, 255, 140}}},
+     {{2, 8, 4}, {36, 255, 112}, {190, 255, 210}, {36, 118, 64}, {235, 255, 140}}},
 
     {ThemeId::AmberCrt, "amber", "Amber Pulse",
      "Warm amber-orange pocket deck monochrome glow", false, ThemeEffect::None,
-     {{16, 10, 2}, {255, 178, 0}, {255, 216, 128}, {100, 64, 10}, {255, 124, 40}}},
+     {{16, 10, 2}, {255, 178, 0}, {255, 216, 128}, {138, 92, 20}, {255, 124, 40}}},
 
     {ThemeId::RedTeam, "redteam", "Red Team",
      "Offensive ops HUD: orbital satellite beam", false, ThemeEffect::SatelliteBeam,
-     {{12, 4, 6}, {255, 68, 82}, {255, 188, 196}, {132, 34, 48}, {255, 146, 56}}},
+     {{12, 4, 6}, {255, 68, 82}, {255, 188, 196}, {172, 56, 72}, {255, 146, 56}}},
 
     {ThemeId::BlueTeam, "blueteam", "Blue Team",
      "Defensive ops HUD: crisp ice blue shield grid", false, ThemeEffect::TacticalHud,
-     {{6, 12, 24}, {96, 192, 255}, {188, 232, 255}, {36, 76, 128}, {82, 255, 188}}},
+     {{6, 12, 24}, {96, 192, 255}, {188, 232, 255}, {60, 108, 162}, {82, 255, 188}}},
 }};
 // clang-format on
 
@@ -214,20 +214,10 @@ constexpr const ThemeSpec& themeSpec(ThemeId id) {
     return kThemeCatalog[isValidTheme(id) ? themeIndex(id) : 0u];
 }
 
-// Maps each theme to its pet rendering style: classic bracket face + flanking props vs.
-// full pixel-art mascot & gear replacement.
+// Maps each theme to its pet rendering style. Currently uses ClassicFace across all
+// themes (preserving PixelArtMascot in code for future pixel-art exploration).
 constexpr FaceStyle themeFaceStyle(ThemeId id) {
-    switch (id) {
-        case ThemeId::PaperInk:
-        case ThemeId::CodeRain:
-            return FaceStyle::ClassicFace;
-        case ThemeId::ZeroDayCyan:
-        case ThemeId::AmberCrt:
-        case ThemeId::RedTeam:
-        case ThemeId::BlueTeam:
-        case ThemeId::Count_:
-            return FaceStyle::PixelArtMascot;
-    }
+    (void)id;
     return FaceStyle::ClassicFace;
 }
 

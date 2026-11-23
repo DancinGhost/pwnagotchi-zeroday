@@ -83,11 +83,13 @@
               id="hw-btn-b"
               class="hw-side-btn"
               type="button"
+              aria-describedby="btn-b-hint"
               title="Short click: Scan WiFi | Hold 0.7s: Cycle Theme"
             >
               [B] SCAN / HOLD THEME
               <span id="btn-b-progress" class="hold-progress"></span>
             </button>
+            <span id="btn-b-hint" class="sr-only">Short press scans nearby WiFi and Bluetooth; hold 0.7 seconds to cycle display theme.</span>
           </div>
 
           <!-- M5StickC Plus2 / Pocket Cyberdeck Casing -->
@@ -127,7 +129,7 @@
                 id="hw-btn-a"
                 class="hw-front-btn"
                 type="button"
-                title="Button A: Cycle Views (Pet Face -> Radar -> Spectrum -> RF Guard) | Shift+Click: Previous View"
+                title="Button A: Cycle Views (Pet Face -> Radar -> Spectrum -> RF Guard -> Captures) | Shift+Click: Previous View"
               >
                 <span class="m5-mark">ZD</span>
                 <span class="m5-sub">[A] VIEW</span>
@@ -145,6 +147,7 @@
               <button class="seg-btn" aria-pressed="false" data-page="NearbyRadar" type="button">WiFi Radar</button>
               <button class="seg-btn" aria-pressed="false" data-page="ChannelSpectrum" type="button">Ch Spectrum</button>
               <button class="seg-btn" aria-pressed="false" data-page="RfGuard" type="button">RF Guard</button>
+              <button class="seg-btn" aria-pressed="false" data-page="Captures" type="button">Captures</button>
             </div>
 
             <div class="theme-cycler" aria-label="Cycle Themes">
@@ -175,7 +178,7 @@
           <div class="hotkey-bar">
             Hotkeys:
             <kbd>A</kbd> View
-            <kbd>1-4</kbd> Page
+            <kbd>1-5</kbd> Page
             <kbd>B</kbd> Scan
             <kbd>T</kbd> / <kbd>Shift+T</kbd> Theme
             <kbd>M</kbd> Mode
@@ -271,6 +274,10 @@
               <span>Boop ZeroDay</span>
               <span class="kbd-hint">K</span>
             </button>
+            <button id="act-ack" class="toy-btn toy-btn-wide" type="button">
+              <span>Clear Threat Alert</span>
+              <span class="kbd-hint">X</span>
+            </button>
           </div>
         </div>
 
@@ -311,7 +318,7 @@
           <div class="power-bar">
             <div class="power-slider-wrap">
               <label for="input-battery">BAT:</label>
-              <input id="input-battery" type="range" min="5" max="100" value="96" />
+              <input id="input-battery" type="range" min="5" max="100" value="96" aria-label="Simulated battery percentage" aria-valuetext="96%" />
               <span id="battery-val">96%</span>
             </div>
             <label class="charging-toggle">
@@ -321,7 +328,50 @@
           </div>
         </div>
 
-        <!-- Card 3: Custom Fake Beacon Injector -->
+        <!-- Card 3: Nearby WiFi & Bluetooth Airspace Devices -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">Airspace Devices (WiFi &amp; Bluetooth)</h2>
+            <button id="act-bt-scan" class="mini-btn mini-btn-compact" type="button">
+              Sweep BT
+            </button>
+          </div>
+
+          <div class="device-tabs" role="tablist" aria-label="Airspace Radio Devices">
+            <button
+              id="tab-wifi"
+              class="device-tab active"
+              role="tab"
+              aria-selected="true"
+              aria-controls="airspace-device-list"
+              tabindex="0"
+              type="button"
+            >
+              WiFi APs (0)
+            </button>
+            <button
+              id="tab-bt"
+              class="device-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="airspace-device-list"
+              tabindex="-1"
+              type="button"
+            >
+              Bluetooth (0)
+            </button>
+          </div>
+
+          <div
+            id="airspace-device-list"
+            class="device-list"
+            role="tabpanel"
+            aria-labelledby="tab-wifi"
+            tabindex="0"
+          ></div>
+        </div>
+
+        <!-- Card 4: Custom Fake Beacon Injector -->
         <div class="panel-card">
           <div class="card-header">
             <h2 class="card-title">Fake Beacon Broadcaster</h2>
@@ -365,7 +415,7 @@
 
                 <label class="beacon-control-label">
                   <span class="sr-only">Signal Strength RSSI</span>
-                  <input id="input-ap-rssi" class="rssi-slider" type="range" min="-92" max="-32" value="-44" aria-label="Custom Beacon Signal Strength in dBm" />
+                  <input id="input-ap-rssi" class="rssi-slider" type="range" min="-92" max="-32" value="-44" aria-label="Custom Beacon Signal Strength in dBm" aria-valuetext="-44 dBm" />
                   <span id="ap-rssi-label">-44dB</span>
                 </label>
 
@@ -398,7 +448,7 @@
         </button>
       </div>
 
-      <div id="term-log" class="term-log" role="log" aria-live="off" aria-label="Serial monitor output"></div>
+      <div id="term-log" class="term-log" tabindex="0" role="log" aria-live="off" aria-label="Serial monitor output"></div>
 
       <form id="form-terminal" class="terminal-input-row">
         <label id="term-prompt-label" class="term-prompt" for="input-terminal">zeroday@ttyACM0:~$</label>

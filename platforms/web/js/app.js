@@ -100,10 +100,18 @@
     }
   }
 
+  let srAnnounceTimer = null;
   function announceSr(text) {
-    if (elSrStatus && text) {
-      elSrStatus.textContent = text;
+    if (!elSrStatus || !text) return;
+    if (srAnnounceTimer) {
+      clearTimeout(srAnnounceTimer);
+      srAnnounceTimer = null;
     }
+    elSrStatus.textContent = '';
+    srAnnounceTimer = setTimeout(function () {
+      srAnnounceTimer = null;
+      elSrStatus.textContent = String(text);
+    }, 30);
   }
 
   const elHwBtnA = document.getElementById('hw-btn-a');
@@ -135,6 +143,12 @@
   const elActSubGhz = document.getElementById('act-subghz');
   const elActSubGhzLbl = document.getElementById('act-subghz-lbl');
   const elActBoop = document.getElementById('act-boop');
+  const elActAck = document.getElementById('act-ack');
+
+  const elTabWifi = document.getElementById('tab-wifi');
+  const elTabBt = document.getElementById('tab-bt');
+  const elActBtScan = document.getElementById('act-bt-scan');
+  const elAirspaceDeviceList = document.getElementById('airspace-device-list');
 
   const elInputBat = document.getElementById('input-battery');
   const elBatVal = document.getElementById('battery-val');
@@ -257,6 +271,8 @@
     const roamSub = activeEnv === 'roam' ? sim.resolveRoamSubPreset(t) : '';
     const dashSig =
       gState.mood + '|' + gState.petName + '|' + gState.xp + '|' + gState.highScore + '|' +
+      gState.highScoreBeaten + '|' + gState.capturesSaved + '|' + gState.capturePath + '|' +
+      gState.notifyUntilMs + '|' + gState.notifyText + '|' +
       gState.opsMode + '|' + gState.subGhzFreqKhz + '|' + gState.threatsDetected + '|' +
       gState.toyHandshakes + '|' +
       gState.snacksFed + '|' + gState.peersMet + '|' + gState.peakApCount + '|' +
@@ -278,7 +294,8 @@
     const lvl = logic.deriveLevelInfo(gState.xp);
     elRankPill.textContent = 'Lv.' + lvl.level + ' ' + lvl.title;
     if (elHiscorePill) {
-      elHiscorePill.textContent = 'HI: ' + Math.max(gState.highScore || 0, lvl.xp);
+      elHiscorePill.textContent =
+        'HI: ' + Math.max(gState.highScore || 0, lvl.xp) + (gState.highScoreBeaten ? '!' : '');
     }
     elXpLabel.textContent =
       lvl.progressPct >= 100 && lvl.xp >= 2500
@@ -352,8 +369,113 @@
     elScreen.setAttribute(
       'aria-label',
       gState.petName + ' display: ' + face.moodLabel + ', ' + gState.phrase +
-      ', ' + gState.latestScan.totalAps + ' nearby APs, theme ' + activeSpec.name
+      ', ' + gState.latestScan.totalAps + ' nearby APs, ' +
+      (gState.bleDevices ? gState.bleDevices.length : 0) + ' Bluetooth devices, theme ' + activeSpec.name
     );
+
+    renderAirspaceDeviceList();
+  }
+
+  let activeDeviceTab = 'wifi';
+  function renderAirspaceDeviceList() {
+    const wifiUtil = window.ZD && window.ZD.wifiAnalysis;
+    const aps = (gState.latestScan && gState.latestScan.topNetworks) || [];
+    const bleRaw = gState.bleDevices || [];
+    const bts = wifiUtil && wifiUtil.bleTargetsByStrength ? wifiUtil.bleTargetsByStrength(bleRaw) : bleRaw;
+
+    if (elTabWifi) {
+      elTabWifi.textContent = 'WiFi APs (' + aps.length + ')';
+      elTabWifi.classList.toggle('active', activeDeviceTab === 'wifi');
+      elTabWifi.setAttribute('aria-selected', String(activeDeviceTab === 'wifi'));
+      elTabWifi.setAttribute('tabindex', activeDeviceTab === 'wifi' ? '0' : '-1');
+    }
+    if (elTabBt) {
+      elTabBt.textContent = 'Bluetooth (' + bts.length + ')';
+      elTabBt.classList.toggle('active', activeDeviceTab === 'bt');
+      elTabBt.setAttribute('aria-selected', String(activeDeviceTab === 'bt'));
+      elTabBt.setAttribute('tabindex', activeDeviceTab === 'bt' ? '0' : '-1');
+    }
+    if (elActAck) {
+      elActAck.disabled = !gState.lastThreatLabel;
+    }
+    if (!elAirspaceDeviceList) return;
+    elAirspaceDeviceList.setAttribute('aria-labelledby', activeDeviceTab === 'bt' ? 'tab-bt' : 'tab-wifi');
+
+    while (elAirspaceDeviceList.childNodes && elAirspaceDeviceList.childNodes.length) {
+      elAirspaceDeviceList.removeChild(elAirspaceDeviceList.childNodes[0]);
+    }
+
+    if (activeDeviceTab === 'bt') {
+      if (bts.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'device-empty';
+        empty.textContent = 'No Bluetooth devices scanned yet. Click Sweep BT or press [B].';
+        elAirspaceDeviceList.appendChild(empty);
+        return;
+      }
+      bts.forEach(function (dev) {
+        const row = document.createElement('div');
+        const isThreat = Boolean(dev.threat && dev.threat !== wifiUtil.BleThreatKind.None);
+        row.className = 'device-row' + (isThreat ? ' device-row-threat' : '');
+
+        const left = document.createElement('span');
+        left.className = 'device-name';
+        left.textContent = (dev.name && dev.name.trim()) ? dev.name : (dev.mac || 'Unknown BLE');
+
+        const mid = document.createElement('span');
+        mid.className = 'device-meta';
+        const vendor = wifiUtil && wifiUtil.bleVendorOrOuiLabel
+          ? wifiUtil.bleVendorOrOuiLabel(dev.companyId, dev.mac)
+          : (wifiUtil && wifiUtil.bleVendorLabel ? wifiUtil.bleVendorLabel(dev.companyId) : '-');
+        const svc = wifiUtil && wifiUtil.bleServiceLabel ? wifiUtil.bleServiceLabel(dev.serviceUuid) : '-';
+        const bars = wifiUtil && wifiUtil.rssiToBars ? '*'.repeat(wifiUtil.rssiToBars(dev.rssi)) : '';
+        mid.textContent =
+          (dev.mac || '--') + ' | ' + dev.rssi + 'dBm ' + bars +
+          (vendor !== '-' ? ' | ' + vendor : '') +
+          (svc !== '-' ? ' | ' + svc : '');
+
+        const badge = document.createElement('span');
+        badge.className = 'device-badge';
+        badge.textContent = wifiUtil && wifiUtil.bleThreatLabel ? wifiUtil.bleThreatLabel(dev.threat) : 'OK';
+
+        row.appendChild(left);
+        row.appendChild(mid);
+        row.appendChild(badge);
+        elAirspaceDeviceList.appendChild(row);
+      });
+      return;
+    }
+
+    if (aps.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'device-empty';
+      empty.textContent = 'No WiFi APs discovered yet. Press [B] to scan.';
+      elAirspaceDeviceList.appendChild(empty);
+      return;
+    }
+    aps.forEach(function (ap) {
+      const row = document.createElement('div');
+      row.className = 'device-row';
+
+      const left = document.createElement('span');
+      left.className = 'device-name';
+      left.textContent = ap.ssid || '<hidden>';
+
+      const mid = document.createElement('span');
+      mid.className = 'device-meta';
+      const ch = ap.channel > 0 ? 'CH ' + ui.twoDigit(ap.channel) : 'CH --';
+      const bars = wifiUtil && wifiUtil.rssiToBars ? '*'.repeat(wifiUtil.rssiToBars(ap.rssi)) : '';
+      mid.textContent = ch + ' | ' + ap.rssi + 'dBm ' + bars;
+
+      const badge = document.createElement('span');
+      badge.className = 'device-badge';
+      badge.textContent = ap.secure ? 'WPA2' : 'OPEN';
+
+      row.appendChild(left);
+      row.appendChild(mid);
+      row.appendChild(badge);
+      elAirspaceDeviceList.appendChild(row);
+    });
   }
 
   // --- Render Pixel Frame onto Canvas ---
@@ -373,8 +495,7 @@
     }
     const hasActiveAnim =
       (frame.themeEffect && frame.themeEffect !== 'None') ||
-      (frame.scene && frame.scene !== 'None') ||
-      frame.page === logic.ScreenPage.PetFace;
+      (frame.scene && frame.scene !== 'None');
     const animKey = hasActiveAnim ? frame.animTick : 0;
     let pageSig = '';
     if (frame.page === logic.ScreenPage.NearbyRadar) {
@@ -383,11 +504,15 @@
       pageSig = frame.spectrumSummary + '|' + frame.channelBars.map(function (b) { return b.count; }).join(',');
     } else if (frame.page === logic.ScreenPage.RfGuard) {
       pageSig = frame.rfGuardSummary + '|' + frame.rfGuardRows.map(function (r) { return r.ssid + ':' + r.details; }).join(';');
+    } else if (frame.page === logic.ScreenPage.Captures) {
+      pageSig = frame.captureSummary + '|' + (frame.captureRows || []).join(';');
     }
     const canvasSig =
       d.width + 'x' + d.height + '|' + frame.page + '|' + frame.theme + '|' + animKey + '|' +
       isBlinking + '|' + frame.headerLine + '|' + frame.footerLine + '|' + frame.modeBadge + '|' +
       frame.scene + '|' + frame.rankLine + '|' + frame.xpProgressPct + '|' +
+      frame.capturesSaved + '|' + frame.capturePath + '|' +
+      (frame.notifyActive ? frame.notifyBanner : '') + '|' +
       frame.threatBanner + '|' + frame.face.moodLabel + '|' +
       (frame.toast && frame.toast.visible ? frame.toast.text : '') +
       '|' + frame.phraseLines.join('/') + '|' + frame.spotlightLabel + '|' + pageSig;
@@ -460,6 +585,7 @@
     buzzer.boop();
     spawnFloatingGlyphs(['+10XP', '0xFF', '\u2665'], '#38ff7a');
     logSerialStatus('SNACK', 'log-cmd');
+    announceSr('Fed snack! ' + gState.xp + ' XP');
     renderCurrentState();
   }
 
@@ -478,6 +604,7 @@
     buzzer.pwn();
     spawnFloatingGlyphs(['PWN!', 'EAPOL', '+25XP'], '#00e5ff');
     logSerialStatus('TOY_PWN', 'log-pwn');
+    announceSr('Simulated handshake captured for ' + target);
     renderCurrentState();
   }
 
@@ -497,6 +624,7 @@
     buzzer.peer();
     spawnFloatingGlyphs(['(^_^)', peerName, '+20XP'], '#ffb020');
     logSerialStatus('PEER', 'log-warn');
+    announceSr('Peer spotted: ' + peerName);
     renderCurrentState();
   }
 
@@ -505,6 +633,7 @@
     activeEnv = envId;
     savePref('env', envId);
     appendLog('RF_SIM', 'Switched airspace preset -> ' + sim.PRESETS[envId].label, 'log-cmd');
+    announceSr('Environment switched to ' + sim.PRESETS[envId].label);
     if (!gState.isScanning) {
       gState = logic.reduce(gState, { type: 'ButtonBPressed', nowMs: nowMs() });
       checkAndRunScanCycle();
@@ -586,7 +715,7 @@
         rawNetworks: snap.networks
       });
       if (sim.generateBleSnapshot) {
-        const bleSnap = sim.generateBleSnapshot(activeEnv, simSeed, t);
+        const bleSnap = sim.generateBleSnapshot(activeEnv, simSeed, t, { includeThreats: false });
         simSeed = bleSnap.nextSeed;
         gState = logic.reduce(gState, {
           type: 'BleScanCompleted',
@@ -800,7 +929,17 @@
     link.download = 'pwnagotchi-' + gState.petName + '.png';
     link.href = elScreen.toDataURL('image/png');
     link.click();
+    gState = logic.reduce(gState, {
+      type: 'CaptureSaved',
+      nowMs: nowMs(),
+      addedCount: 1,
+      path: 'downloads/' + link.download,
+      label: 'PNG Snapshot',
+      notify: true
+    });
+    persistHighScore();
     appendLog('SNAPSHOT', 'Saved crisp pixel PNG -> ' + link.download, 'log-cmd');
+    renderCurrentState(true);
   });
 
   let copyResetTimer = null;
@@ -896,7 +1035,8 @@
         '1': logic.ScreenPage.PetFace, petface: logic.ScreenPage.PetFace,
         '2': logic.ScreenPage.NearbyRadar, nearbyradar: logic.ScreenPage.NearbyRadar, radar: logic.ScreenPage.NearbyRadar,
         '3': logic.ScreenPage.ChannelSpectrum, channelspectrum: logic.ScreenPage.ChannelSpectrum, spectrum: logic.ScreenPage.ChannelSpectrum,
-        '4': logic.ScreenPage.RfGuard, rfguard: logic.ScreenPage.RfGuard, guard: logic.ScreenPage.RfGuard
+        '4': logic.ScreenPage.RfGuard, rfguard: logic.ScreenPage.RfGuard, guard: logic.ScreenPage.RfGuard,
+        '5': logic.ScreenPage.Captures, captures: logic.ScreenPage.Captures, storage: logic.ScreenPage.Captures
       };
       const resolved = pageMap[pg.toLowerCase()];
       if (resolved) {
@@ -1027,12 +1167,21 @@
   if (savedHi > 0) {
     gState = logic.reduce(gState, { type: 'SetHighScore', nowMs: 0, highScore: savedHi, xp: 0 });
   }
+  gState = logic.reduce(gState, {
+    type: 'CaptureSaved',
+    nowMs: 0,
+    addedCount: 0,
+    path: 'browser://localStorage/zeroday',
+    label: 'Web Toy Storage',
+    notify: false
+  });
 
   const SUBGHZ_BANDS = [315000, 433920, 868350, 915000];
   function triggerModeCycle() {
     gState = logic.reduce(gState, { type: 'CycleOpsMode', nowMs: nowMs() });
     buzzer.clickA();
     logSerialStatus('MODE', 'log-cmd');
+    announceSr('Ops mode: ' + logic.opsModeLabel(gState.opsMode, false));
     renderCurrentState(true);
   }
 
@@ -1042,13 +1191,14 @@
     gState = logic.reduce(gState, { type: 'SetSubGhzFreq', nowMs: nowMs(), freqKhz: nextFreq });
     buzzer.clickB();
     logSerialStatus('SUBGHZ', 'log-cmd');
+    announceSr('Sub-GHz tuned to ' + window.ZD.wifiAnalysis.formatFreqMhz(gState.subGhzFreqKhz));
     renderCurrentState(true);
   }
 
   function triggerGuardAlertSim() {
     const t = nowMs();
     if (sim.generateBleSnapshot) {
-      const bleSnap = sim.generateBleSnapshot('con', simSeed, t);
+      const bleSnap = sim.generateBleSnapshot('con', simSeed, t, { includeThreats: true });
       simSeed = bleSnap.nextSeed;
       gState = logic.reduce(gState, { type: 'BleScanCompleted', nowMs: t, devices: bleSnap.devices });
     }
@@ -1061,6 +1211,31 @@
     buzzer.peer();
     spawnFloatingGlyphs(['!ALERT', 'BLE', 'SUBGHZ'], '#ff5ca8');
     logSerialStatus('GUARD_ALERT', 'log-warn');
+    announceSr('Security guard alert: ' + (gState.lastThreatLabel || 'Threat detected'));
+    renderCurrentState(true);
+  }
+
+  function triggerBtScan() {
+    const t = nowMs();
+    if (sim.generateBleSnapshot) {
+      const bleSnap = sim.generateBleSnapshot(activeEnv, simSeed, t, { includeThreats: false });
+      simSeed = bleSnap.nextSeed;
+      gState = logic.reduce(gState, { type: 'BleScanCompleted', nowMs: t, devices: bleSnap.devices });
+    }
+    persistHighScore();
+    buzzer.clickB();
+    const count = gState.bleDevices ? gState.bleDevices.length : 0;
+    appendLog('BLE_SCAN', 'Swept ' + count + ' Bluetooth device(s) in ' + activeEnv, 'log-cmd');
+    announceSr('Bluetooth scan complete: ' + count + ' devices found');
+    activeDeviceTab = 'bt';
+    renderCurrentState(true);
+  }
+
+  function triggerClearThreat() {
+    gState = logic.reduce(gState, { type: 'ClearThreat', nowMs: nowMs() });
+    buzzer.clickA();
+    appendLog('ACK', 'Cleared active threat alert.');
+    announceSr('Threat alert cleared');
     renderCurrentState(true);
   }
 
@@ -1104,12 +1279,55 @@
       persistHighScore();
     });
   }
+  if (elActAck) {
+    elActAck.addEventListener('click', triggerClearThreat);
+  }
+  if (elActBtScan) {
+    elActBtScan.addEventListener('click', triggerBtScan);
+  }
+  function selectDeviceTab(tabKey, moveFocus) {
+    activeDeviceTab = tabKey === 'bt' ? 'bt' : 'wifi';
+    renderAirspaceDeviceList();
+    announceSr(activeDeviceTab === 'bt' ? 'Showing Bluetooth devices' : 'Showing WiFi access points');
+    if (moveFocus) {
+      const targetTab = activeDeviceTab === 'bt' ? elTabBt : elTabWifi;
+      if (targetTab && typeof targetTab.focus === 'function') {
+        targetTab.focus();
+      }
+    }
+  }
+  function handleDeviceTabKeydown(ev) {
+    if (!ev) return;
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+      ev.preventDefault();
+      selectDeviceTab(activeDeviceTab === 'wifi' ? 'bt' : 'wifi', true);
+    } else if (ev.key === 'Home') {
+      ev.preventDefault();
+      selectDeviceTab('wifi', true);
+    } else if (ev.key === 'End') {
+      ev.preventDefault();
+      selectDeviceTab('bt', true);
+    }
+  }
+  if (elTabWifi) {
+    elTabWifi.addEventListener('click', function () {
+      selectDeviceTab('wifi', false);
+    });
+    elTabWifi.addEventListener('keydown', handleDeviceTabKeydown);
+  }
+  if (elTabBt) {
+    elTabBt.addEventListener('click', function () {
+      selectDeviceTab('bt', false);
+    });
+    elTabBt.addEventListener('keydown', handleDeviceTabKeydown);
+  }
 
   // Battery controls & optional browser Battery API bridge
   elInputBat.addEventListener('input', function () {
     manualPowerOverride = true;
     batteryLevel = Number(elInputBat.value);
     elBatVal.textContent = batteryLevel + '%';
+    elInputBat.setAttribute('aria-valuetext', batteryLevel + '%');
   });
 
   elInputChg.addEventListener('change', function () {
@@ -1127,6 +1345,7 @@
           batteryCharging = Boolean(bat.charging);
           elInputBat.value = String(batteryLevel);
           elBatVal.textContent = batteryLevel + '%';
+          elInputBat.setAttribute('aria-valuetext', batteryLevel + '%');
           elInputChg.checked = batteryCharging;
         }
         syncHostBat();
@@ -1139,6 +1358,7 @@
   // Custom Beacon Injector Form
   elInputApRssi.addEventListener('input', function () {
     elApRssiLabel.textContent = elInputApRssi.value + 'dB';
+    elInputApRssi.setAttribute('aria-valuetext', elInputApRssi.value + ' dBm');
   });
 
   elBtnRandSsid.addEventListener('click', function () {
@@ -1191,15 +1411,13 @@
       case '?':
         appendLog(
           'HELP',
-          'Commands: scan | view [next|prev|1-4] | mode [recon|defense|offense] | subghz [next|315|433|868|915] | ble | ack | guard | link | theme [next|prev|<key>] | themes | score | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
+          'Commands: scan | view [next|prev|1-5] | captures | mode [recon|defense|offense] | subghz [next|315|433|868|915] | ble [scan] | bt [scan] | ack | guard | link | theme [next|prev|<key>] | themes | score | size <micro|compact|plus|epaper|wide> | env <cafe|con|lab|roam|quiet|bunker> | pwn | peer [name] | snack | boop | name <handle> | inject <ssid> [rssi] [ch] | ascii | status | clear'
         );
         break;
 
       case 'ack':
       case 'clear-threat':
-        gState = logic.reduce(gState, { type: 'ClearThreat', nowMs: nowMs() });
-        appendLog('ACK', 'Cleared active threat alert.');
-        renderCurrentState(true);
+        triggerClearThreat();
         break;
 
       case 'link':
@@ -1268,20 +1486,62 @@
         renderCurrentState(true);
         break;
 
-      case 'ble':
+      case '5':
+        gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.Captures });
+        buzzer.clickA();
+        renderCurrentState(true);
+        break;
+
+      case 'captures':
+      case 'storage':
         appendLog(
-          'BLE',
-          'BLE Devices: ' + (gState.bleDevices ? gState.bleDevices.length : 0) +
-          ' | Threats: ' + (gState.threatsDetected || 0)
+          'CAPTURES',
+          'Saved: ' + (gState.capturesSaved || 0) +
+          ' | Path: ' + (gState.capturePath || '') +
+          ' | Last: ' + (gState.lastCaptureLabel || 'None')
         );
         break;
+
+      case 'ble':
+      case 'bt': {
+        if (arg1.toLowerCase() === 'scan') {
+          triggerBtScan();
+          break;
+        }
+        const wifiUtil = window.ZD && window.ZD.wifiAnalysis;
+        const rawDevs = gState.bleDevices || [];
+        const sortedDevs = wifiUtil && wifiUtil.bleTargetsByStrength
+          ? wifiUtil.bleTargetsByStrength(rawDevs)
+          : rawDevs;
+        if (sortedDevs.length === 0) {
+          appendLog('BLE', 'No Bluetooth devices cached yet (run "ble scan" or "scan").');
+        } else {
+          const lines = sortedDevs.map(function (d) {
+            const v = wifiUtil && wifiUtil.bleVendorOrOuiLabel
+              ? wifiUtil.bleVendorOrOuiLabel(d.companyId, d.mac)
+              : (wifiUtil && wifiUtil.bleVendorLabel ? wifiUtil.bleVendorLabel(d.companyId) : '-');
+            const s = wifiUtil && wifiUtil.bleServiceLabel ? wifiUtil.bleServiceLabel(d.serviceUuid) : '-';
+            const st = wifiUtil && wifiUtil.bleThreatLabel ? wifiUtil.bleThreatLabel(d.threat) : 'OK';
+            return '  ' + String(d.mac || '-').padEnd(18, ' ') + ' ' +
+              String(d.name || '<unnamed>').slice(0, 18).padEnd(18, ' ') + ' ' +
+              String(d.rssi).padStart(4, ' ') + 'dBm  ' +
+              String(v).padEnd(10, ' ') + ' ' + String(s).padEnd(10, ' ') + ' ' + st;
+          });
+          appendLog('BLE', sortedDevs.length + ' Bluetooth device(s) (threats: ' + (gState.threatsDetected || 0) + '):\n' + lines.join('\n'));
+        }
+        break;
+      }
 
       case 'score':
       case 'level': {
         const lvl = logic.deriveLevelInfo(gState.xp);
         appendLog(
           'SCORE',
-          'Lv.' + lvl.level + ' ' + lvl.title + ' | XP:' + lvl.xp + ' | HighScore:' + (gState.highScore || 0)
+          'Lv.' + lvl.level + ' [' + lvl.badge + '] ' + lvl.title +
+          ' | XP:' + lvl.xp + '/' + lvl.nextXp + ' (' + lvl.progressPct + '%)' +
+          ' | HighScore:' + (gState.highScore || 0) +
+          (gState.highScoreBeaten ? ' (NEW RECORD!)' : '') +
+          ' | Captures:' + (gState.capturesSaved || 0)
         );
         break;
       }
@@ -1308,6 +1568,10 @@
           renderCurrentState(true);
         } else if (sub === '4' || sub === 'guard' || sub === 'rf') {
           gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.RfGuard });
+          buzzer.clickA();
+          renderCurrentState(true);
+        } else if (sub === '5' || sub === 'captures' || sub === 'storage' || sub === 'cap') {
+          gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.Captures });
           buzzer.clickA();
           renderCurrentState(true);
         } else {
@@ -1545,6 +1809,11 @@
       gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.RfGuard });
       buzzer.clickA();
       renderCurrentState(true);
+    } else if (k === '5') {
+      ev.preventDefault();
+      gState = logic.reduce(gState, { type: 'SetPage', nowMs: nowMs(), page: logic.ScreenPage.Captures });
+      buzzer.clickA();
+      renderCurrentState(true);
     } else if (k === 'f') {
       ev.preventDefault();
       triggerFeedSnack();
@@ -1566,6 +1835,9 @@
     } else if (k === 'c') {
       ev.preventDefault();
       triggerSubGhzCycle();
+    } else if (k === 'x') {
+      ev.preventDefault();
+      triggerClearThreat();
     }
   });
 

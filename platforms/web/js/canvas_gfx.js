@@ -737,302 +737,8 @@
     }
   }
 
-  function drawClassicFaceProps(gfx, frame) {
-    if (frame.dims.width < 160 || frame.dims.height < 72) return;
-    const g = frame.faceGeom;
-    const pal = frame.palette;
-    const animTick = frame.animTick >>> 0;
-    const tipCol = (animTick & 1) !== 0 ? pal.highlight : pal.accent;
-
-    const antW = frame.compact ? 2 : 3;
-    const antH = frame.compact ? 4 : 6;
-    const antY = g.centerY - g.bracketHalfHeight + 2;
-    const lAntX = g.centerX - g.bracketOffsetX - antW;
-    const rAntX = g.centerX + g.bracketOffsetX;
-    if (lAntX >= 2 && rAntX + antW < frame.dims.width - 2 && antY > frame.headerDividerY + 2) {
-      gfx.fillRect(lAntX, antY, antW, antH, pal.accent);
-      gfx.fillRect(lAntX + Math.trunc(antW / 2), antY - 2, 1, 2, pal.fg);
-      gfx.fillRect(lAntX + Math.trunc(antW / 2) - 1, antY - 3, 2, 2, tipCol);
-
-      gfx.fillRect(rAntX, antY, antW, antH, pal.accent);
-      gfx.fillRect(rAntX + Math.trunc(antW / 2), antY - 2, 1, 2, pal.fg);
-      gfx.fillRect(rAntX + Math.trunc(antW / 2), antY - 3, 2, 2, tipCol);
-    }
-
-    if (frame.compact || frame.dims.width < 220) return;
-    const p = frame.dims.width >= 300 && frame.dims.height >= 180 ? 2 : 1;
-    const lx = g.centerX - g.bracketOffsetX - 13 * p - 6;
-    const ly = g.centerY - 3 * p;
-    if (lx >= 4 && ly + 9 * p < g.moodBadgeY) {
-      gfx.fillRect(lx + p, ly, 9 * p, 6 * p, pal.accent);
-      gfx.fillRect(lx + 2 * p, ly + p, 7 * p, 4 * p, pal.bg);
-      gfx.fillRect(lx + 3 * p, ly + 2 * p, 4 * p, p, pal.fg);
-      gfx.fillRect(lx + 3 * p, ly + 4 * p, ((animTick & 1) ? 5 : 3) * p, p, pal.highlight);
-      gfx.fillRect(lx, ly + 6 * p, 11 * p, 2 * p, pal.fg);
-    }
-    const rx = g.centerX + g.bracketOffsetX + 7;
-    const ry = g.centerY - 4 * p;
-    const rw = 14 * p;
-    const rh = 11 * p;
-    if (rx + rw <= frame.dims.width - 4 && ry + rh < g.moodBadgeY) {
-      if (frame.scene === 'RadarDish' || frame.face.moodLabel.charAt(0) === 'D') {
-        drawPixelArtDish(gfx, rx, ry, rw, rh, pal, animTick);
-      } else if (frame.scene === 'SatelliteBeam') {
-        drawPixelArtSatellite(gfx, rx, ry, rw, rh, pal, animTick);
-      } else if (frame.scene === 'ThreatShield') {
-        drawPixelArtShield(gfx, rx, ry, 12 * p, rh, pal, animTick, Boolean(frame.threatBanner));
-      } else {
-        gfx.fillRect(rx, ry + 9 * p, 12 * p, 2 * p, pal.accent);
-        for (let i = 0; i < 4; i++) {
-          const lv = ((animTick + i) % 4) + 1;
-          const bh = lv * 2 * p;
-          gfx.fillRect(rx + i * 3 * p + p, ry + 9 * p - bh, 2 * p, bh, lv >= 4 ? pal.highlight : pal.fg);
-        }
-      }
-    }
-  }
-
-  function drawMascotEyes(gfx, cx, cy, px, style, pal, animTick) {
-    const r = function (gx, gy, gw, gh, col) {
-      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
-    };
-
-    switch (style) {
-      case logic.EyeGlyph.RoundCenter:
-        r(-5, -5, 3, 3, pal.fg); r(-5, -5, 1, 1, pal.bg);
-        r(2, -5, 3, 3, pal.fg); r(2, -5, 1, 1, pal.bg);
-        break;
-      case logic.EyeGlyph.RoundLeft:
-        r(-6, -5, 3, 3, pal.fg); r(-6, -5, 1, 1, pal.bg);
-        r(1, -5, 3, 3, pal.fg); r(1, -5, 1, 1, pal.bg);
-        break;
-      case logic.EyeGlyph.RoundRight:
-        r(-4, -5, 3, 3, pal.fg); r(-4, -5, 1, 1, pal.bg);
-        r(3, -5, 3, 3, pal.fg); r(3, -5, 1, 1, pal.bg);
-        break;
-      case logic.EyeGlyph.HappyArc:
-        r(-5, -3, 1, 1, pal.fg); r(-4, -4, 1, 1, pal.fg); r(-3, -3, 1, 1, pal.fg);
-        r(2, -3, 1, 1, pal.fg); r(3, -4, 1, 1, pal.fg); r(4, -3, 1, 1, pal.fg);
-        break;
-      case logic.EyeGlyph.WideSparkle:
-        r(-6, -5, 4, 3, pal.fg); r(-5, -4, 2, 1, pal.bg); r(-5, -4, 1, 1, pal.highlight);
-        r(2, -5, 4, 3, pal.fg); r(3, -4, 2, 1, pal.bg); r(4, -4, 1, 1, pal.highlight);
-        break;
-      case logic.EyeGlyph.Sunglasses:
-        r(-6, -5, 5, 3, pal.fg); r(-5, -5, 1, 1, pal.bg);
-        r(1, -5, 5, 3, pal.fg); r(2, -5, 1, 1, pal.bg);
-        r(-1, -5, 2, 1, pal.fg);
-        break;
-      case logic.EyeGlyph.SadDroop:
-        r(-6, -6, 2, 1, pal.fg); r(-5, -5, 2, 3, pal.fg);
-        r(4, -6, 2, 1, pal.fg); r(3, -5, 2, 3, pal.fg);
-        break;
-      case logic.EyeGlyph.HalfLid:
-        r(-5, -4, 3, 1, pal.fg); r(-5, -3, 2, 1, pal.accent);
-        r(2, -4, 3, 1, pal.fg); r(3, -3, 2, 1, pal.accent);
-        break;
-      case logic.EyeGlyph.SleepingLine:
-        r(-5, -3, 3, 1, pal.fg);
-        r(2, -3, 3, 1, pal.fg);
-        break;
-      case logic.EyeGlyph.CyberWink:
-        r(-5, -5, 1, 1, pal.fg); r(-4, -4, 1, 1, pal.fg); r(-5, -3, 1, 1, pal.fg);
-        r(2, -5, 3, 3, pal.fg); r(3, -4, 1, 1, pal.highlight);
-        break;
-      case logic.EyeGlyph.LaserVisor: {
-        r(-6, -4, 12, 2, pal.fg);
-        const lx = -5 + ((animTick * 2) % 9);
-        r(lx, -4, 2, 2, pal.highlight);
-        break;
-      }
-      case logic.EyeGlyph.ShieldVisor:
-        r(-6, -5, 5, 3, pal.fg); r(-5, -4, 3, 1, pal.bg); r(-4, -4, 1, 1, pal.accent);
-        r(1, -5, 5, 3, pal.fg); r(2, -4, 3, 1, pal.bg); r(3, -4, 1, 1, pal.accent);
-        break;
-      case logic.EyeGlyph.StarEyes: {
-        const sc = (animTick & 1) !== 0 ? pal.highlight : pal.fg;
-        r(-5, -4, 3, 1, sc); r(-4, -5, 1, 3, sc);
-        r(2, -4, 3, 1, sc); r(3, -5, 1, 3, sc);
-        break;
-      }
-      case logic.EyeGlyph.AlertRing:
-        r(-5, -5, 3, 3, pal.highlight);
-        r(-4, -4, 1, 1, (animTick & 1) === 0 ? pal.fg : pal.bg);
-        r(2, -5, 3, 3, pal.highlight);
-        r(3, -4, 1, 1, (animTick & 1) === 0 ? pal.fg : pal.bg);
-        break;
-    }
-  }
-
-  function drawMascotMouth(gfx, cx, cy, px, mouth, pal) {
-    const r = function (gx, gy, gw, gh, col) {
-      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
-    };
-
-    switch (mouth) {
-      case logic.MouthGlyph.DoubleSmile:
-        r(-3, 0, 2, 1, pal.fg); r(-1, -1, 2, 1, pal.fg); r(1, 0, 2, 1, pal.fg);
-        break;
-      case logic.MouthGlyph.BigGrin:
-        r(-3, -1, 6, 1, pal.fg); r(-2, 0, 4, 2, pal.fg); r(-1, 0, 2, 1, pal.highlight);
-        break;
-      case logic.MouthGlyph.Smirk:
-        r(-3, 0, 5, 1, pal.fg); r(2, -1, 1, 1, pal.fg);
-        break;
-      case logic.MouthGlyph.FlatLine:
-        r(-3, 0, 6, 1, pal.fg);
-        break;
-      case logic.MouthGlyph.SadWave:
-        r(-2, 0, 4, 1, pal.fg); r(-3, 1, 1, 1, pal.fg); r(2, 1, 1, 1, pal.fg);
-        break;
-      case logic.MouthGlyph.Fangs:
-        r(-3, 0, 6, 1, pal.fg); r(-3, 1, 1, 1, pal.fg); r(2, 1, 1, 1, pal.fg);
-        break;
-    }
-  }
-
-  function drawPixelArtMascot(gfx, frame, opts) {
-    const g = frame.faceGeom;
-    const pal = frame.palette;
-    const f = frame.face;
-    const animTick = frame.animTick >>> 0;
-    const blink = Boolean(opts && opts.blink) && canBlinkStyle(f.eyes);
-    const eyeStyle = blink ? logic.EyeGlyph.SleepingLine : f.eyes;
-
-    const micro = frame.dims.width < 150 || frame.dims.height < 72;
-    const wide = frame.dims.width >= 300 && frame.dims.height >= 180;
-    const px = micro || frame.compact ? 1 : wide ? 3 : 2;
-    const cx = g.centerX;
-    const cy = g.centerY;
-
-    const r = function (gx, gy, gw, gh, col) {
-      gfx.fillRect(cx + gx * px, cy + gy * px, gw * px, gh * px, col);
-    };
-
-    // Ears & antenna
-    r(-7, -9, 2, 2, pal.fg); r(-6, -10, 1, 1, pal.accent);
-    r(5, -9, 2, 2, pal.fg); r(5, -10, 1, 1, pal.accent);
-    r(0, -9, 1, 2, pal.accent);
-    r(-1, -10, 3, 1, (animTick & 1) !== 0 ? pal.highlight : pal.fg);
-
-    // Headphones & head chassis
-    r(-10, -5, 2, 5, pal.accent); r(-11, -4, 1, 3, pal.highlight);
-    r(8, -5, 2, 5, pal.accent); r(10, -4, 1, 3, pal.highlight);
-    r(-8, -7, 16, 10, pal.fg);
-    r(-8, -7, 1, 1, pal.bg); r(7, -7, 1, 1, pal.bg);
-    r(-8, 2, 1, 1, pal.bg); r(7, 2, 1, 1, pal.bg);
-    r(-7, -6, 14, 8, pal.bg);
-
-    drawMascotEyes(gfx, cx, cy, px, eyeStyle, pal, animTick);
-    drawMascotMouth(gfx, cx, cy, px, f.mouth, pal);
-
-    if (f.showBlush) {
-      r(-6, -1, 2, 1, pal.highlight);
-      r(4, -1, 2, 1, pal.highlight);
-    }
-    if (f.showTear) {
-      r(5, -2, 1, 2, pal.accent);
-    }
-    if (f.showZzz) {
-      r(9, -9, 3, 1, pal.accent);
-      r(10, -8, 1, 1, pal.accent);
-      r(9, -7, 3, 1, pal.accent);
-    }
-
-    // Torso, core LED, feet & paws
-    r(-6, 3, 12, 6, pal.accent);
-    r(-4, 4, 8, 4, pal.bg);
-    r(-1, 5, 2, 2, (animTick & 1) !== 0 ? pal.highlight : pal.fg);
-    r(-5, 9, 3, 2, pal.fg);
-    r(2, 9, 3, 2, pal.fg);
-
-    const pawLift = (animTick & 1) !== 0 ? 0 : 1;
-    r(-8, 5 + pawLift, 2, 2, pal.fg);
-    r(6, 6 - pawLift, 2, 2, pal.fg);
-
-    // Left prop: hacker terminal
-    r(-26, -1, 11, 7, pal.accent);
-    r(-25, 0, 9, 5, pal.bg);
-    r(-24, 1, 5, 1, pal.fg);
-    r(-24, 3, (animTick & 1) !== 0 ? 7 : 4, 1, pal.highlight);
-    r(-27, 6, 13, 3, pal.fg);
-    r(-25, 7, 9, 1, pal.muted);
-    r(-25, 9, 2, 2, pal.muted);
-    r(-17, 9, 2, 2, pal.muted);
-
-    // Right prop: mood/mode-reactive RF gear
-    const isScanningScene =
-      frame.scene === 'RadarDish' ||
-      f.eyes === logic.EyeGlyph.RoundLeft ||
-      f.eyes === logic.EyeGlyph.RoundRight;
-    const isOffenseScene = frame.scene === 'SatelliteBeam';
-    const isDefenseScene =
-      frame.scene === 'ThreatShield' || f.eyes === logic.EyeGlyph.AlertRing;
-
-    if (isScanningScene) {
-      r(16, 8, 1, 3, pal.accent);
-      r(20, 8, 1, 3, pal.accent);
-      r(17, 7, 3, 1, pal.accent);
-      const tilt = animTick % 3 === 1 ? 1 : 0;
-      r(15, 2 + tilt, 2, 4, pal.fg);
-      r(17, 4 + tilt, 3, 3, pal.fg);
-      r(19, 6 + tilt, 3, 1, pal.fg);
-      r(18, 2 + tilt, 1, 2, pal.accent);
-      r(19, 1 + tilt, 2, 2, pal.highlight);
-      const wavePhase = animTick % 3;
-      r(22, 0, 1, 2, wavePhase === 0 ? pal.highlight : pal.accent);
-      r(24, -2, 1, 3, wavePhase === 1 ? pal.highlight : pal.accent);
-      r(26, -4, 1, 4, wavePhase === 2 ? pal.highlight : pal.accent);
-    } else if (isOffenseScene) {
-      r(15, 7, 10, 4, pal.accent);
-      r(17, 8, 6, 2, pal.fg);
-      r(19, -9, 3, 3, pal.fg);
-      r(15, -8, 4, 2, pal.accent);
-      r(22, -8, 4, 2, pal.accent);
-      r(20, -6, 1, 13, pal.muted);
-      const pulseY = -5 + ((animTick * 2) % 10);
-      r(20, pulseY, 1, 2, pal.highlight);
-    } else if (isDefenseScene) {
-      const alertActive = Boolean(frame.threatBanner) || f.eyes === logic.EyeGlyph.AlertRing;
-      const shieldCol = alertActive ? pal.highlight : pal.accent;
-      r(15, -1, 10, 9, shieldCol);
-      r(17, 8, 6, 2, shieldCol);
-      r(19, 10, 2, 1, shieldCol);
-      r(17, 1, 6, 6, pal.bg);
-      const sx = (animTick & 1) !== 0 ? 20 : 18;
-      const sy = (animTick & 2) !== 0 ? 4 : 2;
-      r(sx, sy, 2, 2, alertActive ? pal.highlight : pal.fg);
-    } else if (f.showZzz) {
-      r(14, 6, 12, 4, pal.accent);
-      r(15, 7, 10, 2, pal.bg);
-      const fill = 2 + (animTick % 3) * 3;
-      r(16, 7, fill, 2, pal.fg);
-      r(18, 1, 3, 1, pal.accent);
-      r(19, 2, 1, 1, pal.accent);
-      r(18, 3, 3, 1, pal.accent);
-    } else {
-      r(14, 7, 12, 4, pal.accent);
-      r(15, 8, 10, 2, pal.bg);
-      for (let i = 0; i < 4; i++) {
-        const bh = 2 + ((animTick + i) % 4) * 2;
-        r(15 + i * 3, 7 - bh, 2, bh, bh >= 8 ? pal.highlight : pal.fg);
-      }
-    }
-
-    const badge = '[' + f.moodLabel + ']';
-    const badgeW = badge.length * 6;
-    gfx.setTextColor(pal.accent, pal.bg);
-    gfx.drawString(badge, Math.max(2, g.centerX - Math.trunc(badgeW / 2)), g.moodBadgeY);
-  }
-
   function drawPetFacePage(gfx, frame, opts) {
-    if (frame.faceStyle === 'PixelArtMascot') {
-      drawPixelArtMascot(gfx, frame, opts);
-    } else {
-      drawPwnagotchiFace(gfx, frame, opts);
-      drawClassicFaceProps(gfx, frame);
-    }
-    drawActivitySceneWidget(gfx, frame);
+    drawPwnagotchiFace(gfx, frame, opts);
 
     gfx.setTextColor(frame.palette.accent, frame.palette.bg);
     gfx.drawString(frame.promptLabel, frame.speechX, frame.speechTopY);
@@ -1073,7 +779,8 @@
       }
 
       if (frame.spotlightLabel && frame.spotlightLabel.length > 0) {
-        const spotCol = frame.threatBanner ? frame.palette.highlight : frame.palette.accent;
+        const spotCol =
+          frame.notifyActive || frame.threatBanner ? frame.palette.highlight : frame.palette.accent;
         gfx.setTextColor(spotCol, frame.palette.bg);
         if (wide) {
           gfx.drawString(frame.spotlightLabel, padX, frame.footerDividerY - 11);
@@ -1139,12 +846,20 @@
       if (bar.heightPx > 0) {
         gfx.fillRect(bx, frame.chartBaseY - bar.heightPx, barW, bar.heightPx, frame.palette.fg);
       }
-      const showLabel = frame.compact
-        ? bar.channel === 1 || bar.channel === 6 || bar.channel === 11 || bar.channel === 13
-        : bar.channel % 2 === 1;
+      const is5g = bar.channel >= 36;
+      const showLabel = is5g
+        ? (frame.compact
+            ? bar.channel === 36 || bar.channel === 100 || bar.channel === 149
+            : bar.channel === 36 || bar.channel === 52 || bar.channel === 100 || bar.channel === 132 || bar.channel === 157)
+        : (frame.compact
+            ? bar.channel === 1 || bar.channel === 6 || bar.channel === 11 || bar.channel === 13
+            : bar.channel % 2 === 1);
       if (showLabel) {
+        const lbl = String(bar.channel);
+        const maxX = Math.max(0, frame.dims.width - lbl.length * 6 - 1);
+        const lx = Math.min(bx, maxX);
         gfx.setTextColor(frame.palette.accent, frame.palette.bg);
-        gfx.drawString(String(bar.channel), bx, frame.chartBaseY + (frame.dims.height < 72 ? 1 : 2));
+        gfx.drawString(lbl, lx, frame.chartBaseY + (frame.dims.height < 72 ? 1 : 2));
       }
     }
   }
@@ -1180,6 +895,53 @@
       gfx.drawString(row.details, frame.dims.width - detailW - 4, y);
       y += rowStep;
     }
+  }
+
+  function drawCapturesPage(gfx, frame) {
+    const startY = frame.headerDividerY + (frame.compact ? 2 : 5);
+    gfx.setTextColor(frame.palette.accent, frame.palette.bg);
+    gfx.drawString(frame.captureSummary || '', 4, startY);
+
+    if (!frame.compact && startY + 11 < frame.footerDividerY) {
+      gfx.drawLine(4, startY + 10, frame.dims.width - 5, startY + 10, frame.palette.muted);
+    }
+
+    const rowStep = frame.compact ? 9 : 14;
+    let y = startY + (frame.compact ? 11 : 16);
+    const rows = frame.captureRows || [];
+    for (let i = 0; i < rows.length; i++) {
+      if (y + 8 > frame.footerDividerY - 1) break;
+      const row = rows[i];
+      const isLast = row.indexOf('LAST:') === 0;
+      gfx.setTextColor(isLast ? frame.palette.accent : frame.palette.fg, frame.palette.bg);
+      gfx.drawString(row, 4, y);
+      y += rowStep;
+    }
+  }
+
+  function drawNotificationStrip(gfx, frame) {
+    if (!frame.notifyActive || !frame.notifyBanner) return;
+    if (!frame.compact && frame.page === logic.ScreenPage.PetFace) return;
+    const pillH = 10;
+    const pillY = frame.footerDividerY - pillH;
+    if (pillY <= frame.headerDividerY + 1 || frame.dims.width < 12) return;
+    const bgCol =
+      frame.notifyKind === logic.NotifyKind.ThreatAlert
+        ? frame.palette.highlight
+        : frame.palette.accent;
+    gfx.fillRect(2, pillY, frame.dims.width - 4, pillH, bgCol);
+    gfx.setTextColor(frame.palette.bg, bgCol);
+    const maxCols = Math.max(4, Math.floor((frame.dims.width - 8) / 6));
+    const clipped = uiTruncate(frame.notifyBanner, maxCols);
+    gfx.drawString(clipped, 4, pillY + 1);
+  }
+
+  function uiTruncate(text, maxChars) {
+    const s = String(text || '');
+    if (maxChars <= 0) return '';
+    if (s.length <= maxChars) return s;
+    if (maxChars <= 2) return s.slice(0, maxChars);
+    return s.slice(0, maxChars - 2) + '..';
   }
 
   function drawDigitalRainBackdrop(gfx, frame) {
@@ -1433,7 +1195,12 @@
       case logic.ScreenPage.RfGuard:
         drawRfGuardPage(gfx, frame);
         break;
+      case logic.ScreenPage.Captures:
+        drawCapturesPage(gfx, frame);
+        break;
     }
+
+    drawNotificationStrip(gfx, frame);
 
     // Bottom status bar
     gfx.drawLine(0, frame.footerDividerY, frame.dims.width - 1, frame.footerDividerY, frame.palette.muted);

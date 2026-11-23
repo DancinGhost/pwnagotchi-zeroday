@@ -17,6 +17,7 @@
 #include <QListWidget>
 #include <QMainWindow>
 #include <QPushButton>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -50,18 +51,23 @@ private slots:
     void onToggleRecord();
     void onSelectPcap();
     void onExportReport();
+    void onExportHandshakes();
     void onBleScan();
+    void onToggleSubGhz();
+    void onToggleWardrive();
     void onClearThreat();
     void onTrustSelected();
     void onFilterChanged();
     void onAuthToggled(bool on);
     void onAllowSelected();
     void onDeauthSelected();
+    void onPmkidSelected();
 
 private:
     static constexpr ScreenDimensions kPetDims{240, 135};
 
     void refreshNetworks(bool force = false);
+    void refreshBluetooth(bool force = false);
     void refreshStations(bool force = false);
     void refreshRfGuard(bool force = false);
     void refreshAlerts();
@@ -82,25 +88,37 @@ private:
     QLineEdit* filterEdit_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QTableWidget* table_ = nullptr;
+    QTableWidget* bleTable_ = nullptr;
     QTableWidget* stationsTable_ = nullptr;
     QTableWidget* rfGuardTable_ = nullptr;
     QListWidget* alerts_ = nullptr;
     QCheckBox* authCheck_ = nullptr;
     QCheckBox* freezeSortCheck_ = nullptr;
     QCheckBox* hopCheck_ = nullptr;
+    QCheckBox* hop5GhzCheck_ = nullptr;
+    QCheckBox* adaptiveHopCheck_ = nullptr;
+    QCheckBox* bleAutoCheck_ = nullptr;
+    QCheckBox* notifyCheck_ = nullptr;
+    QCheckBox* hotkeysCheck_ = nullptr;
     QPushButton* monitorBtn_ = nullptr;
     QPushButton* modeBtn_ = nullptr;
     QPushButton* recordBtn_ = nullptr;
+    QPushButton* hc22000Btn_ = nullptr;
+    QPushButton* wardriveBtn_ = nullptr;
     QPushButton* bleBtn_ = nullptr;
+    QPushButton* subGhzBtn_ = nullptr;
     QPushButton* clearThreatBtn_ = nullptr;
     QSpinBox* channelSpin_ = nullptr;
     QPushButton* channelBtn_ = nullptr;
     QPushButton* deauthBtn_ = nullptr;
+    QPushButton* pmkidBtn_ = nullptr;
     QTimer* timer_ = nullptr;
+    std::vector<QShortcut*> singleKeyShortcuts_;
     std::vector<sec::WifiTarget> displayedTargets_;
     std::uint32_t lastTotalAlerts_ = 0;
     std::uint32_t lastTableRefreshMs_ = 0;
     std::uint64_t lastNetworksRev_ = UINT64_MAX;
+    std::uint64_t lastBleRev_ = UINT64_MAX;
     std::uint64_t lastStationsRev_ = UINT64_MAX;
     std::uint64_t lastRfGuardRev_ = UINT64_MAX;
     std::uint64_t lastChannelsRev_ = UINT64_MAX;
